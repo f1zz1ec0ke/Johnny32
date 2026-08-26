@@ -25,6 +25,15 @@ pub const FIRST_NIGHT_PHASE: u8 = 12;
 pub const ISLAND_X: i32 = 0x121;
 pub const ISLAND_Y: i32 = 0x117;
 
+/// The scene table's "no script" marker, in the ADS file id at `+0x0F`.
+pub const NO_ADS_FILE: u8 = 0xFF;
+
+/// How long a script-less entry holds Johnny still. Its `cost` is 5, and the
+/// chooser prices scenes in it, so a few seconds is the shape of it.
+fn idle_ticks(scene: &Scene) -> u32 {
+    scene.cost.max(1) as u32 * TICKS_PER_SECOND
+}
+
 /// The story runs for eleven days and then wraps (`seg4:0x0BC8`).
 pub const STORY_DAYS: u8 = 11;
 
@@ -96,6 +105,8 @@ impl Holiday {
 /// What Johnny is doing right now.
 enum Activity {
     Idle,
+    /// Standing about, for one of the table's script-less entries.
+    Idling { until: u32 },
     /// Following one walk path towards `target`.
     Walking {
         step: &'static WalkStep,
@@ -272,6 +283,10 @@ pub struct Director {
     walk_frames: Option<Rc<Vec<Frame>>>,
     /// The sea, the island and the surf. `None` until the first tick loads it.
     scenery: Option<Scenery>,
+    /// Whether the backdrop on show is the night one, so nightfall can be
+    /// noticed. `NIGHT.SCR` replaces the oceans from phase 12 (`seg3:0x01EE`),
+    /// and the backdrop is only rebuilt between scenes.
+    scenery_night: bool,
     /// The background generation the island backdrop was written at. While
     /// the stage still reports it, the island is what is on show and the surf
     /// may keep repainting it; once a scene loads its own backdrop the number
@@ -296,6 +311,7 @@ impl Director {
             programs: HashMap::new(),
             walk_frames: None,
             scenery: None,
+            scenery_night: false,
             scenery_gen: 0,
             tick: 0,
             log: Vec::new(),
@@ -414,6 +430,17 @@ impl Director {
             .find(|(id, _)| *id == scene.ads)
             .map(|(_, n)| *n);
         let Some(file) = file else {
+            // ADS file 0xFF is the table's "no script". Fourteen entries carry
+            // it, one per position, all weight 1 and cost 5, all with `from`
+            // and `to` the same place: Johnny stays where he is and does
+            // nothing for a moment. That is the scene, not a gap in it.
+            if scene.ads == NO_ADS_FILE {
+                self.note(format!("idle at {:?} for {} ticks", self.position, idle_ticks(scene)));
+                self.activity = Activity::Idling {
+                    until: self.tick + idle_ticks(scene),
+                };
+                return;
+            }
             self.note(format!("scene id {} has no ADS file", scene.id));
             return;
         };
@@ -516,7 +543,8 @@ impl Director {
             }
         }
         let roll = self.rng.next_u32();
-        match Scenery::build(archive, self.is_night(), roll, self.tick) {
+        self.scenery_night = self.is_night();
+        match Scenery::build(archive, self.scenery_night, roll, self.tick) {
             Some(s) => {
                 self.note(format!(
                     "scenery: {}{}",
@@ -549,6 +577,10 @@ impl Director {
         let surf = self.step_surf();
         surf | match std::mem::replace(&mut self.activity, Activity::Idle) {
             Activity::Idle => {
+                // Night fell, or day broke, while the last scene was running.
+                if self.scenery.is_some() && self.is_night() != self.scenery_night {
+                    self.load_scenery(archive);
+                }
                 // Offer the day's story scene first, then an ordinary one.
                 let scene = self
                     .choose_story()
@@ -557,6 +589,12 @@ impl Director {
                 match scene {
                     Some(s) => self.begin_scene(archive, s),
                     None => self.note("nothing playable this phase".into()),
+                }
+                false
+            }
+            Activity::Idling { until } => {
+                if self.tick < until {
+                    self.activity = Activity::Idling { until };
                 }
                 false
             }
