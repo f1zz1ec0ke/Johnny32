@@ -35,7 +35,7 @@ const ISLAND: [(usize, i32, i32, bool); 6] = [
     (0, 0x121, 0x117, true),  // seg3:0x0270 -- the island itself, 280x52
     (1, 0x0FA, 0x12F, false), // seg3:0x0293 -- 384x69
     (2, 0x097, 0x148, false), // seg3:0x02B0 -- 64x30
-    (14, 0x18D, 0x117, true), // seg3:0x02EA -- the scrub, 104x28
+    (14, 0x18D, 0x117, true), // seg3:0x02EA -- a starfish and two shells
     (13, 0x1BB, 0x094, true), // seg3:0x0307 -- the palm trunk, 24x145
     (12, 0x16E, 0x07A, true), // seg3:0x0324 -- the fronds, 152x69
 ];
@@ -206,6 +206,34 @@ pub fn raft_frame(day: u8) -> usize {
 /// them. `seg3:0x01F5` draws `rand() % 3`.
 pub const SEAS: [&str; 3] = ["OCEAN00.SCR", "OCEAN01.SCR", "OCEAN02.SCR"];
 pub const NIGHT_SEA: &str = "NIGHT.SCR";
+
+/// Where the island's origin sits on screen.
+///
+/// Everything segment 3 draws is placed relative to `ds:0x30C6`/`ds:0x30C4`,
+/// and the offsets are all written against a nominal (0x121, 0x117). This is
+/// the correction from that nominal anchor to where the island actually goes.
+///
+/// `ISLETEMP.SCR` settles it: it is a render of this very composition, and
+/// matching each piece against it finds the island at 96%, the palm trunk at
+/// 95% and the fronds at 90% -- each one pixel to the left of the nominal
+/// anchor, all three agreeing.
+const ORIGIN: (i32, i32) = (-1, 0);
+
+/// Whether the shells go on the beach.
+///
+/// `seg3:0x02EA` draws `BACKGRND.BMP` frame 14 -- a starfish and two shells --
+/// at (397, 279), unconditionally, right on the island's white patch. But
+/// `ISLETEMP.SCR`, which is a 96% render of everything else in this
+/// composition, does not have them, and searching the whole image finds them
+/// nowhere in it. Compositing with them scores 76.6% against that reference
+/// and without them 81.1%.
+///
+/// So the code says draw them and the game's own picture of its island says
+/// otherwise. The port sides with the picture, and `JC_FAITHFUL=1` sides with
+/// the code, so the disagreement stays visible instead of being buried.
+fn draw_shells() -> bool {
+    std::env::var_os("JC_FAITHFUL").is_some()
+}
 
 /// The colour the sea's unused index is shown as.
 ///
@@ -419,14 +447,17 @@ impl Scenery {
                 if !always && !rock {
                     continue;
                 }
+                if frame == 14 && !draw_shells() {
+                    continue;
+                }
                 if let Some(f) = self.pieces.get(frame) {
-                    surface.draw_sprite(f, x, y, Mirror::default());
+                    surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
                 }
             }
             if !self.backdrop.no_raft {
                 if let Some(f) = self.raft.as_ref() {
                     let (x, y) = RAFT_AT[rock as usize];
-                    surface.draw_sprite(f, x, y, Mirror::default());
+                    surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
                 }
             }
         } else {
@@ -620,7 +651,7 @@ impl Scenery {
         for &(x, y, first, counter) in SURF.iter() {
             let frame = first + self.counters[counter] as usize;
             if let Some(f) = self.pieces.get(frame) {
-                surface.draw_sprite(f, x, y, Mirror::default());
+                surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
             }
         }
         for w in self.waves.iter() {

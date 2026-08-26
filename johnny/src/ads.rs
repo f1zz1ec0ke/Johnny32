@@ -311,6 +311,15 @@ pub struct Sequencer {
     pub labels: BTreeMap<u16, String>,
     pc: usize,
     pub states: BTreeMap<(u16, u16), SceneState>,
+    /// Scenes that have reached the running state at least once.
+    ///
+    /// State 4 lasts a single pass, and the scripts start two or three scenes
+    /// together and then branch on whichever of them ends. A sequence that
+    /// could only ever catch the pass a scene ends on would have to service
+    /// them in the order its blocks are written, which turns concurrent
+    /// scenes into alternating ones. Remembering that a scene has run lets a
+    /// block fire late.
+    ran: std::collections::BTreeSet<(u16, u16)>,
     pub todo_seen: BTreeMap<u16, usize>,
 }
 
@@ -331,6 +340,7 @@ impl Sequencer {
                 .unwrap_or_default(),
             pc: 0,
             states: BTreeMap::new(),
+            ran: Default::default(),
             todo_seen: BTreeMap::new(),
         })
     }
@@ -368,7 +378,8 @@ impl Sequencer {
             Cond::NotFinished => !known || s != SceneState::Finished,
             Cond::NotStarted => !known || s == SceneState::Idle,
             Cond::Started => known && s != SceneState::Idle,
-            Cond::Running => known && s == SceneState::Running,
+            // Running now, or having run at some point -- see `ran`.
+            Cond::Running => (known && s == SceneState::Running) || self.ran.contains(&(ttm, scene)),
             // `seg10:0x136F`: no record, state 4 or state 0. Not "idle" so
             // much as "not waiting its turn" -- it is true of a scene that is
             // playing right now as well as one that has been and gone.
@@ -555,6 +566,7 @@ impl Sequencer {
     fn begin(&mut self, ttm: u16, scene: u16, flags: u16) -> Option<Action> {
         let file = self.files.get(&ttm)?.clone();
         let repeat = Repeat::from_flags(flags);
+        self.ran.remove(&(ttm, scene));
         self.states.insert((ttm, scene), repeat.state());
         Some(Action::Play {
             file,
@@ -567,6 +579,9 @@ impl Sequencer {
     /// how it hands the state back. `seg10:0x1D2B` onwards is the only place
     /// states 1, 2, 3 and 4 ever change.
     pub fn set_state(&mut self, ttm: u16, scene: u16, state: SceneState) {
+        if state == SceneState::Running {
+            self.ran.insert((ttm, scene));
+        }
         self.states.insert((ttm, scene), state);
     }
 

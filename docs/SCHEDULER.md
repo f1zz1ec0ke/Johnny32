@@ -245,6 +245,70 @@ mean "between frames" rather than "once": `seg10:0x1980` compares the
 instance's deadline at +0x37 with the tick counter, and when it passes, pushes
 the deadline forward by the delay again before running the frame.
 
+### `ISLETEMP.SCR` is a render of the island, and that makes it an oracle
+
+The backdrop 32 of the 41 scripts load is not a hand-painted approximation of
+the island — it is a picture of this exact composition. Match each piece
+against it and the numbers are unmistakable:
+
+| Piece | Best match | Where |
+| --- | --- | --- |
+| frame 0, the island | **96%** | one pixel left of the nominal anchor |
+| frame 13, the palm trunk | **95%** | same offset |
+| frame 12, the fronds | **90%** | same offset |
+| surf 3, 6, 9 at phase 0 | 54-75% | same offset |
+| surf 3, 6, 9 at phase 1 or 2 | lower, and scattered | — |
+
+All three solid pieces agree on the same one-pixel correction, and only the
+phase-0 surf frames match, which says the render was taken with the counters
+at zero. `ds:0x30C6`/`ds:0x30C4` are placed at random inside a rectangle, so
+the anchor those offsets are written against is nominal; this is where the
+island actually goes.
+
+The rock and sandbar score 0-15%, which is the coin flip having come up the
+other way, and the low surf (frames 30-41) sits below row 350 where the
+picture stops.
+
+### The shells the picture does not have
+
+`seg3:0x02EA` draws frame 14 — a starfish and two shells — at (397, 279),
+unconditionally, on the island's white patch. `ISLETEMP.SCR` does not have
+them, and searching the whole image finds them nowhere in it: the best
+position anywhere scores 28%, diffuse, which is noise. Compositing the island
+with them scores 76.6% against the reference and without them 81.1%.
+
+So the code says draw them and the game's own picture of its island says
+otherwise. The port sides with the picture; `JC_FAITHFUL=1` sides with the
+code.
+
+### Why a guarded block has to be able to fire late
+
+State 4 lasts one pass, and the ADS pass runs before the runner in the same
+tick, so a sequence parked on `IF_RUNNING(x)` always catches x ending. But the
+scripts do not wait one at a time. `WALKSTUF.ADS` sequence 1 opens with
+
+```
+IF_NOTSTARTED(1,1)
+  PLAY 1,1   PLAY 1,2   PLAY 1,4
+STEP
+IF_RUNNING(1,2)  STOP 1,1   PLAY 1,14
+STEP
+IF_RUNNING(1,14) PLAY 1,6
+STEP
+IF_RUNNING(1,4)  PLAY 1,13
+```
+
+Three scenes start together and the chain branches on whichever ends. A
+sequencer that could only ever catch the single pass a scene ends on would
+have to service them in the order the blocks are written — and scene 4's
+branch, four blocks down, would be long gone by the time it got there. Two
+scenes meant to overlap end up taking turns instead.
+
+The port keeps a set of scenes that have reached the running state, so
+`IF_RUNNING` is true for a scene that has run as well as one running right
+now, and a block can fire late. Playing a scene again clears it, so the next
+guard waits for the new run.
+
 ### The instance state machine
 
 `seg10:0x1C56` runs an instance only when its state is 1, 2, 3 or 5. Nothing

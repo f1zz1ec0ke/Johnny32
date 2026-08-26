@@ -128,7 +128,9 @@ cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
 ```
 
 `JC_NOWRITE=1` skips the PNG output. `JC_FAITHFUL=1` restores the 1992
-walk-router bug, for comparing against the original's behaviour. `JC_SPEED` is
+walk-router bug and draws the shells segment 3 puts on the beach that the
+game's own picture of the island does not have — the two places where the
+port and the binary disagree, both kept switchable. `JC_SPEED` is
 a percentage against the rate the data was authored at — 100 is faithful, 70
 runs it at seven tenths — and it works on the screensaver too.
 
