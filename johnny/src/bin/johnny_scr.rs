@@ -13,6 +13,10 @@
 //! Everything below the shell is platform independent; this file is the only
 //! Windows-specific part of the port.
 
+// A screensaver has no console. Without this a window flashes up behind it
+// every time Windows starts one.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!(
@@ -369,7 +373,12 @@ fn windows_main() {
              Place RESOURCE.001 and RESOURCE.MAP from your own copy of the \
              original beside this screensaver, or set JC_DATA to the folder \
              holding them.\r\n\r\n\
-             There is nothing to configure yet.",
+             Settings are environment variables for now. JC_SPEED is a \
+             percentage of the rate the data was authored at (default 60). \
+             JC_DAWN is when Johnny's day starts, as HHMM (default 0900) -- \
+             his day is eight real hours, so nine puts dusk at three and the \
+             next dawn at five. JC_FAITHFUL restores the two places where \
+             the original's code and its own artwork disagree.",
         );
         let caption = wide("Johnny Castaway");
         unsafe {
@@ -548,6 +557,14 @@ fn windows_main() {
         // ---- engine ------------------------------------------------------
         let seed = GetTickCount() as u64;
         let mut director = Director::new(seed);
+        // `ds:0x00BE` in the original, set from a spinner in Screen Antics'
+        // settings dialog. Ships at 0900.
+        director.clock = johnny::director::Clock::Wall {
+            dawn: std::env::var("JC_DAWN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(johnny::director::DEFAULT_DAWN),
+        };
         let mut info = BITMAPINFO256 {
             header: BITMAPINFOHEADER {
                 biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,

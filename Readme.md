@@ -150,7 +150,9 @@ game's own picture of the island does not have — the two places where the
 port and the binary disagree, both kept switchable. `JC_SPEED` is
 a percentage against the rate the data was authored at — **the default is 60**,
 which is where it looks like the thing people remember, and 100 runs the data
-exactly as written. It works on the screensaver too.
+exactly as written. It works on the screensaver too, along with `JC_DAWN` —
+when Johnny's day starts, as HHMM, defaulting to the 0900 the original ships
+with.
 
 That knob exists because the faithful rate is faster than most people
 remember, and the binary says why. A 386 could not hold 62.5 passes a second;
