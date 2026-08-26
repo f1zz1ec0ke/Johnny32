@@ -55,22 +55,37 @@ def imported_names(data, info):
     return mods
 
 
-def relocations(data, info, seg):
-    """Per-segment relocation records -> {offset: description}.
+# What a fixup patches, from the record's first byte.
+ADDR_LOBYTE = 0
+ADDR_SEGMENT = 2
+ADDR_FAR = 3        # segment:offset, four bytes
+ADDR_OFFSET = 5     # two bytes
+
+
+def relocation_records(data, info, seg):
+    """Per-segment relocation records, in full.
 
     A segment with flag 0x100 stores, right after its data, a uint16 count and
     that many 8-byte records. Borland leaves the instruction operand as a
     placeholder (0000:FFFF for a far call) and patches it at load time, so
     without these every imported call disassembles identically and uselessly.
+
+    Each record carries what it patches (`addr`, one of the `ADDR_*` above)
+    and whether it is additive. A record that is **not** additive names only
+    the *first* site: the placeholder there holds the offset of the next site
+    with the same target, and so on until 0xFFFF. Following that chain is not
+    optional -- a target called from a dozen places has one record and eleven
+    links, and an interpreter that patches only the record runs the other
+    eleven calls straight into 0000:FFFF.
     """
     if not (seg['flags'] & 0x100):
-        return {}
+        return []
     mods = imported_names(data, info)
     base = seg['offset'] + seg['length']
     if base + 2 > len(data):
-        return {}
+        return []
     count = struct.unpack_from('<H', data, base)[0]
-    out = {}
+    out = []
     for i in range(count):
         o = base + 2 + i * 8
         if o + 8 > len(data):
@@ -92,8 +107,36 @@ def relocations(data, info, seg):
             desc = '%s.%s' % (mod, data[p + 1:p + 1 + data[p]].decode('latin1'))
         else:
             desc = 'osfixup'
-        out[offset] = desc
+        out.append({'offset': offset, 'desc': desc, 'addr': addr_type & 0x7F,
+                    'additive': bool(rel_type & 4)})
     return out
+
+
+def relocations(data, info, seg):
+    """Fixup sites -> description, chains followed. For the disassembler."""
+    body = data[seg['offset']:seg['offset'] + seg['length']]
+    out = {}
+    for rec in relocation_records(data, info, seg):
+        for off in fixup_sites(body, rec):
+            out[off] = rec['desc']
+    return out
+
+
+def fixup_sites(body, rec):
+    """Every offset one relocation record patches, following its chain."""
+    off = rec['offset']
+    if rec['additive']:
+        return [off]
+    sites, seen = [], set()
+    while 0 <= off < len(body) - 1 and off not in seen:
+        seen.add(off)
+        sites.append(off)
+        nxt = struct.unpack_from('<H', body, off)[0]
+        if nxt == 0xFFFF:
+            break
+        # A far-address chain links through the offset half only.
+        off = nxt
+    return sites
 
 
 def names_at(data, off):

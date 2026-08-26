@@ -109,6 +109,10 @@ def main():
     w('/// A walk path: where it leaves Johnny, and the waypoints to get there.')
     w('pub struct WalkStep {')
     w('    pub id: u8,')
+    w('    /// The facing the path starts from. `seg4:0x01CD` will not run the')
+    w('    /// path until Johnny is turned this way, so he pivots on the spot')
+    w('    /// first -- byte 0 of the triple at `ds:0x02DE`.')
+    w('    pub face: u8,')
     w('    /// Position after the walk, as (major, minor).')
     w('    pub lands: (u8, u8),')
     w('    /// `(frame, x, y)`; bit 15 of the frame mirrors the sprite.')
@@ -120,7 +124,20 @@ def main():
         _, pts = steps[sid]
         a = data[scheduler.STEP_POSITIONS + sid * 3:scheduler.STEP_POSITIONS + sid * 3 + 3]
         path = ', '.join('(%d, %d, %d)' % p for p in pts)
-        w('    WalkStep { id: %d, lands: (%d, %d), path: &[%s] },' % (sid, a[2], a[1], path))
+        w('    WalkStep { id: %d, face: %d, lands: (%d, %d), path: &[%s] },'
+          % (sid, a[0], a[2], a[1], path))
+    w('];')
+    w('')
+    w('/// Standing poses, by area: the step id whose `path` is eight poses,')
+    w('/// one per facing, rather than a walk.')
+    w('///')
+    w('/// `seg4:0x0223` takes the first when Johnny has reached the area he')
+    w('/// was heading for and the second while he is still travelling, and')
+    w('/// `seg4:0x0258` indexes it by the minor. Index 0 is unused.')
+    w('pub const POSES: [(u8, u8); 7] = [')
+    for major in range(7):
+        w('    (%d, %d),' % (data[scheduler.POSE_HERE + major],
+                             data[scheduler.POSE_ONWARD + major]))
     w('];')
     print('\n'.join(out))
 

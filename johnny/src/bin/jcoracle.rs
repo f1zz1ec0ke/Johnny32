@@ -95,6 +95,42 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Which way Johnny pivots, including the coin toss he makes when the
+        // two facings are dead opposite.
+        "turn" => {
+            let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(8);
+            let mut rng = Rng::new(0);
+            for at in 0..8u8 {
+                for to in 0..8u8 {
+                    for i in 0..n {
+                        println!("turn {at} {to} {i} {}", director::turn_toward(at, to, &mut rng));
+                    }
+                }
+            }
+        }
+        // The (block, position) pairs the route matrix offers, so both sides
+        // walk the same list without sharing the table.
+        "routes" => {
+            for (from, to, at, _) in tables::ROUTE_TABLE {
+                println!("{from},{to},{at}");
+            }
+        }
+        // Which way Johnny goes: one roll of the route picker for every
+        // (block, position) the six-by-six matrix offers.
+        "route" => {
+            let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(32);
+            let mut d = director::Director::new(0);
+            // The engine draws `rand() % 100` here whatever the weights sum
+            // to; the port's default corrects that, so the comparison has to
+            // be against the faithful mode.
+            d.faithful_router = true;
+            for (from, to, at, _) in tables::ROUTE_TABLE {
+                for i in 0..n {
+                    let step = d.route_roll(*from, *to, *at);
+                    println!("route {from} {to} {at} {i} {}", step.map_or(-1, |s| s as i16));
+                }
+            }
+        }
         // Where every instruction of every shipped script begins and ends,
         // which is the foundation the rest of the ADS work stands on.
         "adslen" => {

@@ -32,6 +32,20 @@ class Unsupported(Exception):
     pass
 
 
+class Answer(Exception):
+    """Raised by a hook that has seen what the caller wanted.
+
+    Running a routine to its natural end often means running the parts below
+    it as well -- the walk driver picks a route and then goes on to animate
+    the turn. When the question is only "which route", a hook that raises
+    this stops the machine at the moment the answer exists.
+    """
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.value = value
+
+
 class Trap(Exception):
     """A far call to something the harness has no stub for."""
 
@@ -79,6 +93,8 @@ class Machine:
         self.sregs = dict(cs=0, ds=self.ds, es=self.ds, ss=self.ds)
         self.flags = dict(zf=0, sf=0, cf=0, of=0)
         self.stubs = {}
+        self.hooks = {}
+        self.hooked = {}
         self.steps = 0
         self.limit = 5_000_000
 
@@ -89,27 +105,53 @@ class Machine:
 
         Internal fixups become the real (segment, offset) of the target.
         Imported ones become a synthetic far address in a reserved segment,
-        which `call_far` looks up in the stub table.
+        which `call_far` looks up in the stub table -- except the handful of
+        imports that are *values* rather than functions, which are written
+        straight in.
+
+        What each record patches matters: 1,266 of them are far addresses and
+        four bytes wide, but seventy are a bare segment or a bare offset and
+        two bytes wide. Writing four bytes for one of those overwrites the two
+        bytes after it, which is a corrupted instruction sitting quietly in
+        the middle of a function until something runs it.
         """
         self.import_at = {}
-        next_stub = 0
         for seg in self.info['segments']:
-            fixups = ne_info.relocations(data, self.info, seg)
+            body = data[seg['offset']:seg['offset'] + seg['length']]
             base = seg['index'] << 16
-            for off, note in fixups.items():
-                target = self._resolve(note)
+            for rec in ne_info.relocation_records(data, self.info, seg):
+                target = self._resolve(rec['desc'])
                 if target is None:
                     continue
                 tseg, toff = target
-                # A far fixup patches offset then segment; ne_info records the
-                # first byte of the pair.
-                struct.pack_into('<HH', self.mem, base + off, toff, tseg)
-            _ = next_stub
+                for off in ne_info.fixup_sites(body, rec):
+                    at = base + off
+                    if rec['addr'] == ne_info.ADDR_FAR:
+                        struct.pack_into('<HH', self.mem, at, toff, tseg)
+                    elif rec['addr'] == ne_info.ADDR_SEGMENT:
+                        self._patch16(at, tseg, rec['additive'])
+                    elif rec['addr'] == ne_info.ADDR_OFFSET:
+                        self._patch16(at, toff, rec['additive'])
+                    elif rec['addr'] == ne_info.ADDR_LOBYTE:
+                        self.mem[at] = toff & 0xFF
+
+    def _patch16(self, at, value, additive):
+        if additive:
+            value += struct.unpack_from('<H', self.mem, at)[0]
+        struct.pack_into('<H', self.mem, at, value & 0xFFFF)
+
+    # Imports that are constants, not entry points. Win16 exports these so a
+    # program can walk a "huge" allocation across segment boundaries; nothing
+    # here allocates one that big, so the arithmetic degenerates to the plain
+    # kind either way.
+    VALUE_IMPORTS = {'KERNEL.113': 3, 'KERNEL.114': 8}
 
     def _resolve(self, note):
         if note.startswith('seg'):
             seg, off = note.split(':')
             return int(seg[3:]), int(off, 16)
+        if note in self.VALUE_IMPORTS:
+            return 0, self.VALUE_IMPORTS[note]
         # An import: give it an address in the trap segment, keyed by name.
         idx = self.imports.setdefault(note, len(self.imports))
         return 0x50, idx
@@ -189,7 +231,10 @@ class Machine:
         self.push(self.RETURN)
         self.sregs['cs'] = seg
         self.ip = off
-        self.run()
+        try:
+            self.run()
+        except Answer as a:
+            return a.value
         return self.regs['ax']
 
     def run(self):
@@ -291,7 +336,24 @@ class Machine:
 
     # ---- far calls -------------------------------------------------------
 
+    def hook(self, seg, off, fn=None):
+        """Answer a call to one of the program's own functions here instead.
+
+        The point is to run a routine that sits on top of a subsystem this
+        interpreter has no business in -- the blitter, the pager, anything
+        that ends in GDI -- without dragging the subsystem in. `fn` is called
+        with the machine and should leave a result in `ax`; the default
+        returns zero. Every hook is counted, so a run can report what it
+        stood in for rather than quietly pretending.
+        """
+        self.hooks[(seg, off)] = fn or (lambda m: m.regs.__setitem__('ax', 0))
+
     def call_far(self, seg, off):
+        hooked = self.hooks.get((seg, off))
+        if hooked is not None:
+            self.hooked[(seg, off)] = self.hooked.get((seg, off), 0) + 1
+            hooked(self)
+            return
         if seg == 0x50:
             name = [k for k, v in self.imports.items() if v == off]
             name = name[0] if name else 'import#%d' % off

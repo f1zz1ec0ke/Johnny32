@@ -280,10 +280,46 @@ Each is a list of `(frame, x, y)` triples ending in an all-zero triple:
 
 A parallel table at `ds:0x02DE`, 3 bytes per step id, says where the step
 leaves him: byte 1 is the destination minor and byte 2 the destination major,
-written to `ds:0x30E0`/`ds:0x30E4` once the step finishes (`seg4:0x0161`). Byte
-0 is a reference minor the engine compares against on arrival. When the new
-major equals the target the route is cleared; otherwise the block is re-entered
-from the new position, which is how multi-step walks work.
+written to `ds:0x30E0`/`ds:0x30E4` once the step finishes (`seg4:0x0161`). When
+the new major equals the target the route is cleared; otherwise the block is
+re-entered from the new position, which is how multi-step walks work.
+
+Byte 0 is the facing the path **starts** from, and it is not decoration.
+
+### The minor is a facing, and Johnny turns
+
+`seg4:0x0B64` is the "get him here" call: it takes a scene's `(area, minor)`,
+writes the area into `ds:0x30E2` and the minor into `ds:0x30DE`, and returns
+whether Johnny is already both. The second half of a position is **which of
+eight ways he is facing**, not a spot inside the area — and the engine will
+not run a walk path until he is turned the way that path begins
+(`seg4:0x01CD`), nor start a scene until he is turned the way the scene asked
+for.
+
+So `seg4:0x01D6` pivots him an eighth of a turn at a time, the short way
+round, on the same four-tick clock as a walk waypoint. Dead opposite has no
+short way, so it tosses a coin — `rand() & 1` — which is the only reason two
+identical walks can start differently. The tick a pivot finishes goes straight
+on to draw the first waypoint (`seg4:0x026B`), so the last frame of a turn is
+never seen.
+
+### The standing poses
+
+Twelve of the thirty-four "walk paths" are not paths. They have eight entries
+and go nowhere: they are **standing poses**, one per facing, and
+`seg4:0x0258` indexes them by the minor rather than walking them.
+
+`ds:0x0347` and `ds:0x034E` hold one such step id per area, and `seg4:0x0223`
+picks between them by whether Johnny has reached the area he was heading for:
+
+| Area | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| arrived (`ds:0x0347`) | 6 | 10 | 17 | 22 | 28 | 34 |
+| travelling (`ds:0x034E`) | 5 | 9 | 16 | 21 | 27 | 33 |
+
+That is what is on screen whenever a scene is not running, which is a good
+fraction of the time: `ds:0x30C8` is the single "what to draw" pointer, and it
+holds either a pose or the walk waypoint just reached.
 
 These paths are hand-authored, 5 to 32 waypoints each. That is the part a
 behavioural reimplementation has to approximate, and it is why walking is
@@ -814,6 +850,12 @@ Things the port had to get right that are easy to get wrong:
   `director::check_repaint` still holds it to that every tick under
   `JC_CHECK=1` — what it catches now is a drawing opcode that paints without
   recording.
+* **The scene Johnny walks to is the scene that then plays.** Obvious, and
+  easy to lose: the queue cursor moves when a scene is taken off it, so a
+  port that answers "he has to walk first" by *returning* has already spent
+  that entry, and when he arrives it reaches for the next one. Sixty walks in
+  a forty-three minute run, so the queue drained at twice the rate it should
+  and more than half the scenes chosen never played.
 * **The route block is chosen once, on the pair Johnny set out on.**
   `seg4:0x03AC` indexes a six by six table of blocks and `seg4:0x00EA` scans
   the block it returned for a `-area` marker matching wherever he has got to
@@ -821,6 +863,12 @@ Things the port had to get right that are easy to get wrong:
   spread of ways to *set out* again from there, and he wanders: 4 → 3 → 6 → 5
   → 4 → 3 → 1 where the block would have taken him 4 → 3 → 1. Twenty-three
   seconds of walking instead of four.
+* **The weighted pickers stop on "not positive", not "negative".**
+  `seg4:0x0118` subtracts each weight from the draw and takes the option the
+  moment the running count stops being positive, so a draw landing exactly on
+  a boundary belongs to the option *before* it. Starting the count one higher
+  takes the next one instead — twenty-seven of the oracle's 4,736 route rolls,
+  or a wrong turn about once every two hundred walks.
 * **`F200` starts a second sequence.** Every one of `STAND.ADS`'s twelve
   standing sequences opens with `F200 14`, and 14 is its own `TAG:` entry
   "STAND INIT" — four instructions that put up the base pose,

@@ -39,6 +39,15 @@ ISLAND_X = 0x30C6        # where seg3:0x1B00 leaves the island
 ISLAND_Y = 0x30C4
 SCRATCH = 0x8000         # free space in the data segment for a script
 CTX = 0x7000             # a scratch context; only its end pointer is read
+WALK_DELAY = 0x30D6      # ticks left before the next waypoint
+ROUTE = 0x30D2           # the route block in play
+PATH = 0x30D0            # the walk path in play
+PENDING = 0x30DE
+MAJOR = 0x30E4           # where Johnny is
+MINOR = 0x30E0
+TARGET = 0x30E2          # where he is going
+TURN_GOAL = 0x30CA       # the facing he is turning toward
+POSE = 0x30C8            # what to draw: a standing pose or a walk waypoint
 
 
 def port(*args):
@@ -204,6 +213,75 @@ def q_adslen():
     return out
 
 
+def q_route(n=32):
+    """seg4:0x0094, the walk driver, stopped the moment it has picked a step.
+
+    The driver looks the route block up (`seg4:0x03AC`), scans it for where
+    Johnny is standing (`seg4:0x00EA`), draws `rand() % 100` and subtracts
+    weights. It then goes on to turn him on the spot and animate the walk, so
+    a hook on the step-to-path lookup answers the question and stops the
+    machine there.
+
+    Every (block, position) the six-by-six matrix offers, rolled `n` times.
+    """
+    import subprocess
+    rows = subprocess.run(
+        [PORT, 'routes'], capture_output=True, text=True).stdout.split()
+    m = fresh()
+
+    def grab(mm):
+        raise x86.Answer(mm.read16(mm.ss, mm.sp))
+
+    m.hook(4, 0x03EA, grab)
+    out = []
+    for row in rows:
+        frm, to, at = (int(v) for v in row.split(','))
+        for i in range(n):
+            for off, v in [(WALK_DELAY, 0), (ROUTE, 0), (PATH, 0),
+                           (PENDING, 0xFFFF), (MAJOR, at), (MINOR, 0),
+                           (TARGET, to)]:
+                m.write16(m.ds, off, v)
+            # The block is the one for the pair he set out on, not the pair he
+            # has got to: `seg4:0x0094` only looks it up when there is none.
+            m.write16(m.ds, ROUTE, m.call(4, 0x03AC, [frm, to]))
+            out.append('route %d %d %d %d %d' % (frm, to, at, i, m.call(4, 0x0094)))
+    return out
+
+
+def q_turn(n=8):
+    """seg4:0x01D6, which way Johnny pivots.
+
+    Every facing against every other, `n` times each, so the coin toss the
+    engine makes when the two are dead opposite is compared draw for draw
+    rather than in aggregate -- it comes out of the same generator everything
+    else does, so getting it wrong moves every later decision as well.
+
+    The driver is run with a route and a path already in play, so it goes
+    straight to the turn; a hook on the blitter answers with the new facing
+    and stops it before it draws anything.
+    """
+    m = fresh()
+    # A path with room to spare, so a turn that finishes does not run off the
+    # end of it and overwrite the answer with the arrival.
+    for k in range(6):
+        m.write16(m.ds, SCRATCH + k * 6 + 0, 1)
+        m.write16(m.ds, SCRATCH + k * 6 + 2, 100)
+        m.write16(m.ds, SCRATCH + k * 6 + 4, 100)
+    m.hook(13, 0x007E, lambda mm: (_ for _ in ()).throw(
+        x86.Answer(mm.read16(mm.ds, MINOR))))
+    m.hook(4, 0x03EA, lambda mm: mm.regs.__setitem__('ax', SCRATCH))
+    out = []
+    for at in range(8):
+        for to in range(8):
+            for i in range(n):
+                for off, v in [(WALK_DELAY, 0), (ROUTE, 1), (PATH, SCRATCH),
+                               (PENDING, 0xFFFF), (POSE, SCRATCH),
+                               (MAJOR, 1), (TARGET, 1), (MINOR, at), (TURN_GOAL, to)]:
+                    m.write16(m.ds, off, v)
+                out.append('turn %d %d %d %d' % (at, to, i, m.call(4, 0x0094)))
+    return out
+
+
 QUERIES = {
     'rand': (q_rand, lambda: port('rand', 256)),
     'weighted': (q_weighted, lambda: port('weighted', '10,20,30,20,10,10', 256)),
@@ -215,6 +293,8 @@ QUERIES = {
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
     'adslen': (q_adslen, lambda: port('adslen')),
+    'route': (q_route, lambda: port('route', 32)),
+    'turn': (q_turn, lambda: port('turn', 8)),
 }
 
 

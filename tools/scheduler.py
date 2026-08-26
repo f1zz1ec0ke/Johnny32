@@ -22,6 +22,12 @@ RECORD = 17
 ROUTE_MATRIX = 0x0A94   # word at +from*12+to*2 -> route block offset
 STEP_POSITIONS = 0x02DE  # 3 bytes per step: (ref minor, dest minor, dest major)
 STEP_TABLE = 0x04FB     # in segment 4: stubs returning each step's block
+# One step id per area, whose "path" is not a path at all: eight triples, one
+# standing pose per facing, indexed by the minor (`seg4:0x0258` adds minor*6).
+# `seg4:0x0223` picks the first table when Johnny has reached the area he was
+# heading for and the second while he is still travelling.
+POSE_HERE = 0x0347
+POSE_ONWARD = 0x034E
 
 
 # From the date checks at seg4:0x0560. The background id lands in ds:0x30BC

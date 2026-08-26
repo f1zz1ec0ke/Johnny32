@@ -203,17 +203,8 @@ enum Activity {
     Intro { until: u32 },
     /// Standing about, for one of the table's script-less entries.
     Idling { until: u32 },
-    /// Following one walk path towards `target`.
-    Walking {
-        step: &'static WalkStep,
-        index: usize,
-        /// The area the journey started in. The route block is looked up once,
-        /// on the pair, and re-read for wherever Johnny has got to since.
-        origin: u8,
-        target: (u8, u8),
-        /// Tick at which the next waypoint is due.
-        next: u32,
-    },
+    /// Getting Johnny where the next scene wants him.
+    Moving(Box<Journey>),
     /// Running a scene's ADS sequence.
     Scene {
         /// The table row this came from, so the story can tell when its own
@@ -247,6 +238,62 @@ pub struct Active {
     /// self-loop flag at +0xC, set at `seg10:0x1D9E` by comparing the goto
     /// target with the scene's own start.
     pub looping: bool,
+}
+
+/// Getting Johnny where a scene wants him standing, and facing the way it
+/// wants him to face. `seg4:0x0094` is all of this in one function.
+///
+/// The second half of a position is a **facing**, not a spot: `seg4:0x0B64`
+/// takes the scene's `(area, minor)` and writes the area into `ds:0x30E2` and
+/// the minor into `ds:0x30DE`, then says whether Johnny is already both. He
+/// pivots on the spot an eighth of a turn at a time until he is -- before the
+/// walk, to line up with the path, and again at the end, to line up with the
+/// scene.
+pub struct Journey {
+    /// The scene this is for. It begins when he arrives.
+    scene: &'static Scene,
+    /// `ds:0x30E2`: the area he is heading for.
+    target: u8,
+    /// `ds:0x30DE`: the facing the scene asked for, until it is satisfied.
+    want_face: Option<u8>,
+    /// `ds:0x30CA`: the facing he is turning toward right now -- the walk
+    /// path's own starting facing while walking, the scene's once he is
+    /// there.
+    turn_goal: u8,
+    /// The area he set out from. The route block is looked up once, on the
+    /// pair (`ds:0x30D2`), and re-read for wherever he has got to since.
+    origin: u8,
+    /// `ds:0x30D0`: the path he is on, and how far along it he is.
+    path: Option<(&'static WalkStep, usize)>,
+    /// `ds:0x30D6`: the tick the next waypoint or turn is due.
+    next: u32,
+}
+
+/// One eighth of a turn from `at` toward `to`, the short way round
+/// (`seg4:0x01D6`).
+///
+/// Dead opposite has no short way, so the engine tosses a coin -- which is
+/// the only reason two identical walks can start differently.
+pub fn turn_toward(at: u8, to: u8, rng: &mut Rng) -> u8 {
+    // `seg4:0x01CD` tests this before anything else, and it matters that the
+    // test comes first: the coin toss below would otherwise be thrown for a
+    // turn nobody is making, and every later draw would come out different.
+    if at == to {
+        return at;
+    }
+    let delta = at as i16 - to as i16;
+    let dir: i16 = if delta == 4 || delta == -4 {
+        if rng.next_u16() & 1 != 0 {
+            -1
+        } else {
+            1
+        }
+    } else if delta < -4 || (0 < delta && delta < 4) {
+        -1
+    } else {
+        1
+    };
+    ((at as i16 + dir) & 7) as u8
 }
 
 impl Active {
@@ -607,8 +654,8 @@ pub struct Director {
 impl Director {
     pub fn new(seed: u64) -> Self {
         Director {
-            // Johnny starts where the STAND scenes put him.
-            position: (1, 1),
+            // `seg4:0x002C`: area 1, facing 0, and heading nowhere.
+            position: (1, 0),
             phase: 0,
             day: 1,
             holiday: None,
@@ -1015,7 +1062,12 @@ impl Director {
         // The original draws rand() % 100 here regardless of the total, which
         // is why one route's last two options never fire.
         let span = if self.faithful_router { 100 } else { total };
-        let mut roll = self.rng.below(span) as i64 + 1;
+        // `seg4:0x0115`: subtract, and take this one the moment the running
+        // count stops being *positive*. Starting at `roll + 1` instead takes
+        // the next option whenever the draw lands exactly on a boundary --
+        // twenty-seven times in the oracle's 4,736 rolls, which is a wrong
+        // turn about once every two hundred walks.
+        let mut roll = self.rng.below(span) as i64;
         let mut chosen = None;
         for opt in options {
             roll -= opt.weight as i64;
@@ -1026,6 +1078,14 @@ impl Director {
         }
         let step = chosen?;
         tables::WALK_STEPS.iter().find(|w| w.id == step)
+    }
+
+    /// One roll of the route picker, for the oracle: which step does the
+    /// engine choose to get from `at` toward `to`, on a route block that was
+    /// entered at `from`?
+    pub fn route_roll(&mut self, from: u8, to: u8, at: u8) -> Option<u8> {
+        self.position = (at, 0);
+        self.next_step(from, (to, 0)).map(|w| w.id)
     }
 
     fn program(&mut self, archive: &Archive, name: &str) -> Option<Rc<Program>> {
@@ -1072,39 +1132,29 @@ impl Director {
             return;
         };
         if !self.position_ok(scene) {
-            // Already in the right area, wrong spot within it. The router
-            // cannot help: `seg4:0x00B7` gives up when the majors already
-            // match, because a route block is keyed on the pair. The minor is
-            // a spot inside an area rather than somewhere to walk to, so take
-            // it and get on with the scene -- which is what stops Johnny
-            // teleporting across the island between one gag and the next.
-            if scene.from.0 == self.position.0 {
-                self.position.1 = scene.from.1;
-            } else if let Some(step) = self.next_step(self.position.0, scene.from) {
-                self.note(format!(
-                    "walk {:?} -> {:?} via step {} ({} waypoints)",
-                    self.position,
-                    scene.from,
-                    step.id,
-                    step.path.len()
-                ));
-                self.activity = Activity::Walking {
-                    step,
-                    index: 0,
-                    origin: self.position.0,
-                    target: scene.from,
-                    next: self.tick,
-                };
-                return;
+            // `seg4:0x0B64` writes the scene's area into `ds:0x30E2` and its
+            // facing into `ds:0x30DE` and reports whether Johnny is already
+            // both. He is not, so he sets off -- and the scene waits, rather
+            // than being dropped for the next one in the queue.
+            let target = if scene.from.0 == 0 {
+                self.position.0
             } else {
-                // No route at all. The original would keep trying; move him
-                // directly so the scene can still play, and say so.
-                self.note(format!(
-                    "no route {:?} -> {:?}, moving directly",
-                    self.position, scene.from
-                ));
-                self.position = scene.from;
-            }
+                scene.from.0
+            };
+            self.note(format!(
+                "walk {:?} -> {:?} for {} seq {}",
+                self.position, scene.from, file, scene.sequence
+            ));
+            self.activity = Activity::Moving(Box::new(Journey {
+                scene,
+                target,
+                want_face: Some(scene.from.1),
+                turn_goal: self.position.1,
+                origin: self.position.0,
+                path: None,
+                next: self.tick,
+            }));
+            return;
         }
         let Some(mut seq) = Sequencer::from_record(archive, file) else {
             self.note(format!("no ADS record {file}"));
@@ -1331,57 +1381,7 @@ impl Director {
                 }
                 false
             }
-            Activity::Walking {
-                step,
-                index,
-                origin,
-                target,
-                next,
-            } => {
-                // Hold the current waypoint until its turn comes round.
-                if self.tick < next {
-                    self.activity = Activity::Walking {
-                        step,
-                        index,
-                        origin,
-                        target,
-                        next,
-                    };
-                    return false;
-                }
-                self.stage.restore_background();
-                if let Some(&(frame, x, y)) = step.path.get(index) {
-                    // `seg4:0x02C0`: the waypoint's top bit is draw mode 2.
-                    let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
-                    self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
-                    self.activity = Activity::Walking {
-                        step,
-                        index: index + 1,
-                        origin,
-                        target,
-                        next: self.tick + WALK_TICKS_PER_WAYPOINT,
-                    };
-                    true
-                } else {
-                    // Arrived at wherever this step lands. Keep going if the
-                    // target is further on; the route block is re-entered.
-                    self.position = step.lands;
-                    if self.position.0 != target.0 {
-                        if let Some(next_step) = self.next_step(origin, target) {
-                            self.activity = Activity::Walking {
-                                step: next_step,
-                                index: 0,
-                                origin,
-                                target,
-                                next: self.tick + WALK_TICKS_PER_WAYPOINT,
-                            };
-                            return true;
-                        }
-                    }
-                    self.note(format!("arrived at {:?}", self.position));
-                    false
-                }
-            }
+            Activity::Moving(j) => self.step_journey(archive, *j),
             Activity::Scene {
                 row,
                 mut seq,
@@ -1415,6 +1415,10 @@ impl Director {
                         self.note(format!("scene left a clip set: {c:?}"));
                     }
                     self.note(format!("scene over, Johnny at {:?}", self.position));
+                    // The scene was drawing its own Johnny; from here he is
+                    // the engine's again, in the pose for wherever the scene
+                    // left him standing.
+                    self.stand(archive, true);
                     if same(self.story_scene, row) {
                         // `seg4:0x0884`: the story got told.
                         self.story_scene = None;
@@ -1442,6 +1446,123 @@ impl Director {
             self.redraw_standing(archive);
         }
         surf | acted
+    }
+
+    /// One pass of `seg4:0x0094`: look up a route, pick a step, pivot, walk.
+    ///
+    /// The order is the engine's. A tick that finishes a pivot goes straight
+    /// on to draw the first waypoint, which is why the last frame of a turn
+    /// is never seen.
+    fn step_journey(&mut self, archive: &Archive, mut j: Journey) -> bool {
+        // `seg4:0x00A3`: nothing moves until the delay slot runs out. He is
+        // still standing there in the meantime, and the surf has just
+        // repainted the beach under him.
+        if self.tick < j.next {
+            self.redraw_standing(archive);
+            self.activity = Activity::Moving(Box::new(j));
+            return true;
+        }
+        self.stage.restore_background();
+
+        // `seg4:0x00E1`: no path and not there yet, so pick a step out of the
+        // route block for wherever he is standing.
+        if j.path.is_none() && self.position.0 != j.target {
+            match self.next_step(j.origin, (j.target, 0)) {
+                Some(step) => {
+                    self.note(format!(
+                        "  step {} ({} waypoints), facing {} first",
+                        step.id,
+                        step.path.len(),
+                        step.face
+                    ));
+                    j.turn_goal = step.face;
+                    j.path = Some((step, 0));
+                }
+                None => {
+                    // No block covers this pair. The original would stand
+                    // there for good; move him and say so.
+                    self.note(format!(
+                        "no route {:?} -> {}, moving directly",
+                        self.position, j.target
+                    ));
+                    self.position = (j.target, j.want_face.unwrap_or(self.position.1));
+                }
+            }
+        }
+
+        // `seg4:0x0179`: in the right area and done turning, so the facing
+        // the scene asked for becomes the next thing to turn to -- and when
+        // he is already at it, the request is satisfied.
+        if j.path.is_none() && self.position.0 == j.target && self.position.1 == j.turn_goal {
+            match j.want_face {
+                Some(want) if want != j.turn_goal => j.turn_goal = want,
+                _ => j.want_face = None,
+            }
+        }
+
+        // `seg4:0x01CA`: an eighth of a turn, and the pose that goes with it.
+        if self.position.1 != j.turn_goal {
+            self.position.1 = turn_toward(self.position.1, j.turn_goal, &mut self.rng);
+            self.stand(archive, self.position.0 == j.target);
+            j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
+            self.activity = Activity::Moving(Box::new(j));
+            return true;
+        }
+
+        // `seg4:0x0274`: facing the right way, so take the next waypoint.
+        if let Some((step, i)) = j.path {
+            match step.path.get(i) {
+                Some(&(frame, x, y)) => {
+                    // `seg4:0x02C0`: the waypoint's top bit is draw mode 2.
+                    let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
+                    self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
+                    j.path = Some((step, i + 1));
+                    j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
+                    self.activity = Activity::Moving(Box::new(j));
+                    return true;
+                }
+                None => {
+                    // `seg4:0x0294`: the path has run out, so he is standing
+                    // where it said it would leave him, facing the way it
+                    // said. The route block is re-entered from there.
+                    self.position = step.lands;
+                    j.turn_goal = self.position.1;
+                    j.path = None;
+                    self.note(format!("arrived at {:?}", self.position));
+                    j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
+                    self.activity = Activity::Moving(Box::new(j));
+                    return true;
+                }
+            }
+        }
+
+        // In the right area, facing the right way: the scene can start.
+        let scene = j.scene;
+        self.stand(archive, true);
+        self.begin_scene(archive, scene);
+        true
+    }
+
+    /// Draw Johnny standing at this spot, facing whichever way he faces.
+    ///
+    /// `seg4:0x0223` picks one of two pose tables per area -- the first for
+    /// when he has reached the area he was heading for, the second while he
+    /// is still travelling -- and `seg4:0x0258` indexes it by the facing.
+    /// Eight poses, one per point of the compass.
+    fn stand(&mut self, archive: &Archive, arrived: bool) {
+        let area = self.position.0 as usize;
+        let Some(&(here, onward)) = tables::POSES.get(area) else {
+            return;
+        };
+        let id = if arrived { here } else { onward };
+        let Some(pose) = tables::WALK_STEPS.iter().find(|w| w.id == id) else {
+            return;
+        };
+        let Some(&(frame, x, y)) = pose.path.get(self.position.1 as usize) else {
+            return;
+        };
+        let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
+        self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
     }
 
     /// Put the standing Johnny back on top of the backdrop.
