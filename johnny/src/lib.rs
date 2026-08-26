@@ -13,6 +13,10 @@ pub mod director;
 pub mod png;
 pub mod render;
 pub mod scenery;
+pub mod settings;
 pub mod sound;
 pub mod tables;
 pub mod ttm;
+
+#[cfg(test)]
+mod tests;

@@ -255,7 +255,7 @@ pub const ANYWHERE: u16 = 0xFFFF;
 /// `seg3:0x1C41` takes the mask the chooser landed on and turns bits of it
 /// into the backdrop's state. Passing all ones resets everything, which is how
 /// the island gets back to normal between scenes.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Backdrop {
     /// Bit 0x2000 (`seg3:0x1CDC`): not the island at all. The screen is
     /// cleared and the scene's own `.SCR` is the whole picture -- this is how
@@ -278,6 +278,29 @@ pub struct Backdrop {
     /// checks before drawing the holiday decoration on the island. The port
     /// has no decorations to draw yet, so this is carried and not used.
     pub no_holiday: bool,
+    /// `Waves` in the settings file (`ds:0x00BA`). `seg3:0x0378` reads it
+    /// alongside the per-scene flag: either one turns the water still.
+    pub allow_waves: bool,
+    /// `Clouds` (`ds:0x00B8`). `seg3:0x0399` gives the sky fifteen slots or
+    /// none.
+    pub allow_clouds: bool,
+}
+
+impl Default for Backdrop {
+    fn default() -> Self {
+        Backdrop {
+            cutaway: false,
+            night: false,
+            no_rock: false,
+            no_raft: false,
+            still_water: false,
+            no_holiday: false,
+            // The two settings default on, the way `ds:0x00B8` and
+            // `ds:0x00BA` ship.
+            allow_waves: true,
+            allow_clouds: true,
+        }
+    }
 }
 
 impl Backdrop {
@@ -494,6 +517,9 @@ impl Scenery {
     /// at thirty percent between them is four or five clouds, which is what
     /// the painted sky in `ISLETEMP.SCR` has.
     fn spawn_clouds(&mut self, rng: &mut Rng) {
+        if !self.backdrop.allow_clouds {
+            return;
+        }
         for _ in self.clouds.len()..CLOUD_SLOTS {
             let pick = weighted(rng, &[CLOUDS[2].2, CLOUDS[1].2, CLOUDS[0].2]);
             if pick == 0 {
@@ -580,7 +606,7 @@ impl Scenery {
     /// and the glints share it, so `seg3:0x0386` setting it to nothing is not
     /// "no glints" -- it is a flat calm.
     fn objects(&self) -> usize {
-        if self.backdrop.still_water {
+        if self.backdrop.still_water || !self.backdrop.allow_waves {
             0
         } else {
             GLINTS

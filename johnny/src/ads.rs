@@ -476,7 +476,7 @@ fn weight_of(op: &Op) -> u16 {
 
 /// The raw opcode an `Op` came from, for counting one this port meets
 /// somewhere it did not expect.
-fn opcode_of(op: &Op) -> u16 {
+pub fn opcode_of(op: &Op) -> u16 {
     match op {
         Op::Sequence(_) => 0x0001,
         Op::PlayScene { .. } => 0x2005,

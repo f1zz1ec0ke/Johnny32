@@ -43,7 +43,7 @@ pub const STORY_DAYS: u8 = 11;
 /// `ds:0x2E72` and counts down the five delay slots.
 pub const MS_PER_TICK: u32 = 16;
 
-/// Milliseconds per tick after `JC_SPEED` is applied.
+/// Milliseconds per tick, once the speed setting is applied.
 ///
 /// The port runs the data at the rate it was authored for, and that is
 /// measurably right: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay
@@ -52,18 +52,21 @@ pub const MS_PER_TICK: u32 = 16;
 /// exactly that reason, and skipped passes push each frame's deadline later --
 /// so the screensaver most people remember ran slower than its own data.
 ///
-/// `JC_SPEED` is a percentage of the authored rate. The default is 60, which
-/// is where it looks like the thing people remember; `JC_SPEED=100` runs the
-/// data exactly as written.
+/// `Speed` in the settings file is a percentage of the authored rate. The
+/// default is 60, which is where it looks like the thing people remember;
+/// 100 runs the data exactly as written.
 pub const DEFAULT_SPEED: u32 = 60;
 
+pub fn ms_per_tick_at(speed: u32) -> u32 {
+    (MS_PER_TICK * 100 / speed.clamp(10, 400)).max(1)
+}
+
+/// What the tools use, which is the settings file plus whatever the
+/// environment says on top of it.
 pub fn ms_per_tick() -> u32 {
-    let pct = std::env::var("JC_SPEED")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(DEFAULT_SPEED)
-        .clamp(10, 400);
-    (MS_PER_TICK * 100 / pct).max(1)
+    ms_per_tick_at(crate::settings::Settings::load(&crate::settings::Settings::path())
+        .with_env()
+        .speed)
 }
 
 /// 62.5, rounded. The authors clearly thought in 60ths -- the delays in the
@@ -549,6 +552,21 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> u32 {
 /// holiday check wants (`seg4:0x0560` reads them out of the C runtime's
 /// `getdate`). The usual civil-from-days arithmetic, shifted to a March-based
 /// year so the leap day falls at the end.
+pub fn civil_from_days(days: u32) -> (u16, u8, u8) {
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year as u16, month, day)
+}
+
+/// Days since the epoch back to a calendar month and day, which is what the
+/// holiday check wants.
 pub fn month_and_day(days: u32) -> (u8, u8) {
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
@@ -641,6 +659,9 @@ pub struct Director {
     queue_spent: bool,
     /// Where the time of day comes from.
     pub clock: Clock,
+    /// Everything the settings file decides. `Director::configure` applies
+    /// it; nothing in here reads the environment on its own.
+    pub settings: crate::settings::Settings,
     /// The wall clock as HHMM, when the host knows it better than this
     /// process does -- `johnny.scr` reads the local time, the tools do not.
     pub hhmm: Option<u16>,
@@ -662,12 +683,7 @@ impl Director {
             faithful_router: false,
             rng: Rng::new(seed),
             stage: Stage::new(),
-            activity: Activity::Intro {
-                until: std::env::var("JC_INTRO")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(INTRO_TICKS),
-            },
+            activity: Activity::Intro { until: INTRO_TICKS },
             programs: HashMap::new(),
             walk_frames: None,
             standing: None,
@@ -693,7 +709,38 @@ impl Director {
             hhmm: None,
             checking: std::env::var_os("JC_CHECK").is_some(),
             complaints: Vec::new(),
+            settings: crate::settings::Settings::default(),
         }
+    }
+
+    /// Take the settings on. Story state included: `Introduction` and
+    /// `NumDays` are the day on offer and the day reached, and
+    /// `CurrentYear`/`Month`/`Day` is when they last moved -- so an
+    /// eleven-day story picks up where the last session left it rather than
+    /// starting again every time the screen goes blank.
+    pub fn configure(&mut self, s: crate::settings::Settings) {
+        self.clock = Clock::Wall { dawn: s.start_time };
+        self.backdrop.allow_waves = s.waves;
+        self.backdrop.allow_clouds = s.clouds;
+        self.activity = Activity::Intro { until: s.intro_ticks };
+        if s.story_reached > 0 {
+            self.story_offered = s.story_offered.max(1);
+            self.day = self.story_offered;
+            let (y, m, d) = s.story_date;
+            if y > 0 {
+                self.story_date = Some(days_from_civil(y as i64, m as u32, d as u32));
+            }
+        }
+        self.settings = s;
+    }
+
+    /// The story state to write back when the screensaver stops.
+    pub fn story_snapshot(&self) -> (u8, u8, (u16, u8, u8)) {
+        (
+            self.story_offered,
+            self.day.max(self.story_offered),
+            self.story_date.map(civil_from_days).unwrap_or_default(),
+        )
     }
 
     fn note(&mut self, line: String) {
@@ -1013,6 +1060,8 @@ impl Director {
         // wanted before the next one starts asking.
         self.island_state = scenery::ANYWHERE;
         self.backdrop = Backdrop::default();
+        self.backdrop.allow_waves = self.settings.waves;
+        self.backdrop.allow_clouds = self.settings.clouds;
         self.advance_story();
         self.build_queue();
         // `seg4:0x064D`: Johnny is simply put where the first scene needs
@@ -1768,6 +1817,8 @@ impl Director {
         // The same reset `seg4:0x0633` does before every build.
         self.island_state = scenery::ANYWHERE;
         self.backdrop = Backdrop::default();
+        self.backdrop.allow_waves = self.settings.waves;
+        self.backdrop.allow_clouds = self.settings.clouds;
         self.build_queue();
         let base = tables::SCENES.as_ptr() as usize;
         self.queue

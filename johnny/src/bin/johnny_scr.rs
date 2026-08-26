@@ -384,12 +384,16 @@ fn windows_main() {
              Place RESOURCE.001 and RESOURCE.MAP from your own copy of the \
              original beside this screensaver, or set JC_DATA to the folder \
              holding them.\r\n\r\n\
-             Settings are environment variables for now. JC_SPEED is a \
-             percentage of the rate the data was authored at (default 60). \
-             JC_DAWN is when Johnny's day starts, as HHMM (default 0900) -- \
-             his day is eight real hours, so nine puts dusk at three and the \
-             next dawn at five. JC_FAITHFUL restores the two places where \
-             the original's code and its own artwork disagree.",
+             Settings live in johnny.ini beside this screensaver, in the \
+             same [ScreenSaver.ScreenAntics] section and under the same key \
+             names the original used in SCRANTIC.INI. StartTime is when \
+             Johnny's day begins as HHMM (default 0900) -- his day is eight \
+             real hours, so nine puts dusk at three and the next dawn at \
+             five. Speed is a percentage of the rate the data was authored \
+             at (default 60). Sounds, Clouds and Waves turn those off.\r\n\r\n\
+             Introduction and NumDays are not settings: they are how far \
+             Johnny's eleven-day story has got, written back when the \
+             screensaver stops so it carries on where it left off.",
         );
         let caption = wide("Johnny Castaway");
         unsafe {
@@ -408,12 +412,16 @@ fn windows_main() {
     // a .scr from System32 with a working directory of its own choosing, so
     // "put the data files next to it" only means anything if we resolve
     // against the binary's own path.
-    let dir = std::env::var("JC_DATA").unwrap_or_else(|_| {
+    let config = johnny::settings::Settings::path();
+    let settings = johnny::settings::Settings::load(&config).with_env();
+    let dir = if settings.source_dir.is_empty() {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
             .unwrap_or_else(|| ".".into())
-    });
+    } else {
+        settings.source_dir.clone()
+    };
     let data = match std::fs::read(format!("{dir}/RESOURCE.001")) {
         Ok(d) => d,
         Err(e) => {
@@ -442,10 +450,18 @@ fn windows_main() {
     // The sound effects are Windows resources inside the original's own
     // executable, not in the archive. Its absence is not fatal -- a silent
     // island is better than no island.
-    let sounds = ["SCRANTIC.EXE", "scrantic.exe", "SCRANTIC.SCR", "scrantic.scr"]
-        .iter()
-        .find_map(|name| std::fs::read(format!("{dir}/{name}")).ok())
-        .and_then(|exe| johnny::sound::Sounds::from_exe(&exe));
+    //
+    // `seg5:0x000F` checks the `Sounds` setting before the loader runs at
+    // all, so off means the WAVs are never even looked for.
+    let sounds = settings
+        .sounds
+        .then(|| {
+            ["SCRANTIC.EXE", "scrantic.exe", "SCRANTIC.SCR", "scrantic.scr"]
+                .iter()
+                .find_map(|name| std::fs::read(format!("{dir}/{name}")).ok())
+                .and_then(|exe| johnny::sound::Sounds::from_exe(&exe))
+        })
+        .flatten();
 
     // ---- window ----------------------------------------------------------
     unsafe {
@@ -576,14 +592,7 @@ fn windows_main() {
         // ---- engine ------------------------------------------------------
         let seed = GetTickCount() as u64;
         let mut director = Director::new(seed);
-        // `ds:0x00BE` in the original, set from a spinner in Screen Antics'
-        // settings dialog. Ships at 0900.
-        director.clock = johnny::director::Clock::Wall {
-            dawn: std::env::var("JC_DAWN")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(johnny::director::DEFAULT_DAWN),
-        };
+        director.configure(settings.clone());
         let mut info = BITMAPINFO256 {
             header: BITMAPINFOHEADER {
                 biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -605,8 +614,8 @@ fn windows_main() {
             colors: [0; 256],
         };
 
-        // One tick is 16ms; see `director::MS_PER_TICK`. `JC_SPEED` scales it.
-        let ms_per_tick = johnny::director::ms_per_tick();
+        // One tick is 16ms; see `director::MS_PER_TICK`. `Speed` scales it.
+        let ms_per_tick = johnny::director::ms_per_tick_at(settings.speed);
         let mut last = GetTickCount();
         let mut msg: MSG = core::mem::zeroed();
 
@@ -720,6 +729,19 @@ fn windows_main() {
         // Stop whatever is playing before the buffers go out of scope:
         // `SND_MEMORY` means Windows is still reading them.
         sndPlaySoundW(std::ptr::null(), 0);
+
+        // Write the story back. `seg2:0x0DFF` onwards does the same eleven
+        // `WritePrivateProfileString` calls when Screen Antics shuts down --
+        // an eleven-day story is only eleven days long if it survives the
+        // screen coming back on.
+        if !preview {
+            let (offered, reached, date) = director.story_snapshot();
+            let mut out = settings.clone();
+            out.story_offered = offered;
+            out.story_reached = reached;
+            out.story_date = date;
+            let _ = out.save(&config);
+        }
         if !preview {
             ShowCursor(1);
         }

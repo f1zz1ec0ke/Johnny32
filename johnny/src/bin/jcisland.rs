@@ -3,12 +3,15 @@
 //!
 //!     cargo run --release --bin jcisland -- 300
 //!
-//! Arguments: a tick count, an optional RNG seed. `JC_NOWRITE=1` skips the
-//! PNG output; `JC_FAITHFUL=1` restores the 1992 walk-router bug; `JC_DAY=n`
-//! starts on story day `n`, which is what decides how far the raft has got;
-//! `JC_HHMM=hhmm` pins the wall clock instead of stepping a phase per queue;
-//! `JC_FROM`/`JC_TO` bound which ticks get written as PNGs;
-//! `JC_DATE=YYYY-MM-DD` pins the calendar, for the holiday decorations.
+//! Arguments: a tick count, an optional RNG seed.
+//!
+//! Settings come from `johnny.ini` (or `JC_CONFIG`), the same file the
+//! screensaver reads. The rest are switches this tool needs and the
+//! screensaver has no use for: `JC_NOWRITE=1` skips the PNG output,
+//! `JC_FAITHFUL=1` restores the 1992 walk-router bug, `JC_HHMM=hhmm` pins the
+//! wall clock instead of stepping a phase per queue, `JC_FROM`/`JC_TO` bound
+//! which ticks get written, and `JC_DATE=YYYY-MM-DD` pins the calendar so a
+//! holiday decoration can be seen without waiting for October.
 
 use johnny::{dgds::Archive, director::Director, png};
 use std::process::ExitCode;
@@ -18,7 +21,13 @@ fn main() -> ExitCode {
     let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(300);
     let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0x15_1A2D);
 
-    let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+    let settings = johnny::settings::Settings::load(&johnny::settings::Settings::path())
+        .with_env();
+    let dir = if settings.source_dir.is_empty() {
+        "original".to_string()
+    } else {
+        settings.source_dir.clone()
+    };
     let data = match std::fs::read(format!("{dir}/RESOURCE.001")) {
         Ok(d) => d,
         Err(e) => {
@@ -48,11 +57,12 @@ fn main() -> ExitCode {
     }
 
     let mut d = Director::new(seed);
+    d.configure(settings.clone());
     d.faithful_router = std::env::var("JC_FAITHFUL").is_ok();
-    // Start on a given story day, to see the island as it is by then --
-    // mostly, to watch the raft get built.
-    if let Some(day) = std::env::var("JC_DAY").ok().and_then(|v| v.parse().ok()) {
-        d.day = day;
+    // `JC_DAY` (through the settings) starts on a given story day, to see the
+    // island as it is by then -- mostly, to watch the raft get built.
+    if settings.story_reached > 0 {
+        d.day = settings.story_offered;
         d.date = 0;
     }
     // `JC_DATE=YYYY-MM-DD` pins the calendar, which is how you get a holiday
@@ -107,7 +117,7 @@ fn main() -> ExitCode {
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
-            let secs = t as f32 * johnny::director::ms_per_tick() as f32 / 1000.0;
+            let secs = t as f32 * johnny::director::ms_per_tick_at(settings.speed) as f32 / 1000.0;
             println!("[{t:6} {secs:7.1}s] {}", d.log[logged]);
             logged += 1;
         }
@@ -148,7 +158,7 @@ fn main() -> ExitCode {
     );
     println!(
         "{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
-        d.ticks() as f32 * johnny::director::ms_per_tick() as f32 / 1000.0,
+        d.ticks() as f32 * johnny::director::ms_per_tick_at(settings.speed) as f32 / 1000.0,
         d.day,
         d.phase,
         if d.is_night() { "night" } else { "day" },

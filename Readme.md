@@ -198,6 +198,32 @@ near it. Both found real bugs: the weighted pickers were taking the option
 after the one a boundary draw belongs to, and the pivot was tossing its coin
 even for a turn of nothing.
 
+## Settings, and the story that survives being switched off
+
+Settings live in `johnny.ini` beside the screensaver, in the section and under
+the key names the original used in `SCRANTIC.INI` — so somebody's 1992 file
+works as it is.
+
+```ini
+[ScreenSaver.ScreenAntics]
+StartTime=900        ; when Johnny's day begins, HHMM
+Sounds=1
+Clouds=1
+Waves=1
+Speed=60             ; percentage of the rate the data was authored at
+Introduction=3       ; the story day on offer
+NumDays=3            ; the story day reached
+CurrentYear=1992     ; when those last moved on
+```
+
+The last four are not settings. `seg2:0x0C90` reads them back in and eleven
+`WritePrivateProfileString` calls write them out again when Screen Antics
+shuts down: `Introduction` is `ds:0x2D9B`, the story day on offer, and
+`NumDays` is `ds:0x2D9C`, the day reached. That is how an eleven-day story is
+eleven days long rather than eleven days *per session* — and a port that keeps
+them in memory starts Johnny's story again every time the screen goes blank.
+This one writes them back too.
+
 ## Checking the port against itself, where the binary cannot reach
 
 The oracle covers the deciding: which scene, when, where. It cannot reach the
