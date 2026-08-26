@@ -94,11 +94,17 @@ That harness paid for itself immediately: on its first run the Rust reader
 refused a chunk the Python one had been inventing out of `FILES.VIN`, which is
 plain text whose first four bytes happen to spell `intr`.
 
-The TTM interpreter runs. Render a scene to PNGs:
+The TTM interpreter and the ADS sequencer both run:
 
 ```sh
 cargo run --release --manifest-path johnny/Cargo.toml --bin jcrender -- MJRAFT.TTM
+cargo run --release --manifest-path johnny/Cargo.toml --bin jcplay -- MISCGAG.ADS 1
 ```
+
+Timing is settled: the engine registers one 4-unit software timer
+(`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, which is Win16's
+`GetCurrentTime` and returns milliseconds. **One tick is 4 ms**, so a TTM
+`SET_DELAY n` waits 4n ms.
 
 ## Layout
 

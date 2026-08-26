@@ -6,6 +6,7 @@
 //! for the write-up. The original data files are not redistributed — the
 //! engine reads `RESOURCE.MAP` and `RESOURCE.001` from a copy you supply.
 
+pub mod ads;
 pub mod dgds;
 pub mod png;
 pub mod render;

@@ -74,6 +74,20 @@ def main():
                     else:
                         consumed = off + 2 + len(argv) * 2
                 print('  ttm\t%d\t%d\t%d' % (len(ops), consumed, len(code)))
+        elif upper.endswith('.ADS'):
+            chunks = dict((q[-1], pl) for q, pl in
+                          dgds.flatten(dgds.parse_chunks(body)))
+            if 'SCR:' not in chunks:
+                print('  ads\tERROR\tno SCR: chunk')
+                failed = True
+            else:
+                code = dgds.decompress(chunks['SCR:'])
+                ops = dgds.disasm_ads(code)
+                consumed = 0
+                if ops:
+                    off, op, argv = ops[-1]
+                    consumed = off + dgds.ADS_LENGTHS.get(op, 2)
+                print('  ads\t%d\t%d\t%d' % (len(ops), consumed, len(code)))
         elif upper.endswith('.PAL'):
             try:
                 pal = dgds.read_palette(body)

@@ -9,7 +9,7 @@
 //!     python3 tools/dgds_digest.py original/RESOURCE.001 > py.txt
 //!     diff rust.txt py.txt
 
-use johnny::{dgds, ttm};
+use johnny::{ads, dgds, ttm};
 use std::process::ExitCode;
 
 /// CRC-32 (IEEE), matching Python's `zlib.crc32`.
@@ -127,6 +127,23 @@ fn main() -> ExitCode {
                 },
                 None => {
                     println!("  ttm\tERROR\tno TT3: chunk");
+                    failed = true;
+                }
+            }
+        } else if upper.ends_with(".ADS") {
+            match dgds::leaf(rec.body, b"SCR:") {
+                Some(l) => match dgds::decompress(l.payload) {
+                    Ok(code) => {
+                        let (ops, consumed) = ads::decode(&code);
+                        println!("  ads\t{}\t{}\t{}", ops.len(), consumed, code.len());
+                    }
+                    Err(e) => {
+                        println!("  ads\tERROR\t{e}");
+                        failed = true;
+                    }
+                },
+                None => {
+                    println!("  ads\tERROR\tno SCR: chunk");
                     failed = true;
                 }
             }
