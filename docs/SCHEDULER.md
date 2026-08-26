@@ -417,11 +417,16 @@ sandbar carries the beach forward and the rock sits offshore, four more
 patches of surf come with them, the placement rectangle is different
 (`seg3:0x1B56`) and so is where the raft ties up (`seg3:0x1DCB`).
 
-The four extra patches of surf are the giveaway. They have beach baked into
-them and they sit exactly along the sandbar's edge and around the rock, and
-`ISLETEMP.SCR` — which is the layout *without* the sandbar — contains no
-trace of any of them while matching the other three at 54-75%. Drawn without
-the sandbar they are strips of sand floating in open water.
+The surf is the giveaway, and it is **two sets of alternatives, one per
+layout** — not seven patches of one shoreline. Each set traces its own
+island's waterline, and the sandbar's is further forward. `ISLETEMP.SCR` is
+the bare-island layout and shows the split exactly: the first three match it
+at 54-75%, and it contains no trace of the other four.
+
+Get it wrong either way and it shows. Draw the sandbar's four without the
+sandbar and they are strips of beach floating in open water. Draw all seven
+together and the bare island's waterline runs across the middle of the
+sandbar's beach — a band of sea cutting through dry sand.
 
 **The surf.** Seven patches of breaking water round the shore, three frames
 each:
