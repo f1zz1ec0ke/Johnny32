@@ -193,6 +193,46 @@ pub const HOLIDAY_AT: [(usize, i32, i32); 4] = [
     (1, 0x14E, 0x11E), // St Patrick's, 120x47
 ];
 
+/// Where `seg3:0x1B00` drops the island, in absolute screen coordinates --
+/// the caller takes the anchor off afterwards (`seg3:0x0236`) to get an
+/// offset.
+///
+/// A pinned state returns its fixed spot. Otherwise it is a uniform point in
+/// a rectangle, narrowed by whichever quadrants the queue's scenes claimed:
+/// the shift is taken off the full extent and the extent halved afterwards,
+/// so one bit is a corner, two adjacent bits are a half, and none is the lot.
+pub fn place_island(state: u16, sandbar: bool, rng: &mut Rng) -> (i32, i32) {
+    let state = if state == ANYWHERE { 0 } else { state };
+    for (bit, spot) in [(2u16, PINNED[1]), (1, PINNED[0])] {
+        if state & bit != 0 {
+            return spot;
+        }
+    }
+    let (mut x, mut y, mut w, mut h) = PLACEMENT[sandbar as usize];
+    // `seg3:0x1B7F`: no claims at all and the whole rectangle is in play.
+    // This is the common case by a distance -- most scenes say nothing about
+    // where the island stands -- and narrowing it anyway pins the island to
+    // the top-left quarter of the water it should have all of.
+    if state == 0 {
+        return (x + span_roll(rng, w), y + span_roll(rng, h));
+    }
+    let set = |b: u16| state & b != 0;
+    if matches!(state, 0x10 | 0x20 | 0x30) {
+        y += h / 2;
+    }
+    if !((set(4) && set(0x10)) || (set(8) && set(0x20))) {
+        h /= 2;
+    }
+    if matches!(state, 8 | 0x20 | 0x28) {
+        x += w / 2;
+    }
+    if !((set(4) && set(8)) || (set(0x10) && set(0x20))) {
+        w /= 2;
+    }
+    // `seg3:0x14BF` with no sprite to inset by: a uniform point inside.
+    (x + span_roll(rng, w), y + span_roll(rng, h))
+}
+
 /// The two places a scene can nail the island to, rather than let it roam:
 /// hard left and low (`seg3:0x1B41`), or the middle at the front
 /// (`seg3:0x1B24`). Indexed by the state bit that asks for them, 1 then 2.
@@ -380,16 +420,11 @@ impl Scenery {
     /// optional pieces are there.
     pub fn build(
         archive: &Archive,
-        night: bool,
-        roll: u32,
+        sea: &'static str,
+        extras: bool,
         now: u32,
         day: u8,
     ) -> Option<Scenery> {
-        let sea = if night {
-            NIGHT_SEA
-        } else {
-            SEAS[(roll % 3) as usize]
-        };
         let mut sea_only = dgds::read_screen(archive.get(sea)?).ok()?;
         // `NIGHT.SCR` and the oceans are 640x480, the size of the screen. If
         // one ever is not, pad rather than leave the surface ragged.
@@ -439,7 +474,7 @@ impl Scenery {
             // drifts drifts with it.
             drift: 1,
             sea,
-            extras: roll / 3 % 2 == 1,
+            extras,
             offset: (0, 0),
         };
         scenery.rebuild();
@@ -490,13 +525,13 @@ impl Scenery {
         if sx < 0 || sy < 0 {
             return None;
         }
-        let speed = (rng.next_u32() % 5) as u16 + 6;
+        let speed = (rng.next_u16() % 5) + 6;
         Some(Cloud {
             kind,
             x: bx + span_roll(rng, sx),
             y: by + span_roll(rng, sy),
             speed,
-            left: (rng.next_u32() % speed as u32) as u16,
+            left: rng.next_u16() % speed,
         })
     }
 
@@ -535,7 +570,7 @@ impl Scenery {
     /// Whether the rock and the sandbar are part of the island this time.
     /// `ds:0x30C2`: a coin flip per queue, unless a scene said no.
     pub fn sandbar(&self) -> bool {
-        self.extras && !self.backdrop.no_rock
+        self.extras
     }
 
     /// How many things the water is allowed at once.
@@ -574,35 +609,8 @@ impl Scenery {
     /// Johnny's walk and every sprite a scene puts up -- shifts together.
     pub fn place(&mut self, state: u16, rng: &mut Rng) {
         let anchor = (ISLAND[0].1, ISLAND[0].2);
-        let state = if state == ANYWHERE { 0 } else { state };
-        for (bit, spot) in [(2u16, PINNED[1]), (1, PINNED[0])] {
-            if state & bit != 0 {
-                self.offset = (spot.0 - anchor.0, spot.1 - anchor.1);
-                self.rebuild();
-                return;
-            }
-        }
-        let (mut x, mut y, mut w, mut h) = PLACEMENT[self.sandbar() as usize];
-        let set = |b: u16| state & b != 0;
-        // The shift is taken off the full extent and the extent is halved
-        // afterwards, so a single quadrant lands in the right corner.
-        if matches!(state, 0x10 | 0x20 | 0x30) {
-            y += h / 2;
-        }
-        if !((set(4) && set(0x10)) || (set(8) && set(0x20))) {
-            h /= 2;
-        }
-        if matches!(state, 8 | 0x20 | 0x28) {
-            x += w / 2;
-        }
-        if !((set(4) && set(8)) || (set(0x10) && set(0x20))) {
-            w /= 2;
-        }
-        // `seg3:0x14BF` with no sprite to inset by: a uniform point inside.
-        self.offset = (
-            x + span_roll(rng, w) - anchor.0,
-            y + span_roll(rng, h) - anchor.1,
-        );
+        let (x, y) = place_island(state, self.sandbar(), rng);
+        self.offset = (x - anchor.0, y - anchor.1);
         self.rebuild();
     }
 
@@ -800,7 +808,7 @@ impl Scenery {
             x,
             y,
             // `seg3:0x0524`: ten to thirty-nine steps.
-            left: (rng.next_u32() % 30) as u16 + 10,
+            left: rng.next_u16() % 30 + 10,
         })
     }
 
@@ -884,8 +892,8 @@ fn fit_to_screen(src: &Frame) -> Frame {
 /// The arguments are percentages. It draws a 16-bit random number and walks
 /// the list scaling each weight by 655 -- a hundredth of 65536 -- returning
 /// the 1-based position of the one it lands on, or 0 if it runs off the end.
-fn weighted(rng: &mut Rng, weights: &[u32]) -> usize {
-    let mut roll = rng.next_u32() & 0xFFFF;
+pub fn weighted(rng: &mut Rng, weights: &[u32]) -> usize {
+    let mut roll = rng.next_u16() as u32;
     for (i, &w) in weights.iter().enumerate() {
         if w == 0 {
             break;
@@ -904,6 +912,6 @@ fn span_roll(rng: &mut Rng, span: i32) -> i32 {
     if span <= 0 {
         0
     } else {
-        (rng.next_u32() % span as u32) as i32
+        (rng.next_u16() as i32) % span
     }
 }

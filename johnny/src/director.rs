@@ -867,7 +867,7 @@ impl Director {
     /// percentages scaled by 655, returning the 1-based position it lands on
     /// or 0 if it runs off the end.
     fn weighted(&mut self, weights: &[u32]) -> usize {
-        let mut roll = self.rng.next_u32() & 0xFFFF;
+        let mut roll = self.rng.next_u16() as u32;
         for (i, &w) in weights.iter().enumerate() {
             if w == 0 {
                 break;
@@ -1142,11 +1142,21 @@ impl Director {
                 self.stage.set_palette(p);
             }
         }
-        let roll = self.rng.next_u32();
         // `seg3:0x01E7`: night by the clock, or because a scene in the queue
         // asked for it.
         self.scenery_night = self.is_night() || self.backdrop.night;
-        match Scenery::build(archive, self.scenery_night, roll, self.tick, self.day) {
+        // Two separate draws, in the order segment 3 makes them, because the
+        // generator is a stream and where each value lands in it matters.
+        // `seg3:0x01F5` picks the ocean and only runs in daylight;
+        // `seg3:0x0226` flips for the sandbar, and only if no scene in the
+        // queue already said no rock.
+        let sea = if self.scenery_night {
+            scenery::NIGHT_SEA
+        } else {
+            scenery::SEAS[self.rng.below(3) as usize]
+        };
+        let extras = !self.backdrop.no_rock && self.rng.next_u16() & 1 == 1;
+        match Scenery::build(archive, sea, extras, self.tick, self.day) {
             Some(s) => {
                 let mut s = s;
                 s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
@@ -1484,7 +1494,7 @@ impl Director {
             ends_at.0
         };
         let minor = if ends_at.1 == 0 {
-            (self.rng.next_u32() & 7) as u8
+            (self.rng.next_u16() & 7) as u8
         } else {
             ends_at.1
         };
@@ -1544,6 +1554,21 @@ impl Director {
     /// jumps the date does not look like it has been running since then.
     pub fn story_date_reset(&mut self) {
         self.story_date = None;
+    }
+
+    /// Build one queue and report it as row numbers in the scene table, so
+    /// `tools/oracle.py` can put the same question to `seg4:0x08B9` in the
+    /// original and diff the answers.
+    pub fn queue_rows(&mut self) -> Vec<usize> {
+        // The same reset `seg4:0x0633` does before every build.
+        self.island_state = scenery::ANYWHERE;
+        self.backdrop = Backdrop::default();
+        self.build_queue();
+        let base = tables::SCENES.as_ptr() as usize;
+        self.queue
+            .iter()
+            .map(|s| (*s as *const _ as usize - base) / std::mem::size_of::<Scene>())
+            .collect()
     }
 
     /// How many TTM scenes are on screen at once. A scene that keeps its

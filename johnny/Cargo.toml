@@ -12,6 +12,10 @@ name = "johnny"
 path = "src/lib.rs"
 
 [[bin]]
+name = "jcoracle"
+path = "src/bin/jcoracle.rs"
+
+[[bin]]
 name = "jcdump"
 path = "src/bin/jcdump.rs"
 

@@ -123,6 +123,47 @@ soak test: every one of the thirty TTM opcodes and nineteen ADS opcodes the
 shipped scripts use has been walked back to its handler, and the ones the port
 treats as no-ops are ones the disassembly shows reaching their "done" label
 whichever way they branch. The audit table is in `docs/SCHEDULER.md`.
+
+## Checking against the binary instead of against myself
+
+`tools/difftest.sh` compares the Rust decoder with the Python one, and both
+came out of the same reading of the same disassembly — a shared
+misunderstanding passes it clean. So there is a second harness that does not
+have that problem.
+
+`tools/x86.py` is a 16-bit x86 interpreter: enough of an 8086 to load the NE
+segments, apply their relocations and *run the original's own functions*. It is
+not a PC emulator — no BIOS, no video, no DOS — and anything it cannot execute
+raises rather than guessing, so a gap shows up as a failure and never as a
+false pass. `tools/oracle.py` puts the same questions to that and to the port
+and diffs the answers:
+
+```sh
+python3 tools/oracle.py
+```
+
+```
+  rand        256 answers, all identical
+  weighted    256 answers, all identical
+  phase      2304 answers, all identical
+  choose      256 answers, all identical
+  queue        16 answers, all identical
+  place      1536 answers, all identical
+```
+
+That covers the generator, the weighted chooser every decision is built on,
+the time-of-day arithmetic exhaustively, the scene chooser, the entire queue
+builder, and where the island gets dropped. A disagreement there is a bug in
+the port with no interpretation involved — which is how the first run found
+that the island's placement rectangle was being narrowed in the one case
+`seg3:0x1B7F` skips the narrowing entirely, pinning the island to a quarter of
+the water it should have had all of.
+
+Porting the engine's own generator is what made this possible. It is a
+fifty-six entry additive lagged Fibonacci with a constant table in the data
+segment, and "seeding" is `seg4:0x1EDC` calling it *n* times and throwing the
+results away — so a whole run is determined by one number from 0 to 65535, and
+two implementations can be compared draw for draw.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and

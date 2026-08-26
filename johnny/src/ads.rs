@@ -237,28 +237,71 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
 }
 
 /// A tiny deterministic PRNG, so a run can be reproduced from a seed.
-pub struct Rng(u64);
+/// The engine's own generator, from `seg4:0x1E86`.
+///
+/// A fifty-six entry additive lagged Fibonacci: two cursors twenty-four apart
+/// walk the table, and each call adds the entry under one to the entry under
+/// the other, hands back the sum, and steps both on. The table and the two
+/// cursors are constants in the data segment (`ds:0x1CE6`, `ds:0x1CE2` and
+/// `ds:0x1CE4`), so with no seeding the sequence is fixed for all time.
+///
+/// It returns **sixteen bits**, which matters: every caller either divides
+/// `dx:ax` with `dx` zeroed or compares the whole word against a weight scaled
+/// by 655. A generator handing back thirty-two would land somewhere else.
+///
+/// Seeding is `seg4:0x1EDC`, which calls it `n` times and throws the results
+/// away; `seg4:0x1EFA` does that at startup with the low word of `time(0)`.
+/// So the whole run is determined by one number from 0 to 65535 -- which is
+/// what makes it possible to check this port against the binary instead of
+/// against another copy of my own reasoning.
+pub struct Rng {
+    table: [u16; 56],
+    i: usize,
+    j: usize,
+}
+
+/// `ds:0x1CE6`, verbatim.
+const SEED_TABLE: [u16; 56] = [
+    0xDD23, 0x9533, 0xF3CD, 0x4BC2, 0xF7E2, 0xA2DF, 0xAA70, 0x60AA,
+    0x144B, 0x8948, 0x192A, 0x6B0D, 0x9E0B, 0xFBF1, 0x8607, 0x465D,
+    0xEAF4, 0x69FD, 0x6C44, 0x1B27, 0xDB71, 0xE38F, 0xABB4, 0xDC47,
+    0x0FDE, 0x4D8E, 0xFC7D, 0x8D38, 0x5948, 0xE36F, 0xAA22, 0x2F26,
+    0x43FA, 0xB5A5, 0x20EB, 0xED85, 0xF5C3, 0x819F, 0x2D9C, 0xB26D,
+    0xE92B, 0x97D5, 0x3DA1, 0x89ED, 0xE3F4, 0x74B5, 0x002C, 0xD35F,
+    0x3B08, 0x0DF5, 0xF27E, 0xC270, 0x2589, 0x2E8B, 0x6352, 0xDA2D,
+];
 
 impl Rng {
+    /// Start the generator and discard `seed` values, which is the only kind
+    /// of seeding the engine has. The count is a word there, so it wraps.
     pub fn new(seed: u64) -> Self {
-        Rng(seed | 1)
+        let mut rng = Rng {
+            table: SEED_TABLE,
+            i: 24,
+            j: 55,
+        };
+        for _ in 0..(seed as u16) {
+            rng.next_u16();
+        }
+        rng
     }
 
-    pub fn next_u32(&mut self) -> u32 {
-        // xorshift64*
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
+    /// One call of `rand()`.
+    pub fn next_u16(&mut self) -> u16 {
+        let sum = self.table[self.j].wrapping_add(self.table[self.i]);
+        self.table[self.j] = sum;
+        self.j = (self.j + 1) % 56;
+        self.i = (self.i + 1) % 56;
+        sum
     }
 
+    /// `rand() % n`, the way every caller does it: `xor dx, dx` and a 16-bit
+    /// divide.
     pub fn below(&mut self, n: u32) -> u32 {
         if n == 0 {
             0
         } else {
-            self.next_u32() % n
+            self.next_u16() as u32 % n
         }
     }
 }
