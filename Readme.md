@@ -116,6 +116,34 @@ Timing is settled: the engine registers one 4-unit software timer
 `GetCurrentTime` and returns milliseconds. **One tick is 4 ms**, so a TTM
 `SET_DELAY n` waits 4n ms.
 
+## Building the screensaver
+
+`johnny_scr` is the Windows shell — `/s` full screen across the whole virtual
+desktop, `/p <HWND>` for the settings-dialog preview, `/c` for the config box.
+It talks to Win32 directly, so the crate still has no dependencies.
+
+On Windows:
+
+```sh
+cargo build --release --bin johnny_scr
+```
+
+Cross-compiling from Linux needs a mingw-w64 linker:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu --bin johnny_scr
+```
+
+Rename the result to `Johnny.scr` and put it in `C:\Windows\System32`, with
+`RESOURCE.001` and `RESOURCE.MAP` from your own copy of the original beside it
+— or point `JC_DATA` at the folder holding them.
+
+**This has not been run.** It is written from the disassembly and type-checks
+for `x86_64-pc-windows-gnu`, but the machine it was developed on is a headless
+Linux container with no Windows linker and no display, so nobody has yet seen
+it come up on a real desktop.
+
 ## Layout
 
 ```
@@ -127,6 +155,7 @@ tools/scheduler.py          the scene/story tables from the executable
 tools/dgds_digest.py        canonical digest, for differential testing
 tools/difftest.sh           run the Rust decoder against the Python reference
 johnny/                     the Rust port
+johnny/src/bin/johnny_scr.rs   the Windows .scr shell
 docs/                       what was found, and how the formats work
 ```
 

@@ -16,6 +16,10 @@ name = "jcdump"
 path = "src/bin/jcdump.rs"
 
 [[bin]]
+name = "johnny_scr"
+path = "src/bin/johnny_scr.rs"
+
+[[bin]]
 name = "jcisland"
 path = "src/bin/jcisland.rs"
 
