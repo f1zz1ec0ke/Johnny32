@@ -58,7 +58,12 @@ Chunks seen in this build:
 | `TTI:` | .TTM | container |
 | `TAG:` | .TTM/.ADS | scene-number to name table |
 | `RES:` | .ADS | resource-number to `.TTM` filename table |
-| `intr` | .VIN | newline-separated preload list |
+
+`FILES.VIN` is the exception: it has no chunk structure at all, just a
+newline-separated preload list (`intro.scr`, `johncast.pal`, `ocean*.scr` and
+so on). Its first four bytes spell `intr`, from `intro.scr`, which looks enough
+like a tag that a parser slicing without a bounds check will happily invent a
+chunk out of it.
 
 **`BIN:`, `SCR:`, `TT3:` and `VGA:`-inside-a-`.BMP` carry a compression
 header.** Everything else is raw, including the `VGA:` in `JOHNCAST.PAL`, whose

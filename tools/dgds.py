@@ -49,6 +49,12 @@ def parse_chunks(body):
         raw = struct.unpack_from('<I', body, p + 4)[0]
         container = bool(raw & 0x80000000)
         size = raw & 0x7FFFFFFF
+        if p + 8 + size > len(body):
+            # Not a chunk. Slicing past the end would silently invent a
+            # payload -- FILES.VIN is plain text whose first four bytes happen
+            # to look like a tag, and that is exactly how it used to sneak
+            # through as an `intr` chunk.
+            break
         payload = body[p + 8:p + 8 + size]
         tree.append((tag.decode('latin1'), payload, container,
                      parse_chunks(payload) if container else None))

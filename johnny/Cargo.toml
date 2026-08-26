@@ -1,0 +1,20 @@
+[package]
+name = "johnny"
+version = "0.1.0"
+edition = "2021"
+description = "A native reimplementation of the 1992 Dynamix screensaver Johnny Castaway"
+license = "MIT"
+
+[dependencies]
+
+[lib]
+name = "johnny"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jcdump"
+path = "src/bin/jcdump.rs"
+
+[profile.release]
+lto = true
+opt-level = 3

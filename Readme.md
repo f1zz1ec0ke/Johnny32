@@ -77,6 +77,23 @@ python3 tools/ne_info.py original/scrantic.exe
 python3 tools/ne_info.py original/scrantic.exe --disasm 6 --start 0xfc1 --end 0x10d0
 ```
 
+## The port
+
+`johnny/` is a Rust reimplementation, written against the disassembly rather
+than against the running screensaver. It reads a copy of `RESOURCE.001` you
+supply; no Sierra data is redistributed here.
+
+The decoder is differential-tested against the Python reference — both emit the
+same canonical digest of every chunk, sprite frame, background and palette:
+
+```sh
+tools/difftest.sh
+```
+
+That harness paid for itself immediately: on its first run the Rust reader
+refused a chunk the Python one had been inventing out of `FILES.VIN`, which is
+plain text whose first four bytes happen to spell `intr`.
+
 ## Layout
 
 ```
@@ -85,6 +102,9 @@ tools/dgds.py               DGDS archive, chunks, LZW/RLE, images, PNG writer
 tools/export_assets.py      RESOURCE.001 -> PNGs and readable script dumps
 tools/ne_info.py            16-bit NE header dump, relocations and disassembler
 tools/scheduler.py          the scene/story tables from the executable
+tools/dgds_digest.py        canonical digest, for differential testing
+tools/difftest.sh           run the Rust decoder against the Python reference
+johnny/                     the Rust port
 docs/                       what was found, and how the formats work
 ```
 
