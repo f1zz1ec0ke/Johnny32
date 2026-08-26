@@ -188,6 +188,86 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Several passes of one sequence, its state moving on between them
+        // by the same rule the oracle applies to the interpreter: the lowest
+        // scene that is playing has just ended, and what had just ended is
+        // now idle. That is the only way to see the parts of the sequencer
+        // that live between passes -- the parked resume pointer, and the one
+        // pass state 4 lasts.
+        "seqrun" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let record = args.get(1).cloned().unwrap_or_default();
+            let seq: u16 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1);
+            let pairs: Vec<(u16, u16)> = args
+                .get(3)
+                .map(String::as_str)
+                .unwrap_or("")
+                .split(',')
+                .filter_map(|e| {
+                    let f: Vec<u16> = e.split(':').filter_map(|v| v.parse().ok()).collect();
+                    (f.len() == 2).then(|| (f[0], f[1]))
+                })
+                .collect();
+            let passes: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(8);
+            let Some(mut s) = johnny::ads::Sequencer::from_record(&archive, &record) else {
+                eprintln!("no ADS record {record}");
+                return ExitCode::FAILURE;
+            };
+            s.tracing = true;
+            if !s.start(seq) {
+                eprintln!("{record} has no sequence {seq}");
+                return ExitCode::FAILURE;
+            }
+            let mut rng = Rng::new(0);
+            for turn in 0..passes {
+                s.trace.clear();
+                if s.sequence_states().iter().any(|(id, st)| *id == seq && *st == 1) {
+                    s.begin_pass();
+                    for _ in 0..johnny::ads::PASS_BUDGET {
+                        if matches!(s.next_action(&mut rng), johnny::ads::Action::PassOver) {
+                            break;
+                        }
+                    }
+                }
+                let state = s
+                    .sequence_states()
+                    .iter()
+                    .find(|(id, _)| *id == seq)
+                    .map_or(0, |(_, st)| *st);
+                let scenes: Vec<String> = pairs
+                    .iter()
+                    .map(|(t, sc)| format!("{t}/{sc}={}", s.raw_state(*t, *sc)))
+                    .collect();
+                println!(
+                    "pass {turn} {} | seq={state} {}",
+                    s.trace.join(" ; "),
+                    scenes.join(" ")
+                );
+                // Move the world on, exactly as the oracle does.
+                let mut sorted = pairs.clone();
+                sorted.sort();
+                let mut ended: Option<(u16, u16)> = None;
+                for (t, sc) in &sorted {
+                    match s.raw_state(*t, *sc) {
+                        4 => s.set_state(*t, *sc, johnny::ads::SceneState::Idle),
+                        1..=3 if ended.is_none() => ended = Some((*t, *sc)),
+                        _ => {}
+                    }
+                }
+                if let Some((t, sc)) = ended {
+                    s.set_state(t, sc, johnny::ads::SceneState::Over);
+                }
+            }
+        }
         // Where each guarded block ends. `seg10:0x106B` answers this in the
         // engine, and it is the thing that decides which instructions a
         // refused guard swallows -- stopping short leaves the tail of the

@@ -157,6 +157,7 @@ python3 tools/oracle.py
   turn        512 answers, all identical
   blocks     2688 answers, all identical
   seqpass    1143 answers, all identical
+  seqrun      528 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,

@@ -956,10 +956,10 @@ impl Sequencer {
                                 }
                             }
                             Some((_, Op::StopScene { ttm, scene, .. })) => {
-                                self.states.insert((ttm, scene), SceneState::Idle);
+                                self.stop_scene(ttm, scene);
                             }
                             Some((_, Op::FinishScene { ttm, scene, .. })) => {
-                                self.states.insert((ttm, scene), SceneState::Finished);
+                                self.finish_scene(ttm, scene);
                             }
                             Some((_, Op::RandomSkip { .. })) | None => {}
                             Some((_, other)) => {
@@ -969,14 +969,8 @@ impl Sequencer {
                     }
                 }
                 Op::RandomEnd | Op::RandomSkip { .. } => {}
-                Op::StopScene { ttm, scene, .. } => {
-                    self.note(format!("stop {ttm} {scene}"));
-                    self.states.insert((ttm, scene), SceneState::Idle);
-                }
-                Op::FinishScene { ttm, scene, .. } => {
-                    self.note(format!("finish {ttm} {scene}"));
-                    self.states.insert((ttm, scene), SceneState::Finished);
-                }
+                Op::StopScene { ttm, scene, .. } => self.stop_scene(ttm, scene),
+                Op::FinishScene { ttm, scene, .. } => self.finish_scene(ttm, scene),
                 Op::PlayScene {
                     ttm, scene, flags, ..
                 } => {
@@ -1014,6 +1008,21 @@ impl Sequencer {
                 }
             }
         }
+    }
+
+    /// `seg10:0x0E9B`: back to state 0. A random block can hold one of
+    /// these as readily as a `PlayScene`, so both ways in go through here --
+    /// otherwise the one inside the block is invisible to the oracle, which
+    /// is precisely where a difference would hide.
+    fn stop_scene(&mut self, ttm: u16, scene: u16) {
+        self.note(format!("stop {ttm} {scene}"));
+        self.states.insert((ttm, scene), SceneState::Idle);
+    }
+
+    /// `seg10:0x0E6E`: state 5.
+    fn finish_scene(&mut self, ttm: u16, scene: u16) {
+        self.note(format!("finish {ttm} {scene}"));
+        self.states.insert((ttm, scene), SceneState::Finished);
     }
 
     /// Record one action, when the oracle is watching.

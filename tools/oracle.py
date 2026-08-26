@@ -451,6 +451,111 @@ def q_blocks():
     return out
 
 
+def ads_run(machine, code, seqs, seq, pairs, passes=8):
+    """Several passes of one sequence, with its state evolving between them.
+
+    A single pass cannot see the two things that only exist across passes: the
+    resume pointer a `10x0` guard parks at itself (`ctx+0x292+seq*4`), and the
+    one-pass life of state 4. So this runs the interpreter repeatedly from
+    whatever pointer the engine itself parked, and between passes moves the
+    world on by a fixed rule -- the lowest-numbered scene that is playing has
+    just ended, and whatever had just ended is now idle. That is what a scene
+    finishing looks like to the sequencer, and it is the same rule on both
+    sides.
+    """
+    m = machine
+    base = m._lin(m.ds, ADS_SCRIPT)
+    m.mem[base:base + len(code)] = code
+    m.write16(m.ds, ADS_CURCTX, 0)
+    m.write16(m.ds, ADS_CTXPTR, ADS_CTX)
+    m.write16(m.ds, ADS_CTXPTR + 2, m.ds)
+    m.write16(m.ds, ADS_CTX + 0x02, max(seqs) + 1)
+    m.write16(m.ds, ADS_CTX + 0x08, ADS_SCRIPT + len(code))
+    for sid, (off, _) in seqs.items():
+        m.write16(m.ds, ADS_CTX + 0x152 + sid * 4, ADS_SCRIPT + off)
+        m.write16(m.ds, ADS_CTX + 0x154 + sid * 4, m.ds)
+        m.write16(m.ds, ADS_CTX + 0x12 + sid * 2, 1 if sid == seq else 0)
+        m.write16(m.ds, ADS_CTX + 0x292 + sid * 4, 0)
+        m.write16(m.ds, ADS_CTX + 0x294 + sid * 4, 0)
+        m.write16(m.ds, ADS_CTX + 0x0B2 + sid * 2, 0)
+    head, at_of = 0, {}
+    for n, (ttm, scene) in enumerate(pairs):
+        at = ADS_INSTS + n * 0x40
+        for k in range(0, 0x40, 2):
+            m.write16(m.ds, at + k, 0)
+        m.write16(m.ds, at + 0x00, ttm)
+        m.write16(m.ds, at + 0x02, scene)
+        m.write16(m.ds, at + 0x3B, head)
+        head = at
+        at_of[(ttm, scene)] = at
+    m.write16(m.ds, ADS_CTX + 0x10, head)
+    m.write16(m.ds, ADS_CURSEQ, seq)
+
+    log = []
+
+    def record(label, argc):
+        def watcher(mm):
+            args = [mm.read16(mm.ss, mm.sp + 2 + k * 2) for k in range(argc)]
+            log.append('%s %s' % (label, ' '.join(str(a) for a in args)))
+        return watcher
+
+    m.watches.clear()
+    for off, (label, argc) in ADS_ACTIONS.items():
+        m.watch(10, off, record(label, argc))
+
+    out = []
+    for turn in range(passes):
+        mark = len(log)
+        # `seg10:0x1BCC`: a parked resume pointer wins over the sequence start.
+        parked = m.read16(m.ds, ADS_CTX + 0x292 + seq * 4)
+        at = parked if parked else ADS_SCRIPT + seqs[seq][0]
+        if m.read16(m.ds, ADS_CTX + 0x12 + seq * 2) == 1:
+            m.call(10, 0x1925, [at, m.ds])
+        out.append('pass %d %s | seq=%d %s' % (
+            turn,
+            ' ; '.join(log[mark:]),
+            m.read16(m.ds, ADS_CTX + 0x12 + seq * 2),
+            ' '.join('%d/%d=%d' % (t, s, m.read16(m.ds, at_of[(t, s)] + 0x2F))
+                     for (t, s) in pairs)))
+        # Move the world on.
+        ended = None
+        for (t, s) in sorted(pairs):
+            at = at_of[(t, s)]
+            state = m.read16(m.ds, at + 0x2F)
+            if state == 4:
+                m.write16(m.ds, at + 0x2F, 0)
+            elif state in (1, 2, 3) and ended is None:
+                ended = at
+        if ended is not None:
+            m.write16(m.ds, ended + 0x2F, 4)
+    return out
+
+
+def q_seqrun(passes=8):
+    """seg10:0x1925 run over and over, which is the only way to see the parts
+    of the sequencer that live between passes."""
+    out = []
+    for name, code in ads_scripts():
+        layout = ads_layout(code)
+        for seq in sorted(layout):
+            pairs = layout[seq][1]
+            got = ads_run(fresh(), code, layout, seq, pairs, passes)
+            for line in got:
+                out.append('seqrun %s %d %s' % (name, seq, line))
+    return out
+
+
+def p_seqrun(passes=8):
+    out = []
+    for name, code in ads_scripts():
+        layout = ads_layout(code)
+        for seq in sorted(layout):
+            pairs = ','.join('%d:%d' % p for p in layout[seq][1]) or '-'
+            for line in port('seqrun', name, seq, pairs, passes):
+                out.append('seqrun %s %d %s' % (name, seq, line))
+    return out
+
+
 def _seqpass_cases():
     """Every (script, sequence, case) the comparison walks, and its states.
 
@@ -517,6 +622,7 @@ QUERIES = {
     'turn': (q_turn, lambda: port('turn', 8)),
     'blocks': (q_blocks, lambda: port('blocks')),
     'seqpass': (q_seqpass, p_seqpass),
+    'seqrun': (q_seqrun, p_seqrun),
 }
 
 
