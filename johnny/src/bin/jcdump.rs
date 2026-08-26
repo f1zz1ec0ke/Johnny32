@@ -9,7 +9,7 @@
 //!     python3 tools/dgds_digest.py original/RESOURCE.001 > py.txt
 //!     diff rust.txt py.txt
 
-use johnny::dgds;
+use johnny::{dgds, ttm};
 use std::process::ExitCode;
 
 /// CRC-32 (IEEE), matching Python's `zlib.crc32`.
@@ -107,6 +107,26 @@ fn main() -> ExitCode {
                 ),
                 Err(e) => {
                     println!("  screen\tERROR\t{e}");
+                    failed = true;
+                }
+            }
+        } else if upper.ends_with(".TTM") {
+            match dgds::leaf(rec.body, b"TT3:") {
+                Some(l) => match dgds::decompress(l.payload) {
+                    Ok(code) => {
+                        // Instruction count and bytes consumed. If the two
+                        // decoders disagree about any operand count, the
+                        // stream lengths diverge and this line changes.
+                        let (ops, consumed) = ttm::decode(&code);
+                        println!("  ttm\t{}\t{}\t{}", ops.len(), consumed, code.len());
+                    }
+                    Err(e) => {
+                        println!("  ttm\tERROR\t{e}");
+                        failed = true;
+                    }
+                },
+                None => {
+                    println!("  ttm\tERROR\tno TT3: chunk");
                     failed = true;
                 }
             }

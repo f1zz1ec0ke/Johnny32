@@ -55,6 +55,25 @@ def main():
             except Exception as exc:                         # noqa: BLE001
                 print('  screen\tERROR\t%s' % exc)
                 failed = True
+        elif upper.endswith('.TTM'):
+            chunks = dict((q[-1], pl) for q, pl in
+                          dgds.flatten(dgds.parse_chunks(body)))
+            if 'TT3:' not in chunks:
+                print('  ttm\tERROR\tno TT3: chunk')
+                failed = True
+            else:
+                code = dgds.decompress(chunks['TT3:'])
+                ops = dgds.disasm(code, dgds.TTM_OPCODES)
+                consumed = 0
+                if ops:
+                    off, op, argv, text = ops[-1]
+                    if text is not None:
+                        consumed = off + 2 + len(text) + 1
+                        if consumed & 1:
+                            consumed += 1
+                    else:
+                        consumed = off + 2 + len(argv) * 2
+                print('  ttm\t%d\t%d\t%d' % (len(ops), consumed, len(code)))
         elif upper.endswith('.PAL'):
             try:
                 pal = dgds.read_palette(body)

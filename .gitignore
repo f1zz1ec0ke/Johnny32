@@ -9,3 +9,6 @@ __pycache__/
 
 # Rust build output
 johnny/target/
+
+# jcrender debug output
+frames/

@@ -94,6 +94,12 @@ That harness paid for itself immediately: on its first run the Rust reader
 refused a chunk the Python one had been inventing out of `FILES.VIN`, which is
 plain text whose first four bytes happen to spell `intr`.
 
+The TTM interpreter runs. Render a scene to PNGs:
+
+```sh
+cargo run --release --manifest-path johnny/Cargo.toml --bin jcrender -- MJRAFT.TTM
+```
+
 ## Layout
 
 ```

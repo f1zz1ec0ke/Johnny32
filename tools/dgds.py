@@ -389,10 +389,11 @@ TTM_NAMES = {
     0x1121: 'SET_BACKGROUND',
     0x1201: 'GOTO_FRAME',
     0x4204: 'SAVE_REGION',
-    0x4214: 'SET_CLIP_REGION',
+    0x4214: 'NOP',            # seg12:0x0860 does nothing either way
+    0xC051: 'PLAY_SOUND',
+    0xA601: 'NOP',            # seg12:0x02D8 likewise
     0xA504: 'DRAW_SPRITE',
     0xA524: 'DRAW_SPRITE_FLIPPED',
-    0xA601: 'CLEAR_REGION',
     0xA0A4: 'DRAW_RECT',
     0xF01F: 'LOAD_SCREEN',
     0xF02F: 'LOAD_BITMAP',

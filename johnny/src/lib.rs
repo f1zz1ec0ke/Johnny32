@@ -7,3 +7,6 @@
 //! engine reads `RESOURCE.MAP` and `RESOURCE.001` from a copy you supply.
 
 pub mod dgds;
+pub mod png;
+pub mod render;
+pub mod ttm;

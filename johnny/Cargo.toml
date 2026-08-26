@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "jcdump"
 path = "src/bin/jcdump.rs"
 
+[[bin]]
+name = "jcrender"
+path = "src/bin/jcrender.rs"
+
 [profile.release]
 lto = true
 opt-level = 3
