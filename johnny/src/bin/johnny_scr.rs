@@ -64,6 +64,9 @@ mod win {
     pub const SRCCOPY: u32 = 0x00CC_0020;
     pub const COLORONCOLOR: i32 = 3;
 
+    /// `MAKEINTRESOURCE(32512)`.
+    pub const IDC_ARROW: usize = 32512;
+
     pub const MB_OK: u32 = 0x0000_0000;
     pub const MB_ICONINFORMATION: u32 = 0x0000_0040;
 
@@ -158,6 +161,9 @@ mod win {
         pub fn GetCursorPos(p: *mut POINT) -> i32;
         pub fn MessageBoxW(hwnd: HWND, text: *const u16, caption: *const u16, kind: u32) -> i32;
         pub fn LoadCursorW(instance: HINSTANCE, name: *const u16) -> HANDLE;
+        pub fn SetForegroundWindow(hwnd: HWND) -> i32;
+        pub fn SetFocus(hwnd: HWND) -> HWND;
+        pub fn IsWindow(hwnd: HWND) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -264,7 +270,14 @@ fn windows_main() {
         } else {
             args.get(1).cloned().unwrap_or_default()
         };
-        Mode::Preview(parent_hwnd(&rest))
+        let parent = parent_hwnd(&rest);
+        if parent.is_null() {
+            // A preview request we cannot honour. Falling through to the
+            // full-screen arm here would blank the whole desktop from the
+            // settings dialog, which is a memorable way to fail.
+            return;
+        }
+        Mode::Preview(parent)
     } else if flag.starts_with('c') || flag.is_empty() {
         Mode::Config
     } else {
@@ -295,7 +308,16 @@ fn windows_main() {
     }
 
     // ---- data ------------------------------------------------------------
-    let dir = std::env::var("JC_DATA").unwrap_or_else(|_| ".".into());
+    // Look beside the executable, not in the working directory. Windows runs
+    // a .scr from System32 with a working directory of its own choosing, so
+    // "put the data files next to it" only means anything if we resolve
+    // against the binary's own path.
+    let dir = std::env::var("JC_DATA").unwrap_or_else(|_| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| ".".into())
+    });
     let data = match std::fs::read(format!("{dir}/RESOURCE.001")) {
         Ok(d) => d,
         Err(e) => {
@@ -325,7 +347,9 @@ fn windows_main() {
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
         let class_name = wide("JohnnyCastawaySaver");
-        let arrow = wide("\u{7f00}"); // IDC_ARROW as an atom
+        // IDC_ARROW is MAKEINTRESOURCE(32512): the integer cast to a
+        // pointer, not a string containing that code point.
+        let arrow = IDC_ARROW as *const u16;
         let class = WNDCLASSW {
             style: 0,
             lpfnWndProc: Some(wndproc),
@@ -333,7 +357,7 @@ fn windows_main() {
             cbWndExtra: 0,
             hInstance: instance,
             hIcon: std::ptr::null_mut(),
-            hCursor: LoadCursorW(std::ptr::null_mut(), arrow.as_ptr()),
+            hCursor: LoadCursorW(std::ptr::null_mut(), arrow),
             hbrBackground: std::ptr::null_mut(),
             lpszMenuName: std::ptr::null(),
             lpszClassName: class_name.as_ptr(),
@@ -398,6 +422,12 @@ fn windows_main() {
         if hwnd.is_null() {
             return;
         }
+        if !preview {
+            // Without the foreground, a top-most popup receives no keyboard
+            // input and a key press would not dismiss the saver.
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+        }
 
         // ---- engine ------------------------------------------------------
         let seed = GetTickCount() as u64;
@@ -405,6 +435,9 @@ fn windows_main() {
         let mut info = BITMAPINFO256 {
             header: BITMAPINFOHEADER {
                 biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                // DIB rows are DWORD-aligned. At 8bpp that needs the width to
+                // be a multiple of 4; 640 is, so the surface can be handed
+                // over without a stride fixup.
                 biWidth: johnny::render::SCREEN_W as i32,
                 // Negative height: the surface is top-down.
                 biHeight: -(johnny::render::SCREEN_H as i32),
@@ -432,6 +465,13 @@ fn windows_main() {
             }
             if QUIT.load(Ordering::Relaxed) {
                 break;
+            }
+            // The settings dialog closes without telling us; if the parent
+            // pane has gone, so should we, or preview processes pile up.
+            if let Mode::Preview(parent) = mode {
+                if IsWindow(parent) == 0 {
+                    break;
+                }
             }
 
             // Catch up on however many ticks the clock has moved, the way the
