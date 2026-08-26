@@ -800,12 +800,19 @@ Things the port had to get right that are easy to get wrong:
   spread of ways to *set out* again from there, and he wanders: 4 → 3 → 6 → 5
   → 4 → 3 → 1 where the block would have taken him 4 → 3 → 1. Twenty-three
   seconds of walking instead of four.
-* **`F200` is a call.** Every one of `STAND.ADS`'s twelve standing sequences
-  opens with `F200 14`, and 14 is its own `TAG:` entry "STAND INIT" — four
-  instructions that put up the base pose, `MJAMBWLK.TTM` scene 42. So the
-  `F000`/`F200`/`F210` family names a sequence of the same script and runs it,
-  and the `F010 -1` at the end of a sequence is the return. Without it Johnny
+* **`F200` starts a second sequence.** Every one of `STAND.ADS`'s twelve
+  standing sequences opens with `F200 14`, and 14 is its own `TAG:` entry
+  "STAND INIT" — four instructions that put up the base pose,
+  `MJAMBWLK.TTM` scene 42. `seg10:0x16C2` writes state 4 into that sequence's
+  word, so it runs alongside from the next pass; `F010 -1` is the other half,
+  putting a sequence into state 2 to say it is done. Without `F200` Johnny
   stands about with no Johnny in the picture.
+* **An ADS script is a rule set, not a program.** See `docs/FILE_FORMATS.md`:
+  the engine re-reads a sequence from the top every pass, `1350` means "has
+  just ended" rather than "is running", and `1420`/`1430` are AND and OR
+  rather than two spellings of the same link. Getting any of those wrong
+  shows up the same way — two scenes animating over each other, or a cascade
+  that stops after its first step.
 
 ## Still open
 

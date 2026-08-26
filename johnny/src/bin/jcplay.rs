@@ -91,18 +91,17 @@ fn main() -> ExitCode {
     // background produces no frames, and without this the loop spins.
     let tick_limit = (cap as u32).saturating_mul(50).max(1000);
     while frame < cap && tick < tick_limit {
-        // One sequencer step per tick. A block runs to its Step and yields;
-        // a Play adds an instance and lets the sequencer continue immediately.
-        if !sequence_done {
+        // The instances move first, then the whole script is re-read from the
+        // top -- the order `seg10:0x1ACB` uses, and the order that lets a
+        // guard see the scene that ended this pass.
+        stage.restore_background();
+        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
+            println!("[tick {tick:5}] scene {scene} finished");
+        }
+        seq.begin_pass();
+        for _ in 0..johnny::ads::PASS_BUDGET {
             match seq.next_action(&mut rng) {
-                Action::Done => {
-                    sequence_done = true;
-                    if active.is_empty() {
-                        println!("sequence finished");
-                        break;
-                    }
-                }
-                Action::Wait => {}
+                Action::PassOver => break,
                 Action::Reorder {
                     ttm,
                     scene,
@@ -154,17 +153,15 @@ fn main() -> ExitCode {
                     println!("[tick {tick:5}] play {file} scene {scene} {repeat:?}");
                     active.retain(|a: &Active| (a.ttm, a.scene) != (ttm_id, scene));
                     active.push(Active::start(ttm_id, scene, inst, repeat, tick));
-                    continue;
                 }
             }
         }
-
-        // One tick: repaint the background, advance every scene that is due,
-        // and present whatever they composited. Same runner the director uses,
-        // so what this shows is what the island does.
-        stage.restore_background();
-        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
-            println!("[tick {tick:5}] scene {scene} finished");
+        if !sequence_done && !seq.running() {
+            sequence_done = true;
+            println!("[tick {tick:5}] sequence finished");
+        }
+        if sequence_done && active.iter().all(|a| a.looping) {
+            break;
         }
 
         if stage.has_background() {

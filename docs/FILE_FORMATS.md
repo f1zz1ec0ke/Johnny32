@@ -216,35 +216,65 @@ pointer itself, and the lengths come from a dedicated function at
 `seg10:0x0303` with its own 35-entry table. The opcodes are at `seg10:0x1875`
 with handlers at `0x18CD`.
 
-An `.ADS` record holds numbered sequences. A sequence is a run of guarded
-blocks — a condition, some instructions, a `Step` — and the runner
-(`seg10:0x1925`) interprets until a `Step` and then returns, so one block
-happens per pass. A `Step` is a yield, not a join; what holds a block back is
-the `If` in front of it.
+An `.ADS` record holds numbered sequences, and **several run at once**. Each
+has a state word: 1 means the interpreter runs it this pass, 2 means it has
+stopped, 4 means it starts on the next one. `seg10:0x1ACB` steps every TTM
+instance first and then interprets every sequence in state 1.
+
+A sequence is a list of **guarded rules** rather than a program. Each rule is a
+condition, some instructions, and a `Step` that ends the rule. The engine
+re-reads a sequence **from the top on every pass** — `seg10:0x1C18` throws away
+the pointer its interpreter stopped at — so on each 16ms tick every condition
+in the sequence is tested again against the world as it now is, and whichever
+ones are true fire. A `Step` is not a yield across ticks: `seg10:0x194A`
+swallows the flag inside a guarded block, so a `Step` ends the block it is in
+and the pass moves on to the next rule.
 
 | Opcode | Meaning |
 | --- | --- |
 | `0x2005` | play scene: ttm id, scene id, repeat operand, weight |
-| `0x1510` / `0x1520` | step (yield); `0x1520` also returns from the interpreter |
+| `0x1510` / `0x1520` | end of a guarded block |
 | `0x1010`-`0x1080`, `0x1310`-`0x13C1` | conditions on a scene's run state |
-| `0x1420` / `0x1430` | chain the previous condition with OR |
+| `0x1420` / `0x1430` | join the previous condition to the next with AND / OR |
 | `0x3010` ... `0x30FF` | weighted random choice of one enclosed entry |
 | `0x2010` / `0x2015` | stop a scene (state 0) / finish it (state 5) |
 | `0x4000` / `0x4010` | move a scene in the draw order (`seg10:0x15FB`) |
-| `0xF010`, `0xFFFF` | end of sequence |
+| `0xF000` / `0xF200` / `0xF210` | set another sequence of this script running |
+| `0xF010` | put a sequence into state 2; an operand of -1 means this one |
+| `0xFFFF` | end of a sequence body |
 
-The conditions all read one field — the scene's run state at +0x2F of its
-instance record — and their predicates are at `seg10:0x1351`-`0x13C7`:
+`0x1420` and `0x1430` are **not** the same link, which is easy to miss because
+a disassembler shows both as a bare word between two conditions. `seg10:0x13E7`
+reads them left to right and short-circuits: a link whose answer is already
+decided steps over the condition on the far side of it. `0x1430` also sets a
+sticky flag that wins at the end (`seg10:0x14A2`). `0x1420` appears 47 times
+and `0x1430` 30 times in the shipped scripts; reading the first as OR makes a
+rule that should need all four of its conditions fire on any one of them.
+
+The conditions read two fields of the scene's instance record — the play count
+at +0x2D and the run state at +0x2F — and their predicates are at
+`seg10:0x1351`-`0x13C7`:
 
 | Opcode | True when |
 | --- | --- |
 | `0x1010` / `0x1310` | state 5 (finished) |
 | `0x1020` / `0x1320` | not state 5 |
-| `0x1030` / `0x1330` | never started (+0x2D is zero) |
-| `0x1040` / `0x1340` | started |
-| `0x1050` / `0x1350` | state 4 (running) |
+| `0x1030` / `0x1330` | never played (+0x2D is zero) |
+| `0x1040` / `0x1340` | played at least once |
+| `0x1050` / `0x1350` | state 4 — **has just ended**, not "is running" |
 | `0x1060` / `0x1360` | state 4 or 0 — not waiting its turn |
 | `0x1070` / `0x1370` | state 1, 2 or 3 — queued |
+
+`0x1350` is the one everything is built out of: 500 of the 662 conditions in
+the shipped scripts are it. A scene stays in its queued state for as long as it
+is on screen and only reaches state 4 on the pass its program ends, so
+"`0x1350` on scene A" means "A has just finished". That is what makes a script
+a cascade — each rule starts the next scene as the one before it ends — and
+reading it as "A is playing" starts them all on top of each other.
+
+State 4 lasts exactly one pass (`seg10:0x1DE2` clears it the next time the
+instance is stepped), which is why instances have to be stepped before the
+scripts are interpreted and not after.
 
 What those states mean, and how the repeat operand drives them, is in
 `docs/SCHEDULER.md` under "How long a scene lasts". It is the part that

@@ -258,13 +258,13 @@ impl Active {
     ///
     /// * queued for a count, it starts over until the count runs out
     /// * queued until a deadline, it starts over until the deadline passes
-    /// * otherwise it becomes **running** -- state 4, which is not a state it
+    /// * otherwise it becomes **over** -- state 4, which is not a state it
     ///   plays in. `seg10:0x1DDC` turns it idle on the very next pass, so it
-    ///   lasts exactly one, and that one pass is the whole window in which
-    ///   `IF_RUNNING` can see it.
+    ///   lasts exactly one, and that one pass is the whole window in which a
+    ///   `1350` predicate can see it.
     ///
     /// That handshake is what every script is built on: play a scene, and the
-    /// block guarded on it running fires the moment it is over.
+    /// block guarded on it fires on the pass it ends.
     pub fn program_ended(&mut self) -> bool {
         match self.state {
             SceneState::Queued(2) if self.count > 0 => {
@@ -274,7 +274,7 @@ impl Active {
             // The deadline is what ends this one; until it passes, keep going.
             SceneState::Queued(3) => self.restart(),
             _ => {
-                self.state = SceneState::Running;
+                self.state = SceneState::Over;
                 true
             }
         }
@@ -289,11 +289,11 @@ impl Active {
         }
     }
 
-    /// `seg10:0x1DEB`: a scene queued until a deadline becomes running once
-    /// that deadline passes, and then ends on its next time round.
+    /// `seg10:0x1DEB`: a scene queued until a deadline is over once that
+    /// deadline passes, and then ends on its next time round.
     pub fn check_deadline(&mut self, now: u32) {
         if self.state == SceneState::Queued(3) && now >= self.until {
-            self.state = SceneState::Running;
+            self.state = SceneState::Over;
         }
     }
 }
@@ -1139,10 +1139,8 @@ impl Director {
                 }
                 self.stage.restore_background();
                 if let Some(&(frame, x, y)) = step.path.get(index) {
-                    let mirror = Mirror {
-                        x: frame & 0x8000 != 0,
-                        y: false,
-                    };
+                    // `seg4:0x02C0`: the waypoint's top bit is draw mode 2.
+                    let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
                     self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
                     self.activity = Activity::Walking {
                         step,
@@ -1262,17 +1260,24 @@ impl Director {
         active: &mut Vec<Active>,
         done: &mut bool,
     ) -> bool {
+        // The instances move first and the script is interpreted after them.
+        // `seg10:0x1ACB` does it in that order and it is not incidental: a
+        // scene reaching its end sets state 4, which is cleared the next time
+        // that instance is stepped, so a script that ran first would be
+        // reading last pass's answers and would miss half of them.
+        self.stage.restore_background();
+        advance_scenes(active, seq, &mut self.stage, archive, self.tick);
+
         // One pass of the sequencer, not one instruction: `seg10:0x1925`
         // interprets until a `Step` and only then returns, so everything a
         // guarded block starts happens on the same tick. The bound is a
         // backstop against a script that never reaches one.
-        for _ in 0..64 {
+        // Every pass re-reads the whole script from the top; `PASS_BUDGET`
+        // bounds it in case this port has misread one.
+        seq.begin_pass();
+        for _ in 0..crate::ads::PASS_BUDGET {
             match seq.next_action(&mut self.rng) {
-                Action::Done => {
-                    *done = true;
-                    break;
-                }
-                Action::Wait => break,
+                Action::PassOver => break,
                 Action::Reorder {
                     ttm,
                     scene,
@@ -1318,8 +1323,10 @@ impl Director {
             }
         }
 
-        self.stage.restore_background();
-        advance_scenes(active, seq, &mut self.stage, archive, self.tick);
+        // `seg10:0x0766`: the scene is over when no sequence wants another
+        // pass. Whether its instances have finished is the caller's half of
+        // the same test.
+        *done = !seq.running();
         self.stage.has_background()
     }
 

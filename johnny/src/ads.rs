@@ -36,7 +36,7 @@ pub enum Cond {
     NotFinished,
     NotStarted,
     Started,
-    Running,
+    JustEnded,
     NotQueued,
     Queued,
     CountAtMost,
@@ -53,7 +53,7 @@ impl Cond {
             0x1020 | 0x1320 => Cond::NotFinished,
             0x1030 | 0x1330 => Cond::NotStarted,
             0x1040 | 0x1340 => Cond::Started,
-            0x1050 | 0x1350 => Cond::Running,
+            0x1050 | 0x1350 => Cond::JustEnded,
             0x1060 | 0x1360 => Cond::NotQueued,
             0x1070 | 0x1370 => Cond::Queued,
             0x1080 | 0x1380 => Cond::CountAtMost,
@@ -69,22 +69,27 @@ impl Cond {
 /// A scene's life cycle, in the field at +0x2F of its instance record.
 ///
 /// `PlayScene` puts it in one of the queued states, depending on its flags
-/// operand (`seg10:0x0DE3`, `0x0DF2`, `0x0E03`). The TTM runner promotes a
-/// queued scene to `Running` the first time it advances it (`seg10:0x1D76`),
-/// and `Finished` is set when the scene is stopped (`seg10:0x0E92`).
+/// operand (`seg10:0x0DE3`, `0x0DF2`, `0x0E03`), and it **stays** there while
+/// the scene animates -- there is no separate "running". State 4 is written
+/// at `seg10:0x1D76`, when a frame carrying `EndScene` has used up the
+/// scene's last repeat: it means *this one has just ended*. It lasts exactly
+/// one pass, because `seg10:0x1DE2` clears it back to 0 the next time the
+/// instance is stepped.
 ///
-/// The ordering matters: `IF_RUNNING` on a scene is written immediately after
-/// the `Step` that follows playing it, so a scene must reach `Running` during
-/// that yield or the whole chain stalls.
+/// That single pass is the whole handshake the scripts are built on, and the
+/// order within a pass is what makes it reliable: `seg10:0x1ACB` steps every
+/// instance first and only then interprets the scripts, so a script always
+/// gets to see the state-4 its own scene reached this pass.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum SceneState {
     /// No record at all, or explicitly cleared to 0.
     #[default]
     Idle,
-    /// Queued: 1 plays once, 2 plays a set number of times, 3 loops.
+    /// Queued: 1 plays once, 2 plays a set number of times, 3 loops. A scene
+    /// is in one of these for as long as it is on screen.
     Queued(u8),
-    /// State 4, being advanced by the runner.
-    Running,
+    /// State 4: the scene reached its end on this pass. One pass only.
+    Over,
     /// State 5. Only `FinishScene` writes this (`seg10:0x0E92`); a scene that
     /// simply runs out goes back to `Idle` (`seg10:0x1DE2`).
     Finished,
@@ -133,20 +138,23 @@ pub enum Op {
         ttm: u16,
         scene: u16,
     },
-    /// Chains onto the preceding condition.
-    ChainOr,
-    Stop,
+    /// `1420` and `1430`, the two ways a predicate can be joined to the next.
+    And,
+    Or,
+    /// `F010`: put a sequence into state 2, which is how it says it is done.
+    /// The operand is a sequence id, or -1 for the one saying it.
+    Stop { sequence: u16 },
+    /// `FFFF`, the end of a sequence body.
     End,
-    /// `F000`, `F200` and `F210` name another sequence of this same script
-    /// and run it.
+    /// `F000`, `F200` and `F210` name another sequence of this same script and
+    /// set it running alongside this one (`seg10:0x16C2` writes state 4).
     ///
     /// `STAND.ADS` settles what the operand is: every one of its twelve
     /// standing sequences opens with `F200 14`, and 14 is its own `TAG:`
-    /// entry "STAND INIT" -- a four-instruction sequence that puts up the
-    /// base pose, `MJAMBWLK.TTM` scene 42. So this is a call, and `F010` with
-    /// -1 at the end of a sequence is the return. Without it Johnny stands
-    /// about with no Johnny in the picture.
-    Call { opcode: u16, sequence: u16 },
+    /// entry "STAND INIT" -- four instructions that put up the base pose,
+    /// `MJAMBWLK.TTM` scene 42. Without it Johnny stands about with no Johnny
+    /// in the picture.
+    Run { opcode: u16, sequence: u16 },
     Todo { opcode: u16, args: Vec<u16> },
 }
 
@@ -180,9 +188,7 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
                 ttm: a(0),
                 scene: a(1),
             },
-            // seg10:0x1669 flags the context and clears the script pointer,
-            // which ends the running sequence.
-            0xF010 => Op::End,
+            0xF010 => Op::Stop { sequence: a(0) },
             0x4000 | 0x4010 => Op::Reorder {
                 ttm: a(0),
                 scene: a(1),
@@ -193,11 +199,16 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             0x3010 => Op::RandomBegin,
             0x30FF => Op::RandomEnd,
             0x3020 => Op::RandomSkip { weight: a(0) },
-            0xF000 | 0xF200 | 0xF210 => Op::Call {
+            0xF000 | 0xF200 | 0xF210 => Op::Run {
                 opcode: w,
                 sequence: a(0),
             },
-            0x1420 | 0x1430 => Op::ChainOr,
+            // `seg10:0x13E7` reads these as links between predicates, and
+            // they are not the same link: `1420` carries the chain on when
+            // the last one was true and short-circuits when it was false,
+            // `1430` the other way about.
+            0x1420 => Op::And,
+            0x1430 => Op::Or,
             0xFFFF => Op::End,
             other => match Cond::from_opcode(other) {
                 Some(cond) => Op::If {
@@ -304,10 +315,9 @@ pub enum Action {
         scene: u16,
         to_front: bool,
     },
-    /// Wait for the running scene to finish.
-    Wait,
-    /// The sequence is over.
-    Done,
+    /// Nothing more to do this pass. Whether the scene is over is a separate
+    /// question -- ask `running()`.
+    PassOver,
 }
 
 pub struct Sequencer {
@@ -316,23 +326,24 @@ pub struct Sequencer {
     pub labels: BTreeMap<u16, String>,
     pc: usize,
     pub states: BTreeMap<(u16, u16), SceneState>,
-    /// Scenes that have reached the running state at least once.
-    ///
-    /// State 4 lasts a single pass, and the scripts start two or three scenes
-    /// together and then branch on whichever of them ends. A sequence that
-    /// could only ever catch the pass a scene ends on would have to service
-    /// them in the order its blocks are written, which turns concurrent
-    /// scenes into alternating ones. Remembering that a scene has run lets a
-    /// block fire late.
-    ran: std::collections::BTreeSet<(u16, u16)>,
-    /// Where to carry on after a called sequence returns.
-    calls: Vec<usize>,
+    /// The state word of every sequence the script has, `es:[bx+0x12]` in the
+    /// engine: 1 runs this pass, 2 is stopped, 4 runs from the next one.
+    /// Several are live at once -- that is what `F200` is for.
+    seqs: BTreeMap<u16, u8>,
+    /// The sequence being interpreted right now, `ds:0x2606`.
+    current: u16,
+    /// How many times each scene has been started, `[si+0x2D]`: zeroed when
+    /// the instance record is made (`seg10:0x0B8F`) and bumped by every
+    /// `PlayScene` (`seg10:0x0E25`). It is never cleared, which is what makes
+    /// `1330` mean "never played" rather than "not playing".
+    plays: BTreeMap<(u16, u16), u32>,
     pub todo_seen: BTreeMap<u16, usize>,
 }
 
-/// How deep a call may go. Nothing shipped nests at all; this is a guard
-/// against a script that calls itself, not a limit anything reaches.
-const CALL_DEPTH: usize = 8;
+/// A pass over one sequence cannot execute more instructions than the script
+/// has. This is a backstop against a script this port has misread, not a
+/// budget anything approaches.
+pub const PASS_BUDGET: usize = 100_000;
 
 impl Sequencer {
     /// Load an `.ADS` record: its `RES:` file table, `TAG:` labels and script.
@@ -351,8 +362,9 @@ impl Sequencer {
                 .unwrap_or_default(),
             pc: 0,
             states: BTreeMap::new(),
-            ran: Default::default(),
-            calls: Vec::new(),
+            seqs: BTreeMap::new(),
+            current: 0,
+            plays: BTreeMap::new(),
             todo_seen: BTreeMap::new(),
         })
     }
@@ -361,15 +373,68 @@ impl Sequencer {
         &self.ops
     }
 
-    /// Jump to the start of a numbered sequence.
+    /// Where a numbered sequence's body begins.
+    fn body_of(&self, sequence: u16) -> Option<usize> {
+        self.ops
+            .iter()
+            .position(|(_, op)| matches!(op, Op::Sequence(n) if *n == sequence))
+            .map(|i| i + 1)
+    }
+
+    /// Set a sequence running.
     pub fn start(&mut self, sequence: u16) -> bool {
-        for (i, (_, op)) in self.ops.iter().enumerate() {
-            if matches!(op, Op::Sequence(n) if *n == sequence) {
-                self.pc = i + 1;
-                return true;
+        if self.body_of(sequence).is_none() {
+            return false;
+        }
+        self.seqs.insert(sequence, 1);
+        true
+    }
+
+    /// Open a pass: whatever `F200` queued last time starts running now
+    /// (`seg10:0x1BF2` turns state 4 and state 3 back into state 1), and the
+    /// first runnable sequence is put under the cursor.
+    ///
+    /// A sequence is re-read **from the top** every pass. The engine never
+    /// stores the pointer its interpreter stopped at -- `seg10:0x1C18` throws
+    /// the return value away -- so a script is not a program with a counter,
+    /// it is a list of guarded rules re-tested against the world every 16ms.
+    /// That is what makes a cascade work: the block waiting on a scene fires
+    /// on the pass that scene ends, however many passes later that is.
+    pub fn begin_pass(&mut self) {
+        for state in self.seqs.values_mut() {
+            if *state == 3 || *state == 4 {
+                *state = 1;
             }
         }
-        false
+        self.current = 0;
+        self.next_sequence();
+    }
+
+    /// Move the cursor to the next sequence that wants to run this pass.
+    fn next_sequence(&mut self) -> bool {
+        let next = self
+            .seqs
+            .iter()
+            .find(|(id, state)| **state == 1 && **id > self.current)
+            .map(|(id, _)| *id);
+        match next.and_then(|id| self.body_of(id).map(|pc| (id, pc))) {
+            Some((id, pc)) => {
+                self.current = id;
+                self.pc = pc;
+                true
+            }
+            None => {
+                self.current = u16::MAX;
+                false
+            }
+        }
+    }
+
+    /// Is anything still going? `seg10:0x0766`: a sequence in state 1 or 4
+    /// keeps the scene alive; so does any instance still on screen, which the
+    /// caller checks separately because it owns the instance list.
+    pub fn running(&self) -> bool {
+        self.seqs.values().any(|s| *s == 1 || *s == 4)
     }
 
     fn state(&self, ttm: u16, scene: u16) -> SceneState {
@@ -388,14 +453,19 @@ impl Sequencer {
         match cond {
             Cond::Finished => known && s == SceneState::Finished,
             Cond::NotFinished => !known || s != SceneState::Finished,
-            Cond::NotStarted => !known || s == SceneState::Idle,
-            Cond::Started => known && s != SceneState::Idle,
-            // Running now, or having run at some point -- see `ran`.
-            Cond::Running => (known && s == SceneState::Running) || self.ran.contains(&(ttm, scene)),
+            Cond::NotStarted => self.plays.get(&(ttm, scene)).copied().unwrap_or(0) == 0,
+            Cond::Started => self.plays.get(&(ttm, scene)).copied().unwrap_or(0) > 0,
+            // `seg10:0x13BD`: state 4 exactly. This is the one the scripts
+            // are built out of -- five hundred of the six hundred and
+            // thirty-odd predicates in the shipped data are this -- and it
+            // does not mean "is playing". It means "has just ended", which is
+            // what makes a cascade a cascade: each block starts the next
+            // scene when the one before it has finished, not when it started.
+            Cond::JustEnded => known && s == SceneState::Over,
             // `seg10:0x136F`: no record, state 4 or state 0. Not "idle" so
             // much as "not waiting its turn" -- it is true of a scene that is
             // playing right now as well as one that has been and gone.
-            Cond::NotQueued => !known || s == SceneState::Running || s == SceneState::Idle,
+            Cond::NotQueued => !known || s == SceneState::Over || s == SceneState::Idle,
             // `seg10:0x1384`: states 1, 2 and 3, queued but not yet advanced.
             Cond::Queued => known && queued,
             // The counter and story-variable predicates. No shipped script
@@ -408,16 +478,45 @@ impl Sequencer {
         }
     }
 
-    /// Has this predicate had its chance yet?
+    /// A predicate and whatever `And`/`Or` links follow it (`seg10:0x1223`).
     ///
-    /// A scene the sequence has just played sits at one of the queued states
-    /// until the runner picks it up, so a predicate about it has not settled.
-    /// Waiting is bounded: the runner moves a queued scene on within a pass or
-    /// two, and once it does the answer is final either way. A scene that was
-    /// never played is `Idle`, which settles immediately -- so the losing arms
-    /// of a random block do not hold anything up.
-    fn settling(&self, cond: Cond, ttm: u16, scene: u16) -> bool {
-        matches!(self.state(ttm, scene), SceneState::Queued(_)) && !self.test(cond, ttm, scene)
+    /// Left to right and short-circuiting: a link whose answer is already
+    /// decided skips the predicate on the other side of it rather than
+    /// evaluating it. `Or` also sets a sticky flag that wins at the end
+    /// (`seg10:0x14A2`), which is how the engine resolves a chain that mixes
+    /// the two. No shipped script mixes them, but the rule is cheap to keep.
+    fn eval_chain(&mut self, cond: Cond, ttm: u16, scene: u16) -> bool {
+        let mut sticky = false;
+        let mut result = self.test(cond, ttm, scene);
+        loop {
+            let is_or = match self.ops.get(self.pc) {
+                Some((_, Op::Or)) => true,
+                Some((_, Op::And)) => false,
+                _ => break,
+            };
+            self.pc += 1;
+            // Whether this link's answer is settled by what we have already.
+            let decided = result == is_or;
+            if decided {
+                if is_or {
+                    sticky = true;
+                }
+                // Short-circuit: step over the predicate on the far side.
+                self.pc += 1;
+            } else {
+                if !is_or {
+                    result = false;
+                }
+                match self.ops.get(self.pc).cloned() {
+                    Some((_, Op::If { cond, ttm, scene })) => {
+                        self.pc += 1;
+                        result = self.test(cond, ttm, scene);
+                    }
+                    _ => break,
+                }
+            }
+        }
+        sticky || result
     }
 
     /// Skip forward past the end of the current guarded block.
@@ -484,54 +583,58 @@ impl Sequencer {
     pub fn next_action(&mut self, rng: &mut Rng) -> Action {
         loop {
             let Some((_, op)) = self.ops.get(self.pc).cloned() else {
-                return Action::Done;
+                if self.next_sequence() {
+                    continue;
+                }
+                return Action::PassOver;
             };
             self.pc += 1;
             match op {
-                // Falling off the end of a called sequence, or reaching its
-                // `F010 -1`, comes back to the caller.
-                Op::Sequence(_) | Op::End | Op::Stop => match self.calls.pop() {
-                    Some(back) => {
-                        self.pc = back;
+                // The end of this sequence's body. On to the next one that
+                // wants a pass, and when there is none the pass is over.
+                Op::Sequence(_) | Op::End => {
+                    if self.next_sequence() {
                         continue;
                     }
-                    None => return Action::Done,
-                },
-                // A step is a yield, not a join. `seg10:0x1925` interprets
-                // instructions until one of these bumps the counter at
-                // `ds:0x460C` and then returns, so a sequence advances by one
-                // block per pass. What holds a block back is the `If` in front
-                // of it, waiting on the state of a scene already playing.
-                Op::Step | Op::StepEnd => return Action::Wait,
-                Op::If { cond, ttm, scene } => {
-                    let guard = self.pc - 1;
-                    let mut ok = self.test(cond, ttm, scene);
-                    let mut settling = self.settling(cond, ttm, scene);
-                    // A chain continues while the next op is ChainOr.
-                    while matches!(self.ops.get(self.pc), Some((_, Op::ChainOr))) {
-                        self.pc += 1;
-                        if let Some((_, Op::If { cond, ttm, scene })) = self.ops.get(self.pc).cloned()
-                        {
-                            self.pc += 1;
-                            ok |= self.test(cond, ttm, scene);
-                            settling |= self.settling(cond, ttm, scene);
+                    return Action::PassOver;
+                }
+                // `seg10:0x1669`: `F010` puts a sequence into state 2, which
+                // is how a sequence says it is done. An operand of -1 means
+                // this one, and then the pass stops here as well.
+                Op::Stop { sequence } => {
+                    let target = if sequence == 0xFFFF {
+                        self.current
+                    } else {
+                        sequence
+                    };
+                    self.seqs.insert(target, 2);
+                    if target == self.current {
+                        if self.next_sequence() {
+                            continue;
                         }
+                        return Action::PassOver;
                     }
-                    if ok {
+                }
+                // Not a yield across ticks. `seg10:0x194A` swallows the flag
+                // inside a guarded block, so a `Step` ends the block it is in
+                // and the pass carries on to the next rule. Reaching one at
+                // the top level ends the pass.
+                Op::Step | Op::StepEnd => {
+                    if self.next_sequence() {
                         continue;
                     }
-                    if settling {
-                        // Not false so much as not decided yet. Sit on the
-                        // guard and try again next pass: the scripts are
-                        // cascades, each block waiting on the scene the block
-                        // before it started, and a scene takes a pass or two
-                        // to go from queued to running.
-                        self.pc = guard;
-                        return Action::Wait;
+                    return Action::PassOver;
+                }
+                Op::If { cond, ttm, scene } => {
+                    // `seg10:0x1758`: evaluate, then either run the block or
+                    // skip it. There is no third answer -- the engine never
+                    // sits on a guard waiting for one to settle.
+                    if self.eval_chain(cond, ttm, scene) {
+                        continue;
                     }
                     self.skip_block();
                 }
-                Op::ChainOr => {}
+                Op::And | Op::Or => {}
                 Op::RandomBegin => {
                     if let Some(idx) = self.pick_random(rng) {
                         if let Some((
@@ -572,19 +675,13 @@ impl Sequencer {
                         to_front,
                     }
                 }
-                Op::Call { opcode, sequence } => {
-                    let target = self
-                        .ops
-                        .iter()
-                        .position(|(_, op)| matches!(op, Op::Sequence(n) if *n == sequence));
-                    match target {
-                        Some(i) if self.calls.len() < CALL_DEPTH => {
-                            self.calls.push(self.pc);
-                            self.pc = i + 1;
-                        }
-                        // No such sequence, or too deep. Count it and carry
-                        // on rather than pretend it happened.
-                        _ => *self.todo_seen.entry(opcode).or_insert(0) += 1,
+                // `seg10:0x16C2`: mark that sequence state 4, so the next
+                // pass runs it alongside this one.
+                Op::Run { opcode, sequence } => {
+                    if self.body_of(sequence).is_some() {
+                        self.seqs.insert(sequence, 4);
+                    } else {
+                        *self.todo_seen.entry(opcode).or_insert(0) += 1;
                     }
                 }
                 Op::Todo { opcode, .. } => {
@@ -596,8 +693,8 @@ impl Sequencer {
 
     fn begin(&mut self, ttm: u16, scene: u16, flags: u16) -> Option<Action> {
         let file = self.files.get(&ttm)?.clone();
+        *self.plays.entry((ttm, scene)).or_insert(0) += 1;
         let repeat = Repeat::from_flags(flags);
-        self.ran.remove(&(ttm, scene));
         self.states.insert((ttm, scene), repeat.state());
         Some(Action::Play {
             file,
@@ -610,9 +707,6 @@ impl Sequencer {
     /// how it hands the state back. `seg10:0x1D2B` onwards is the only place
     /// states 1, 2, 3 and 4 ever change.
     pub fn set_state(&mut self, ttm: u16, scene: u16, state: SceneState) {
-        if state == SceneState::Running {
-            self.ran.insert((ttm, scene));
-        }
         self.states.insert((ttm, scene), state);
     }
 

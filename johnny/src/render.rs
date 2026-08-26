@@ -24,8 +24,23 @@ pub const TRANSPARENT: u8 = 0;
 
 /// How a sprite is mirrored as it is drawn.
 ///
-/// From the blitter at `seg8:0x0AE4`: the draw mode is `(opcode & 0x00F0) >> 4`
-/// and is a bitmask. Bit 0 negates the horizontal step, bit 1 the vertical.
+/// The draw mode is `(opcode & 0x00F0) >> 4` and it is a bitmask, and the two
+/// bits are the other way round from the obvious reading. In the blitter at
+/// `seg8:0x0AE4`, `di` is the destination width -- `seg8:0x0C34` compares it
+/// against twice the sprite's own width and `seg8:0x0C5B` against half of it
+/// -- and `[bp-0x12]` is the destination height. Bit 0 negates the height
+/// (`seg8:0x0CD1`) and bit 1 negates the width (`seg8:0x0CE9`). So **bit 0 is
+/// the vertical flip and bit 1 the horizontal one**.
+///
+/// The walk settles it independently: `seg4:0x02C0` turns the `0x8000` flag on
+/// a waypoint into mode **2**, and that is unmistakably a left-right mirror --
+/// the same sprites carry Johnny both ways along the beach, and he does not
+/// walk on his head.
+///
+/// Getting this backwards is quiet rather than loud. Only two of the four
+/// modes are used in the shipped scripts: `A504` (no mirror, 12,546 draws) and
+/// `A524` (2,822 draws across 31 of the 41 scripts). Reading bit 1 as vertical
+/// draws every one of those 2,822 upside down.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Mirror {
     pub x: bool,
@@ -35,8 +50,8 @@ pub struct Mirror {
 impl Mirror {
     pub fn from_mode(mode: u16) -> Self {
         Mirror {
-            x: mode & 1 != 0,
-            y: mode & 2 != 0,
+            x: mode & 2 != 0,
+            y: mode & 1 != 0,
         }
     }
 
