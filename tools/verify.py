@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dgds
+import scheduler
 
 datadir = sys.argv[1] if len(sys.argv) > 1 else 'original'
 data = open(os.path.join(datadir, 'RESOURCE.001'), 'rb').read()
@@ -95,12 +96,36 @@ for name, body, _ in records:
             failures.append('%s consumed %d of %d bytes'
                             % (name, consumed, len(code)))
 
+# The scheduler tables live in the executable, not the archive, so only check
+# them when scrantic.exe has been extracted alongside the data.
+sched_note = 'skipped (no scrantic.exe)'
+exe = os.path.join(datadir, 'scrantic.exe')
+if os.path.exists(exe):
+    seg = scheduler.data_segment(exe)
+    files = scheduler.ads_files(seg)
+    rows = scheduler.scenes(seg)
+    archive_names = set(n.upper() for n, _, _ in records)
+    for fid, fname in files.items():
+        if fname != '(none)' and fname.upper() not in archive_names:
+            failures.append('scheduler references missing ADS file %s' % fname)
+    enabled = [r for r in rows if r['seq']]
+    for r in enabled:
+        if r['ads'] not in files and r['ads'] != 0xFF:
+            failures.append('scene at %#06x references unknown ADS id %d'
+                            % (r['at'], r['ads']))
+    days = sorted(set(r['day'] for r in rows if r['day']))
+    if days != list(range(1, 12)):
+        failures.append('story days are %s, expected 1..11' % days)
+    sched_note = ('%d ADS files, %d scenes (%d enabled), story days %d-%d'
+                  % (len(files) - 1, len(rows), len(enabled), days[0], days[-1]))
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
 print('sprites      %d frames' % frames)
 print('TTM scripts  %d/%d disassemble end to end' % (ttm_ok, ttm_total))
 print('ADS scripts  %d/%d consume exactly' % (ads_ok, ads_total))
+print('scheduler    %s' % sched_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))

@@ -45,10 +45,16 @@ Do not assume it runs there without checking the current state of the engine.
 
 Every project above reconstructs behaviour by watching the original. Nobody has
 published a disassembly of the 81,919 bytes of 16-bit code in `SCRANTIC.EXE`,
-which is where the scheduler, the story state machine, the day/night and tide
-timing, and the walking logic actually live.
+which is where the scheduler, the story state machine and the day/night timing
+actually live.
 
-The LZW codec in `tools/dgds.py` is a small demonstration that this is
-tractable: its block-reading behaviour is not guessable from the data, was read
-straight off the disassembly, and makes all 139 compressed chunks decode
-exactly.
+That is what this repo now has. `docs/SCHEDULER.md` has the 80-entry scene
+table with its weights, positions, time windows and story days, read out of
+segment 4 rather than inferred — including things that are close to
+unguessable from watching, like the story scene being offered on a one-in-ten
+roll, and the story advancing only on real elapsed days.
+
+Two smaller demonstrations that reading beats guessing: the LZW codec's
+block-reading behaviour is not visible in the data at all and makes every
+compressed chunk decode exactly, and the `TT3:` chunks turn out to be
+RLE-compressed in a way that leaves them looking uncompressed.

@@ -139,9 +139,26 @@ convention) had been cancelling out just well enough to look like progress.
   the one it lands on. That is the mechanism behind the screensaver's variety,
   and the weights are sitting in the data as operand 4 of every `2005`.
 
+* **the scheduler**, in segment 4 — the part no existing project recovered
+  from the binary. An 80-entry scene table at `ds:0x1756` says, for each gag,
+  what it costs, which position Johnny must be standing in, where he ends up,
+  what time of day it can happen, and which ADS sequence to run. Selection is
+  the same weighted-random shape the ADS blocks use.
+
+  Above that sits an eleven-day story gated on real elapsed days and kept in
+  `SCRANTIC.INI`, a sixteen-phase day whose last four phases are night, and a
+  holiday calendar that covers Halloween, Christmas, New Year and St
+  Patrick's. Written up in `docs/SCHEDULER.md`; `tools/scheduler.py` dumps it.
+
 **Open:**
 
-* **The scheduler.** Which scene plays when, the story progression, the
-  day/night and tide cycles, and the walking transitions all live in those
-  81,919 bytes of 16-bit code. This is the part no existing project has
-  recovered from the binary (see `docs/PRIOR_ART.md`).
+* **The walk-transition search.** Every scene declares the position it starts
+  and ends at, and the scheduler inserts a transition when the chosen scene
+  starts somewhere Johnny is not. The table is recovered; the search that
+  picks intermediate positions when the target is several steps away is not.
+* **Geometry.** Positions are a (major, minor) pair, major 0-6 and minor 0-7.
+  What they mean on screen is inference from the table rather than read from
+  the code.
+* **Sound.** This build ships silent, so there is nothing here to recover. The
+  engine imports MMSYSTEM and the data segment holds `WAVESFX%d`, so a release
+  with audio would have more to say.
