@@ -104,10 +104,28 @@ step 4 w16, step 4 w17, step 3 w34, step 2 w33, step 1 w25, step 1 w25
 ```
 
 Since the draw is `rand() % 100`, the running subtraction can never get past
-the first 100 of weight, so **the last two options are unreachable** — Johnny
-will never take step 1 on that route. A port reproducing the original faithfully
-should keep the behaviour; `tools/verify.py` asserts this is the only such
-block, so a parser regression cannot hide behind it.
+the first 100 of weight, so **the last two options are unreachable**.
+
+That matters more than it looks. Step 1 lands on position 5 — it is the only
+option in that list that reaches the target directly. Steps 4, 3 and 2 land on
+2, 3 and 6, from which the block is re-entered. So the effect of the bug is
+that **Johnny has never once walked straight from position 1 to position 5**;
+he always detours. Weighted as authored he would take the direct route about a
+third of the time:
+
+| Step | Lands on | As shipped | As authored |
+| --- | --- | --- | --- |
+| 1 | 5 (the target) | 0% | 32.7% |
+| 2 | 6 | 32% | 22.0% |
+| 3 | 3 | 34% | 22.7% |
+| 4 | 2 | 34% | 22.7% |
+
+The other two weighted pickers in the engine — the ADS random block at
+`seg10:0x0CDA` and the scene chooser at `seg4:0x0E62` — both draw against a
+summed total rather than a hardcoded 100, so this picker is the odd one out. A
+port should draw `rand() % total`, which makes the data behave as authored and
+matches the rest of the engine. `tools/verify.py` asserts this is the only
+block affected, so a parser regression cannot hide behind it.
 
 So a block is not a single hop — it is a routing table keyed on where Johnny
 currently is, re-entered after each step until he arrives.
@@ -123,8 +141,12 @@ Each is a list of `(frame, x, y)` triples ending in an all-zero triple:
   path serves both directions — and why the executable carries the string
   `Insufficent memory (%lu).  Bitmaps won't be flipped.`
 
-A parallel 3-byte-per-step table at `ds:0x02DE` records each step's start and
-end position.
+A parallel table at `ds:0x02DE`, 3 bytes per step id, says where the step
+leaves him: byte 1 is the destination minor and byte 2 the destination major,
+written to `ds:0x30E0`/`ds:0x30E4` once the step finishes (`seg4:0x0161`). Byte
+0 is a reference minor the engine compares against on arrival. When the new
+major equals the target the route is cleared; otherwise the block is re-entered
+from the new position, which is how multi-step walks work.
 
 These paths are hand-authored, 5 to 32 waypoints each. That is the part a
 behavioural reimplementation has to approximate, and it is why walking is

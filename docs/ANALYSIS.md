@@ -161,6 +161,12 @@ convention) had been cancelling out just well enough to look like progress.
   not something watching the screensaver would give you: the paths are
   authored data, not a pathfinder.
 
+  It also turned up a bug that has been in the shipped data since 1992. One
+  route's weight list sums to 150 while the picker draws `rand() % 100`, so its
+  last two options are unreachable — and they are the only ones that reach the
+  target directly. Johnny has never walked straight from position 1 to position
+  5; he always detours. Details and the fix in `docs/SCHEDULER.md`.
+
 **Open:**
 
 * **Geometry.** Positions are a (major, minor) pair, major 0-6 and minor 0-7.

@@ -20,7 +20,7 @@ SCENE_TABLE = 0x1756    # 17-byte records, zero-terminated
 RECORD = 17
 
 ROUTE_MATRIX = 0x0A94   # word at +from*12+to*2 -> route block offset
-STEP_POSITIONS = 0x02DE  # 3 bytes per step id
+STEP_POSITIONS = 0x02DE  # 3 bytes per step: (ref minor, dest minor, dest major)
 STEP_TABLE = 0x04FB     # in segment 4: stubs returning each step's block
 
 
@@ -167,13 +167,15 @@ def print_walking(exe_path, data):
     print('%d walk steps. Each is a list of (frame, x, y) waypoints ending in an'
           % len(steps))
     print('all-zero triple; bit 15 of the frame mirrors the sprite horizontally.')
+    print('"lands" is where Johnny stands afterwards, from ds:%#06x.'
+          % STEP_POSITIONS)
     for sid in sorted(steps):
         o, pts = steps[sid]
         a = data[STEP_POSITIONS + sid * 3:STEP_POSITIONS + sid * 3 + 3]
         flipped = sum(1 for f, _, _ in pts if f & 0x8000)
         head = ' '.join('(%d,%d)' % (x, y) for _, x, y in pts[:3])
-        print('  step %2d  %#06x  %2d pts  pos %d->%d  %s%s%s'
-              % (sid, o, len(pts), a[0], a[2], head,
+        print('  step %2d  %#06x  %2d pts  lands (%d,%d)  %s%s%s'
+              % (sid, o, len(pts), a[2], a[1], head,
                  ' ...' if len(pts) > 3 else '',
                  '  [mirrored]' if flipped == len(pts) and pts else ''))
 
