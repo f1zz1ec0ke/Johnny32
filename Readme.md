@@ -30,8 +30,11 @@ decoded:
 * the scene scheduler — the 80-entry scene table, the weighted-random picker,
   the sixteen-phase day, the holiday calendar, and the eleven-day story arc
 
-Still open: the walk-transition search between positions, and what the position
-pairs mean geometrically.
+* the walking system — the route matrix, the weighted route blocks and the 34
+  hand-authored walk paths in real screen coordinates
+
+Still open: what the position pairs mean geometrically, and the cadence of the
+outer scene loop.
 
 Details in [docs/ANALYSIS.md](docs/ANALYSIS.md),
 [docs/FILE_FORMATS.md](docs/FILE_FORMATS.md),
@@ -63,7 +66,8 @@ python3 tools/export_assets.py --sheets
 Dump the scheduler tables:
 
 ```sh
-python3 tools/scheduler.py
+python3 tools/scheduler.py          # ADS files, scenes, story arc, holidays
+python3 tools/scheduler.py --walk   # route matrix and the 34 walk paths
 ```
 
 Inspect the 16-bit executable:

@@ -72,14 +72,63 @@ it is offered. It then sets the story stage to the day counter and matches on
 
 ## Positions and walking
 
-Every entry declares the position Johnny must be standing in (`+0x03`,`+0x04`)
-and where he ends up (`+0x05`,`+0x06`). 43 of the 80 entries move him. When the
-chosen scene starts somewhere he is not, the scheduler inserts a transition —
-that is what `STAND.ADS` and `WALKSTUF.ADS` are for, and what the id-255
-entries (a bare position change with no ADS) cover.
+Johnny's current position is a pair: `ds:0x30E4` (major) and `ds:0x30E0`
+(minor). Every scene entry declares the position he must be standing in
+(`+0x03`,`+0x04`) and where he ends up (`+0x05`,`+0x06`); 43 of the 80 move
+him. `seg4:0x0B64` is the match test, and treats a major of 0 or a minor of -1
+as "don't care" — which is what `(0,0)` in the table means.
 
-32 distinct positions appear, major 0-6 and minor 0-7. `(0,0)` is the
-"anywhere" position that self-contained gags return to.
+32 distinct positions appear, major 0-6 and minor 0-7.
+
+### The route tables
+
+When the chosen scene starts somewhere Johnny is not, `seg4:0x0094` walks him
+there. Run `python3 tools/scheduler.py --walk` to dump this.
+
+`seg4:0x03AC` looks up a **6x6 route matrix** at `ds:0x0A94` — the word at
+`0x0A94 + from*12 + to*2` — giving the offset of a route block for that
+(current major, target major) pair.
+
+A route block is a flat list: a `-position` marker, then `(step, weight)`
+pairs, terminated by `-7`. The engine scans for the marker matching Johnny's
+current position, draws `rand() % 100`, and walks the pairs subtracting
+weights until it lands on one. **Every weight list sums to exactly 100** —
+with one exception, below — which is a good check that the format is right.
+The pair `(0, 0)` under the marker equal to the target means "already there".
+
+The exception is a bug in the shipped data. Route 1 to 5, at position 1, lists
+six options totalling 150:
+
+```
+step 4 w16, step 4 w17, step 3 w34, step 2 w33, step 1 w25, step 1 w25
+```
+
+Since the draw is `rand() % 100`, the running subtraction can never get past
+the first 100 of weight, so **the last two options are unreachable** — Johnny
+will never take step 1 on that route. A port reproducing the original faithfully
+should keep the behaviour; `tools/verify.py` asserts this is the only such
+block, so a parser regression cannot hide behind it.
+
+So a block is not a single hop — it is a routing table keyed on where Johnny
+currently is, re-entered after each step until he arrives.
+
+### The walk paths
+
+A chosen step id resolves through a jump table of stubs at `seg4:0x04FB` to one
+of **34 walk-path blocks** in the data segment, from `ds:0x0AEA` to `ds:0x162A`.
+Each is a list of `(frame, x, y)` triples ending in an all-zero triple:
+
+* `x`, `y` are real screen coordinates on the 640x350 background
+* bit 15 of `frame` mirrors the sprite horizontally, which is how the same
+  path serves both directions — and why the executable carries the string
+  `Insufficent memory (%lu).  Bitmaps won't be flipped.`
+
+A parallel 3-byte-per-step table at `ds:0x02DE` records each step's start and
+end position.
+
+These paths are hand-authored, 5 to 32 waypoints each. That is the part a
+behavioural reimplementation has to approximate, and it is why walking is
+where `jc_reborn` reports its remaining inaccuracy.
 
 ## Time of day
 
@@ -141,9 +190,10 @@ The arc itself, from the `+0x0A` field:
 
 ## Still open
 
-* The exact walk-transition search — which intermediate positions the
-  scheduler steps through when the target is several positions away.
 * What the two position components mean geometrically. Major 0-6 and minor
   0-7 look like an island region and a spot within it, but that is inference
-  from the table, not from the code.
+  from the tables rather than something the code states. The waypoint
+  coordinates should settle it once they are plotted over a background.
 * `seg3:0x1C41`, which the picker hands the chosen entry's mask to.
+* The exact cadence of the outer loop — how often a new scene is requested and
+  what refills the caller's time budget.

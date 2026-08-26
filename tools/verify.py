@@ -116,8 +116,29 @@ if os.path.exists(exe):
     days = sorted(set(r['day'] for r in rows if r['day']))
     if days != list(range(1, 12)):
         failures.append('story days are %s, expected 1..11' % days)
-    sched_note = ('%d ADS files, %d scenes (%d enabled), story days %d-%d'
-                  % (len(files) - 1, len(rows), len(enabled), days[0], days[-1]))
+    # Route weight lists should sum to 100, because the picker draws
+    # rand() % 100. One block in the shipped data does not -- see below.
+    odd_routes = []
+    for f in range(1, 7):
+        for t in range(1, 7):
+            if f == t:
+                continue
+            off = struct.unpack_from('<H', seg, scheduler.ROUTE_MATRIX
+                                     + f * 12 + t * 2)[0]
+            if not off:
+                continue
+            for pos, pairs in scheduler.route_block(seg, off):
+                total = sum(w for _, w in pairs)
+                if pairs and total not in (0, 100):
+                    odd_routes.append((f, t, pos, total))
+    if odd_routes != [(1, 5, 1, 150)]:
+        failures.append('route weight totals changed: expected only the known '
+                        '1->5 quirk, got %s' % odd_routes)
+    steps = scheduler.walk_steps(exe, seg)
+    sched_note = ('%d ADS files, %d scenes (%d enabled), story days %d-%d, '
+                  '%d walk paths (route 1->5 sums to 150 -- original bug)'
+                  % (len(files) - 1, len(rows), len(enabled), days[0], days[-1],
+                     len(steps)))
 
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))

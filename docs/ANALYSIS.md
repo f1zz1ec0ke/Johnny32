@@ -150,12 +150,19 @@ convention) had been cancelling out just well enough to look like progress.
   holiday calendar that covers Halloween, Christmas, New Year and St
   Patrick's. Written up in `docs/SCHEDULER.md`; `tools/scheduler.py` dumps it.
 
+* **the walking system.** A 6x6 route matrix at `ds:0x0A94` points at route
+  blocks that say, for wherever Johnny currently is, which walk steps could
+  take him toward the target and with what weight — every list summing to
+  exactly 100. A step resolves to one of 34 hand-authored paths of
+  `(frame, x, y)` waypoints in real screen coordinates, with bit 15 of the
+  frame mirroring the sprite so one path serves both directions.
+
+  This is the part `jc_reborn` names as its remaining inaccuracy, and it is
+  not something watching the screensaver would give you: the paths are
+  authored data, not a pathfinder.
+
 **Open:**
 
-* **The walk-transition search.** Every scene declares the position it starts
-  and ends at, and the scheduler inserts a transition when the chosen scene
-  starts somewhere Johnny is not. The table is recovered; the search that
-  picks intermediate positions when the target is several steps away is not.
 * **Geometry.** Positions are a (major, minor) pair, major 0-6 and minor 0-7.
   What they mean on screen is inference from the table rather than read from
   the code.
