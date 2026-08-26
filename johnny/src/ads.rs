@@ -114,13 +114,19 @@ pub enum Op {
     StopScene { ttm: u16, scene: u16 },
     /// Mark a scene finished (`seg10:0x0E6E` writes state 5).
     FinishScene { ttm: u16, scene: u16 },
-    /// Move a scene in the draw order. `seg10:0x15FB` and `seg10:0x160C`
-    /// both look the scene up (`seg10:0x0BF4`), unlink it from the instance
-    /// list and put it back somewhere else -- so the two are "in front of"
-    /// and "behind". Which is which is not read out yet, and only `0x4000`
-    /// is used at all: four times, in `BUILDING.ADS`, always on the same
-    /// scene. The port leaves the order alone rather than guess.
-    Reorder { opcode: u16, ttm: u16, scene: u16 },
+    /// Move a scene in the draw order.
+    ///
+    /// Both handlers unlink the scene from the instance list and put it back
+    /// somewhere else. `0x4000` (`seg10:0x0F8C`) walks to the tail and
+    /// appends it; `0x4010` (`seg10:0x0EF2`) makes it the head. The runner
+    /// walks head to tail, so the tail is drawn last: `0x4000` brings a scene
+    /// to the front, `0x4010` sends it to the back.
+    Reorder {
+        ttm: u16,
+        scene: u16,
+        /// True for `0x4000`.
+        to_front: bool,
+    },
     /// Guards the block that follows, up to the next `Step`.
     If {
         cond: Cond,
@@ -173,9 +179,9 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             // which ends the running sequence.
             0xF010 => Op::End,
             0x4000 | 0x4010 => Op::Reorder {
-                opcode: w,
                 ttm: a(0),
                 scene: a(1),
+                to_front: w == 0x4000,
             },
             0x1510 => Op::Step,
             0x1520 => Op::StepEnd,
@@ -286,6 +292,12 @@ pub enum Action {
         file: String,
         scene: u16,
         repeat: Repeat,
+    },
+    /// Move a scene to the front or the back of the draw order.
+    Reorder {
+        ttm: u16,
+        scene: u16,
+        to_front: bool,
     },
     /// Wait for the running scene to finish.
     Wait,
@@ -519,7 +531,18 @@ impl Sequencer {
                         return action;
                     }
                 }
-                Op::Reorder { opcode, .. } | Op::ContextOp { opcode, .. } => {
+                Op::Reorder {
+                    ttm,
+                    scene,
+                    to_front,
+                } => {
+                    return Action::Reorder {
+                        ttm,
+                        scene,
+                        to_front,
+                    }
+                }
+                Op::ContextOp { opcode, .. } => {
                     *self.todo_seen.entry(opcode).or_insert(0) += 1;
                 }
                 Op::Todo { opcode, .. } => {

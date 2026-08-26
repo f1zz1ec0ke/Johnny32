@@ -103,6 +103,21 @@ fn main() -> ExitCode {
                     }
                 }
                 Action::Wait => {}
+                Action::Reorder {
+                    ttm,
+                    scene,
+                    to_front,
+                } => {
+                    if let Some(i) = active.iter().position(|a: &Active| (a.ttm, a.scene) == (ttm, scene)) {
+                        let a = active.remove(i);
+                        if to_front {
+                            active.push(a);
+                        } else {
+                            active.insert(0, a);
+                        }
+                    }
+                    continue;
+                }
                 Action::Play {
                     file,
                     scene,

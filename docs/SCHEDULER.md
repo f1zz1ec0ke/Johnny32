@@ -245,6 +245,41 @@ mean "between frames" rather than "once": `seg10:0x1980` compares the
 instance's deadline at +0x37 with the tick counter, and when it passes, pushes
 the deadline forward by the delay again before running the frame.
 
+### The instance state machine
+
+`seg10:0x1C56` runs an instance only when its state is 1, 2, 3 or 5. Nothing
+else. That one line settles the whole lifecycle:
+
+* **state 0** — stopped. `StopScene` writes it straight into the instance
+  record, and 111 places in the scripts do. A stopped scene stops drawing,
+  immediately.
+* **state 4** — over. `seg10:0x1DDC` turns it into state 0 on the very next
+  pass, so it lasts exactly one, and it does not draw during it.
+* **states 1, 2, 3** — queued: play once, play a count, play until a deadline.
+* **state 5** — set only by `FinishScene`, which no script uses.
+
+So a scene played with `flags` of zero runs its program through **once**, and
+the single pass it spends in state 4 is the entire window in which
+`IF_RUNNING` can see it. That is the handshake every script is built on: play
+a scene, and the block guarded on it running fires the moment it is over.
+
+### What the clock actually says
+
+The port runs the data at the rate it was authored for, and that is
+measurable: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay across its
+twenty frames, and the port takes 134.
+
+It still feels quicker than the screensaver people remember, and the reason is
+in the binary. A 386 could not hold 62.5 passes a second. The engine has a
+speed index at `ds:0x30BE` precisely because it might not keep up, and the
+frame gate at `seg10:0x19A1` re-arms each deadline from *now* rather than from
+the deadline it missed — so a machine that falls behind runs the animation
+slower, permanently, and never catches up. The screensaver most people
+remember is this data on hardware that could not quite play it.
+
+`JC_SPEED` is a percentage against the authored rate: 100 is faithful, 70 runs
+it at seven tenths.
+
 ## How long a scene lasts
 
 Nothing in the scene table says. A scene lasts as long as its ADS sequence
@@ -635,11 +670,13 @@ Two things the port had to get right that are easy to get wrong:
   from the tables rather than something the code states. The waypoint
   coordinates should settle it once they are plotted over a background.
 * `seg3:0x1C41`, which the picker hands the chosen entry's mask to.
-* The exact cadence of the outer loop — how often a new scene is requested and
-  what refills the caller's time budget. Scenes now end on their own, so the
-  port's three-minute cap is a backstop rather than the schedule, but what
-  `cost` is a price *in* is still unanswered: the chooser compares `cost / 2`
-  against a ceiling (`seg4:0x0D76`), which makes it a price, not a duration.
+* The outer loop, which is further along than it was. `seg4:0x0A30` shows the
+  shape: after the chooser lands on an entry it does `budget -= cost` and
+  stores the entry into a **list** at `ds:0x30F4`, indexed by a counter, going
+  round again while the budget holds. So the scheduler picks a *run of scenes*
+  against a time allowance rather than one at a time, which is what `cost` is
+  a price in. Where the allowance comes from and what refills it is still to
+  be read.
 * What the engine draws in the oceans' index-0 crests, above under "The
   colour that is not there".
 * ADS `0x4000`: `seg10:0x15FB` unlinks a scene from the instance list and

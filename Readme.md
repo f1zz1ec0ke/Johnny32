@@ -116,8 +116,8 @@ Overhead, clouds drift across the sky at their own speeds and are replaced as
 they leave; on the water, thirty two-pixel glints come and go. Everything that
 drifts drifts the same way, because the wind is one variable rolled once when
 the sky is set up. In twenty-one minutes of simulated island — 75,000 frames —
-the only opcode reached that the port does not implement is one ADS draw-order
-op used four times in a single script.
+nothing is reached that the port does not implement — no TTM opcode, no ADS
+opcode.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and
@@ -128,7 +128,17 @@ cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
 ```
 
 `JC_NOWRITE=1` skips the PNG output. `JC_FAITHFUL=1` restores the 1992
-walk-router bug, for comparing against the original's behaviour.
+walk-router bug, for comparing against the original's behaviour. `JC_SPEED` is
+a percentage against the rate the data was authored at — 100 is faithful, 70
+runs it at seven tenths — and it works on the screensaver too.
+
+That knob exists because the faithful rate is faster than most people
+remember, and the binary says why. A 386 could not hold 62.5 passes a second;
+the engine carries a speed index at `ds:0x30BE` for exactly that reason, and
+its frame gate re-arms each deadline from *now* rather than from the one it
+missed, so a machine that falls behind runs the animation slower and never
+catches up. What people remember is this data on hardware that could not quite
+play it.
 
 Timing is settled, and it is not what it first looks like. The engine's
 software clock has a 4 ms unit — `seg2:0x1516` sets it to `1000 / (13 * 18)` —

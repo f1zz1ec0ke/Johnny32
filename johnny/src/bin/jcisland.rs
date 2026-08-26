@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
-            let secs = t as f32 * johnny::director::MS_PER_TICK as f32 / 1000.0;
+            let secs = t as f32 * johnny::director::ms_per_tick() as f32 / 1000.0;
             println!("[{t:6} {secs:7.1}s] {}", d.log[logged]);
             logged += 1;
         }
@@ -90,7 +90,7 @@ fn main() -> ExitCode {
     );
     println!(
         "{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
-        d.ticks() as f32 * johnny::director::MS_PER_TICK as f32 / 1000.0,
+        d.ticks() as f32 * johnny::director::ms_per_tick() as f32 / 1000.0,
         d.day,
         d.phase,
         if d.is_night() { "night" } else { "day" },

@@ -49,6 +49,25 @@ pub const STORY_DAYS: u8 = 11;
 /// `ds:0x2E72` and counts down the five delay slots.
 pub const MS_PER_TICK: u32 = 16;
 
+/// Milliseconds per tick after `JC_SPEED` is applied.
+///
+/// The port runs the data at the rate it was authored for, and that is
+/// measurably right: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay
+/// across its twenty frames and the port takes 134. But a 386 could not hold
+/// 62.5 passes a second -- the engine has a speed index at `ds:0x30BE` for
+/// exactly that reason, and skipped passes push each frame's deadline later --
+/// so the screensaver most people remember ran slower than its own data.
+///
+/// `JC_SPEED` is a percentage: 100 is faithful, 70 runs it at seven tenths.
+pub fn ms_per_tick() -> u32 {
+    let pct = std::env::var("JC_SPEED")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(10, 400);
+    (MS_PER_TICK * 100 / pct).max(1)
+}
+
 /// 62.5, rounded. The authors clearly thought in 60ths -- the delays in the
 /// scripts are 60, 120, 180, 240, 360 -- so a tick is near enough a 60th.
 pub const TICKS_PER_SECOND: u32 = 1000 / MS_PER_TICK;
@@ -165,37 +184,39 @@ impl Active {
         }
     }
 
-    /// The scene's program reached its end. `seg10:0x1D2B` decides what that
-    /// means from the run state, and the answer is never simply "stop":
+    /// Does the runner advance this instance at all?
     ///
-    /// * queued to play once, it starts over and becomes **running**
+    /// `seg10:0x1C56` runs states 1, 2, 3 and 5 and no others. State 0 is a
+    /// scene that has been stopped -- `StopScene` writes it straight into the
+    /// instance record, and 111 places in the scripts do -- and state 4 is a
+    /// scene that has just ended and is waiting one pass to be noticed.
+    pub fn runnable(&self) -> bool {
+        matches!(self.state, SceneState::Queued(_) | SceneState::Finished)
+    }
+
+    /// The scene's program reached its end. `seg10:0x1D2B` decides what that
+    /// means from the run state:
+    ///
     /// * queued for a count, it starts over until the count runs out
     /// * queued until a deadline, it starts over until the deadline passes
-    /// * **running**, and only then, it goes idle and is dropped
+    /// * otherwise it becomes **running** -- state 4, which is not a state it
+    ///   plays in. `seg10:0x1DDC` turns it idle on the very next pass, so it
+    ///   lasts exactly one, and that one pass is the whole window in which
+    ///   `IF_RUNNING` can see it.
     ///
-    /// So a scene played with `flags` of zero runs its program through twice:
-    /// once to get from queued to running, once to finish. That is what makes
-    /// `IF_RUNNING` on the scene you just started ever come true, and every
-    /// script is built on it.
+    /// That handshake is what every script is built on: play a scene, and the
+    /// block guarded on it running fires the moment it is over.
     pub fn program_ended(&mut self) -> bool {
         match self.state {
-            SceneState::Queued(1) => {
-                self.state = SceneState::Running;
-                self.restart()
-            }
             SceneState::Queued(2) if self.count > 0 => {
                 self.count -= 1;
                 self.restart()
             }
-            SceneState::Queued(2) => {
-                self.state = SceneState::Running;
-                self.restart()
-            }
             // The deadline is what ends this one; until it passes, keep going.
-            SceneState::Queued(_) => self.restart(),
+            SceneState::Queued(3) => self.restart(),
             _ => {
-                self.state = SceneState::Idle;
-                false
+                self.state = SceneState::Running;
+                true
             }
         }
     }
@@ -232,6 +253,16 @@ pub fn advance_scenes(
 ) -> Vec<(u16, u16)> {
     let mut finished = Vec::new();
     for a in active.iter_mut() {
+        // The sequencer and the runner share one field: the run state at
+        // +0x2F of the instance record. `StopScene` writes it directly, so
+        // read it back before deciding anything -- a scene the sequence has
+        // stopped has to stop drawing.
+        a.state = seq.state_of(a.ttm, a.scene);
+        if !a.runnable() {
+            // `seg10:0x1DDC`: a scene in state 4 has had its pass; it is over.
+            finished.push((a.ttm, a.scene));
+            continue;
+        }
         if a.wake <= now {
             let ended = match a.inst.run_frame(stage, archive) {
                 ttm::Step::Finished => true,
@@ -330,8 +361,21 @@ impl Director {
     ///
     /// `seg4:0x0B64` treats a major of 0 as "don't care", which is what the
     /// `(0, 0)` entries in the table mean.
+    /// `seg4:0x0B64`: a required major of 0 means anywhere, and a required
+    /// minor of -1 means any spot within that area. The two are tested
+    /// independently -- no scene in the table uses the minor wildcard, but the
+    /// engine allows it.
     fn position_ok(&self, scene: &Scene) -> bool {
-        scene.from.0 == 0 || scene.from == self.position
+        let (major, minor) = scene.from;
+        // A required area of 0 is anywhere, and there is nowhere to walk to,
+        // so the spot inside it does not apply either. Read strictly,
+        // `seg4:0x0B8F` would still want the minor to match -- only -1 is its
+        // wildcard -- but all eight rows with no area also ask for spot 0, and
+        // "anywhere, but standing at spot 0" is not a place.
+        if major == 0 {
+            return true;
+        }
+        major == self.position.0 && (minor == 0xFF || minor == self.position.1)
     }
 
     /// The chooser at `seg4:0x0D76`: filter, sum the weights, draw against the
@@ -449,7 +493,15 @@ impl Director {
             return;
         };
         if !self.position_ok(scene) {
-            if let Some(step) = self.next_step(scene.from) {
+            // Already in the right area, wrong spot within it. The router
+            // cannot help: `seg4:0x00B7` gives up when the majors already
+            // match, because a route block is keyed on the pair. The minor is
+            // a spot inside an area rather than somewhere to walk to, so take
+            // it and get on with the scene -- which is what stops Johnny
+            // teleporting across the island between one gag and the next.
+            if scene.from.0 == self.position.0 {
+                self.position.1 = scene.from.1;
+            } else if let Some(step) = self.next_step(scene.from) {
                 self.note(format!(
                     "walk {:?} -> {:?} via step {} ({} waypoints)",
                     self.position,
@@ -464,14 +516,15 @@ impl Director {
                     next: self.tick,
                 };
                 return;
+            } else {
+                // No route at all. The original would keep trying; move him
+                // directly so the scene can still play, and say so.
+                self.note(format!(
+                    "no route {:?} -> {:?}, moving directly",
+                    self.position, scene.from
+                ));
+                self.position = scene.from;
             }
-            // No route: the original would keep trying. Move him directly so
-            // the scene can still play, and say so.
-            self.note(format!(
-                "no route {:?} -> {:?}, moving directly",
-                self.position, scene.from
-            ));
-            self.position = scene.from;
         }
         let Some(mut seq) = Sequencer::from_record(archive, file) else {
             self.note(format!("no ADS record {file}"));
@@ -749,6 +802,22 @@ impl Director {
                     break;
                 }
                 Action::Wait => break,
+                Action::Reorder {
+                    ttm,
+                    scene,
+                    to_front,
+                } => {
+                    // Draw order is list order, and the runner walks it head
+                    // to tail, so the tail is on top.
+                    if let Some(i) = active.iter().position(|a| (a.ttm, a.scene) == (ttm, scene)) {
+                        let a = active.remove(i);
+                        if to_front {
+                            active.push(a);
+                        } else {
+                            active.insert(0, a);
+                        }
+                    }
+                }
                 Action::Play {
                     file,
                     scene,

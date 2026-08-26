@@ -551,8 +551,8 @@ fn windows_main() {
             colors: [0; 256],
         };
 
-        /// One tick is 16ms; see `director::MS_PER_TICK`.
-        const MS_PER_TICK: u32 = johnny::director::MS_PER_TICK;
+        // One tick is 16ms; see `director::MS_PER_TICK`. `JC_SPEED` scales it.
+        let ms_per_tick = johnny::director::ms_per_tick();
         let mut last = GetTickCount();
         let mut msg: MSG = core::mem::zeroed();
 
@@ -576,12 +576,12 @@ fn windows_main() {
             // original's dispatcher does, but bounded so a hitch cannot make
             // it sprint.
             let now = GetTickCount();
-            let mut due = ((now.wrapping_sub(last)) / MS_PER_TICK).min(8);
+            let mut due = ((now.wrapping_sub(last)) / ms_per_tick).min(8);
             if due == 0 {
                 Sleep(1);
                 continue;
             }
-            last = last.wrapping_add(due * MS_PER_TICK);
+            last = last.wrapping_add(due * ms_per_tick);
             let mut drew = false;
             while due > 0 {
                 drew |= director.tick(&archive);
