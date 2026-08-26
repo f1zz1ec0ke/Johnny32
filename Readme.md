@@ -101,6 +101,16 @@ cargo run --release --manifest-path johnny/Cargo.toml --bin jcrender -- MJRAFT.T
 cargo run --release --manifest-path johnny/Cargo.toml --bin jcplay -- MISCGAG.ADS 1
 ```
 
+And Johnny lives on his island — the scheduler picking scenes by weight and
+time of day, walking him to them, and running them:
+
+```sh
+cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
+```
+
+`JC_NOWRITE=1` skips the PNG output. `JC_FAITHFUL=1` restores the 1992
+walk-router bug, for comparing against the original's behaviour.
+
 Timing is settled: the engine registers one 4-unit software timer
 (`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, which is Win16's
 `GetCurrentTime` and returns milliseconds. **One tick is 4 ms**, so a TTM

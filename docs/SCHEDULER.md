@@ -210,6 +210,24 @@ The arc itself, from the `+0x0A` field:
 | 5 | `MARY.ADS` seq 1 | 11 | `JOHNNY.ADS` seq 1 |
 | 6 | `JOHNNY.ADS` seq 3 | | |
 
+## In the port
+
+`tools/gen_tables.py` emits these tables as `johnny/src/tables.rs`, so the port
+does not need the 16-bit binary at run time. `johnny/src/director.rs`
+implements the chooser, the walk router and the clock; `jcisland` runs it.
+
+Two things the port had to get right that are easy to get wrong:
+
+* `GotoFrame` does not jump on the spot. `seg12:0x0FC3` stashes the target and
+  it is taken at the frame boundary — jumping immediately makes a scene that
+  loops back on itself spin forever inside one call rather than yielding.
+* The island backdrop. `seg3:0x01E7` picks `NIGHT.SCR` or one of
+  `OCEAN00/01/02.SCR`, but all four are 640x480 and use palette index 0 — the
+  transparency key — across thousands of pixels. They are the VGA mode's
+  animated sea, drawn over something else, not a backdrop in their own right.
+  The port uses `ISLETEMP.SCR` for now, which is the 640x350 island the scenes
+  themselves load and matches the geometry the sprites and walk paths expect.
+
 ## Still open
 
 * What the two position components mean geometrically. Major 0-6 and minor
@@ -218,4 +236,9 @@ The arc itself, from the `+0x0A` field:
   coordinates should settle it once they are plotted over a background.
 * `seg3:0x1C41`, which the picker hands the chosen entry's mask to.
 * The exact cadence of the outer loop — how often a new scene is requested and
-  what refills the caller's time budget.
+  what refills the caller's time budget. The port stands in for it with a cap
+  on how long one scene may hold the island.
+* How the `OCEAN00/01/02.SCR` and `NIGHT.SCR` screens compose, given they are
+  640x480 with transparent regions while the scenes are 640x350.
+* The 42 frames of `BACKGRND.BMP`. The island is assembled from them as Johnny
+  builds, so which frames are drawn is part of the story state.

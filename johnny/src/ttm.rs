@@ -257,6 +257,30 @@ impl Stage {
         &self.palette
     }
 
+    pub fn set_palette(&mut self, palette: [[u8; 3]; 256]) {
+        self.palette = palette;
+    }
+
+    pub fn set_background(&mut self, frame: Frame) {
+        self.surface.draw_background(&frame);
+        self.background = Some(frame);
+    }
+
+    /// Paint a sprite permanently into the background, the way the island is
+    /// composited over the sea before anything animates on top.
+    pub fn blit_into_background(&mut self, sprite: &Frame, x: i32, y: i32) {
+        let Some(mut bg) = self.background.take() else {
+            return;
+        };
+        let saved = std::mem::replace(&mut self.surface.pixels, bg.pixels);
+        let clip = self.surface.clip.take();
+        self.surface
+            .draw_sprite(sprite, x, y, crate::render::Mirror::none());
+        bg.pixels = std::mem::replace(&mut self.surface.pixels, saved);
+        self.surface.clip = clip;
+        self.background = Some(bg);
+    }
+
     /// Repaint the background. Scenes composite over this each tick.
     pub fn restore_background(&mut self) {
         if let Some(bg) = self.background.take() {
@@ -312,6 +336,10 @@ pub struct Instance {
     pub delay: u16,
     bitmap_slot: usize,
     palette_slot: usize,
+    /// `GotoFrame` does not jump on the spot. `seg12:0x0FC3` stashes the
+    /// target and it is taken at the frame boundary — which is also what stops
+    /// a scene that loops back on itself from spinning inside one call.
+    pending_goto: Option<u16>,
 }
 
 impl Instance {
@@ -322,6 +350,7 @@ impl Instance {
             delay: 1,
             bitmap_slot: 0,
             palette_slot: 0,
+            pending_goto: None,
         }
     }
 
@@ -336,14 +365,30 @@ impl Instance {
     }
 
     /// Run until the next `EndFrame`, painting into the stage.
+    ///
+    /// The instruction budget is a backstop: a malformed or misunderstood
+    /// program that never reaches an `EndFrame` should end the scene, not hang
+    /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
+        let mut budget = 100_000u32;
         loop {
+            budget -= 1;
+            if budget == 0 {
+                return Step::Finished;
+            }
             let Some(op) = self.program.ops.get(self.pc).cloned() else {
                 return Step::Finished;
             };
             self.pc += 1;
             match op {
-                Op::EndFrame => return Step::Frame(self.delay),
+                Op::EndFrame => {
+                    if let Some(target) = self.pending_goto.take() {
+                        if !self.seek_scene(target) {
+                            return Step::Finished;
+                        }
+                    }
+                    return Step::Frame(self.delay);
+                }
                 Op::LoadScreen(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(f) = dgds::read_screen(body) {
@@ -412,11 +457,7 @@ impl Instance {
                         stage.surface.draw_sprite(f, x as i32, y as i32, mirror);
                     }
                 }
-                Op::GotoFrame(n) => {
-                    if !self.seek_scene(n) {
-                        return Step::Finished;
-                    }
-                }
+                Op::GotoFrame(n) => self.pending_goto = Some(n),
                 // Markers, no-ops and the not-yet-implemented, all explicit.
                 Op::SceneMarker(_)
                 | Op::SetBackground(_)

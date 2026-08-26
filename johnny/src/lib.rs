@@ -8,6 +8,8 @@
 
 pub mod ads;
 pub mod dgds;
+pub mod director;
 pub mod png;
 pub mod render;
+pub mod tables;
 pub mod ttm;
