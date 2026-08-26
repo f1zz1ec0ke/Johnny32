@@ -107,7 +107,10 @@ scrub, palm trunk, fronds, and a rock and sandbar that come and go on a coin
 flip — and seven patches of surf breaking round the shore, three frames each,
 on three counters that chase one another so the shoreline never moves in
 lockstep. Out on the open water, wave crests swell and subside at random
-spots in three bands of distance, up to seven at a time.
+spots in three bands of distance, up to seven at a time. And the raft grows:
+five stages of `MRAFT.BMP` keyed to the story day, hidden on the one scene
+that sails away in it. `JC_DAY=n` on `jcisland` starts on a given day, which
+is the quick way to watch it get built.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and

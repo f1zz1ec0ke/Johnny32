@@ -363,6 +363,61 @@ answer is:
 The port fills it with index 9 — the water it sits in — which cannot be far
 wrong either way.
 
+### The raft
+
+The one thing on the island that changes with the story. `MRAFT.BMP` is
+loaded next to `BACKGRND.BMP` at `seg3:0x0179` and kept in `ds:0x30AE`; it
+holds five frames of a raft under construction, 72x39 growing to 128x39.
+
+`seg3:0x1D7E` reads the story day out of `ds:0x2D9C`, takes one off it and
+clamps to 1..5, so there is a raft from the first day, it grows through days
+three to six, and from day six it is finished. It goes at (513, 266), or
+(530, 281) when the rock and sandbar are there (`seg3:0x1DCB`).
+
+One scene turns it off — `MARY.ADS` sequence 5, "JOHNNY LEAVES", the day-eight
+story scene where he sails away on it. The scene animates the raft itself, so
+the backdrop must not also be drawing one.
+
+### What a scene asks of the backdrop
+
+The scene table's 32-bit mask at `+0x0B` is not only a category filter. The
+chooser hands it to `seg3:0x1C41`, which reads more bits out of it:
+
+| Bit | Effect |
+| --- | --- |
+| `0x0010` | clears `ds:0x30B6` |
+| `0x0200` | `ds:0x30C2 = 0` — no rock and no sandbar |
+| `0x0800` | `ds:0x30B4 = 1` |
+| `0x1000` | sets `ds:0x30B2` |
+| `0x2000` | `ds:0x30B4 = 2` — a cutaway: `seg3:0x01C4` clears the whole 640x480 to black instead of drawing a sea, and the scene's own `.SCR` is the picture |
+| `0x4000` | sets `ds:0x30B0` — no raft |
+| `0x010000`-`0x200000` | the island placement bits below |
+
+Passing all ones resets the lot (`seg3:0x1C4B`), which is what puts the island
+back to normal between scenes.
+
+Seventeen of the eighty scenes ask for no rock; four are cutaways — Suzy's
+city, meeting Suzy, the office, and the ending — and one asks for no raft.
+
+### The island is placed at random, and the port does not do it
+
+`seg3:0x1B00` picks the island's position rather than fixing it. It hands
+`seg3:0x14BF` a rectangle — (168, 255) by 111x59 with the rock, (67, 255) by
+226x129 without — and the high bits of the scene mask (`ds:0x30C0`) narrow it
+to a quadrant or replace it outright: bit 21 puts the island at (17, 309), bit
+20 at (289, 299). Everything else in segment 3 is drawn relative to the result,
+and so is Johnny's walking: `seg4:0x02EA` adds `ds:0x30C6`/`ds:0x30C4` to each
+waypoint before blitting him.
+
+The port keeps the island at (289, 279), which is the anchor the offsets are
+all expressed against and the placement `ISLETEMP.SCR` was painted at. The
+reason not to move it is that **the scenes do not follow**: the TTM sprite
+handler at `seg12:0x025B` draws at absolute coordinates, and segment 12 does
+not reference the origin at all — only segments 3 and 4 do. Move the island
+and Johnny acts out his scenes over open water. Whether the original had the
+same problem, or whether something else pins the origin in practice, is not
+settled.
+
 ### Waves on the open water
 
 There is a second wave system, and this one comes and goes. `seg3:0x04BD`
@@ -453,6 +508,12 @@ Two things the port had to get right that are easy to get wrong:
 * What the engine draws in the oceans' index-0 crests, above under "The
   colour that is not there".
 * The glints, above — the page semantics of `seg13:0x007E` are the blocker.
-* The rest of the 42 frames of `BACKGRND.BMP`. Six are the island and
-  twenty-one are the surf; the remainder (a raft, a hut, a signal fire) are
-  what Johnny builds, so which of them are drawn is part of the story state.
+* Three frames of `BACKGRND.BMP` — 15, 16 and 17, which are clouds. The other
+  thirty-nine are all placed: three island, three palm and scrub, twenty-one
+  surf and twelve rolling wave. Nothing Johnny builds is in that file; the
+  raft is `MRAFT.BMP` and everything else he makes belongs to the scene that
+  makes it.
+* The fifteen-record array at `ds:0x2E82`, which is almost certainly those
+  clouds: `seg3:0x0A77` walks it right after setting the drift direction.
+* Whether the island's random placement can be honoured — above, under "The
+  island is placed at random".

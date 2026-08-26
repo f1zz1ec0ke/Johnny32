@@ -10,7 +10,7 @@
 use crate::ads::{Action, Repeat, Rng, SceneState, Sequencer};
 use crate::dgds::{self, Archive, Frame};
 use crate::render::Mirror;
-use crate::scenery::Scenery;
+use crate::scenery::{Backdrop, Scenery};
 use crate::tables::{self, Scene, WalkStep};
 use crate::ttm::{self, Instance, Program, Stage};
 use std::collections::HashMap;
@@ -477,6 +477,9 @@ impl Director {
             self.note(format!("{file} has no sequence {}", scene.sequence));
             return;
         }
+        // What this scene wants the island to look like. `seg3:0x1C41` reads
+        // it out of the same 32-bit mask the chooser matched on.
+        self.set_backdrop(archive, Backdrop::from_mask(scene.mask));
         let label = seq
             .labels
             .get(&(scene.sequence as u16))
@@ -515,6 +518,20 @@ impl Director {
         true
     }
 
+    /// Tell the backdrop what the story and the scene want of it, and put it
+    /// back on screen if that changed anything.
+    fn set_backdrop(&mut self, archive: &Archive, backdrop: Backdrop) {
+        let day = self.day;
+        let Some(scenery) = self.scenery.as_mut() else {
+            return;
+        };
+        if scenery.set_story(archive, day, backdrop) {
+            let frame = scenery.compose();
+            self.stage.set_background(frame);
+            self.scenery_gen = self.stage.background_gen;
+        }
+    }
+
     /// Put the island back up after a scene has had the backdrop.
     fn restore_island(&mut self) {
         if let Some(scenery) = self.scenery.as_ref() {
@@ -544,7 +561,7 @@ impl Director {
         }
         let roll = self.rng.next_u32();
         self.scenery_night = self.is_night();
-        match Scenery::build(archive, self.scenery_night, roll, self.tick) {
+        match Scenery::build(archive, self.scenery_night, roll, self.tick, self.day) {
             Some(s) => {
                 self.note(format!(
                     "scenery: {}{}",
@@ -668,6 +685,7 @@ impl Director {
                     if ends_at.0 != 0 {
                         self.position = ends_at;
                     }
+                    self.set_backdrop(archive, Backdrop::default());
                     self.restore_island();
                     self.note(format!("scene over, Johnny at {:?}", self.position));
                     self.advance_clock();

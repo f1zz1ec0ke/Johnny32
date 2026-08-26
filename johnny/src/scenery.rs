@@ -111,6 +111,46 @@ struct Wave {
     left: u16,
 }
 
+/// Where the raft sits, without and with the rock (`seg3:0x1DCB`).
+const RAFT_AT: [(i32, i32); 2] = [(0x201, 0x10A), (0x212, 0x119)];
+
+/// What a scene asks of the backdrop, out of its 32-bit mask.
+///
+/// `seg3:0x1C41` takes the mask the chooser landed on and turns bits of it
+/// into the backdrop's state. Passing all ones resets everything, which is how
+/// the island gets back to normal between scenes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Backdrop {
+    /// Bit 0x2000 (`seg3:0x1CDC`): not the island at all. The screen is
+    /// cleared and the scene's own `.SCR` is the whole picture -- this is how
+    /// the office and Suzy's flat get shown.
+    pub cutaway: bool,
+    /// Bit 0x0200 (`seg3:0x1C87`): no rock and no sandbar this time.
+    pub no_rock: bool,
+    /// Bit 0x4000 (`seg3:0x1C98`): no raft. The scene is about the raft and
+    /// draws its own.
+    pub no_raft: bool,
+}
+
+impl Backdrop {
+    pub fn from_mask(mask: u32) -> Backdrop {
+        Backdrop {
+            cutaway: mask & 0x2000 != 0,
+            no_rock: mask & 0x0200 != 0,
+            no_raft: mask & 0x4000 != 0,
+        }
+    }
+}
+
+/// Which of `MRAFT.BMP`'s five frames the raft is at, on this story day.
+///
+/// `seg3:0x1D7E` reads the day from `ds:0x2D9C`, takes one off it and clamps
+/// to 1..5. So there is a raft from the first day, it grows on days three
+/// through six, and from day six it is finished.
+pub fn raft_frame(day: u8) -> usize {
+    (day.saturating_sub(1).clamp(1, 5) - 1) as usize
+}
+
 /// The three sea frames, in the order the pointer table at `ds:0x0262` has
 /// them. `seg3:0x01F5` draws `rand() % 3`.
 pub const SEAS: [&str; 3] = ["OCEAN00.SCR", "OCEAN01.SCR", "OCEAN02.SCR"];
@@ -146,25 +186,39 @@ pub struct Scenery {
     drift: i32,
     pub sea: &'static str,
     pub extras: bool,
+    /// The raft is part of the island, so the base has to be rebuilt when the
+    /// story day moves it on or a scene asks for it to be left out.
+    raft: Option<Frame>,
+    day: u8,
+    backdrop: Backdrop,
+    /// The sea and nothing else, so the island can be laid down again when the
+    /// story changes without decoding the screen a second time.
+    sea_only: Frame,
 }
 
 impl Scenery {
     /// Compose the backdrop. `night` picks `NIGHT.SCR` over the oceans,
     /// `roll` supplies the two random choices: which sea, and whether the
     /// optional pieces are there.
-    pub fn build(archive: &Archive, night: bool, roll: u32, now: u32) -> Option<Scenery> {
+    pub fn build(
+        archive: &Archive,
+        night: bool,
+        roll: u32,
+        now: u32,
+        day: u8,
+    ) -> Option<Scenery> {
         let sea = if night {
             NIGHT_SEA
         } else {
             SEAS[(roll % 3) as usize]
         };
-        let mut base = dgds::read_screen(archive.get(sea)?).ok()?;
+        let mut sea_only = dgds::read_screen(archive.get(sea)?).ok()?;
         // `NIGHT.SCR` and the oceans are 640x480, the size of the screen. If
         // one ever is not, pad rather than leave the surface ragged.
-        if base.width != SCREEN_W || base.height != SCREEN_H {
-            base = fit_to_screen(&base);
+        if sea_only.width != SCREEN_W || sea_only.height != SCREEN_H {
+            sea_only = fit_to_screen(&sea_only);
         }
-        for p in base.pixels.iter_mut() {
+        for p in sea_only.pixels.iter_mut() {
             if *p == 0 {
                 *p = SEA_KEY_AS;
             }
@@ -174,31 +228,79 @@ impl Scenery {
             .get("BACKGRND.BMP")
             .and_then(|b| dgds::read_bitmap(b).ok())
             .unwrap_or_default();
+        // The raft is its own file, loaded next to the island at
+        // `seg3:0x0179` and kept in `ds:0x30AE`.
+        let raft = archive
+            .get("MRAFT.BMP")
+            .and_then(|b| dgds::read_bitmap(b).ok())
+            .and_then(|frames| frames.into_iter().nth(raft_frame(day)));
 
-        let extras = roll / 3 % 2 == 1;
-        let mut surface = Surface::new(base.width, base.height);
-        surface.draw_background(&base);
-        for &(frame, x, y, always) in ISLAND.iter() {
-            if !always && !extras {
-                continue;
-            }
-            if let Some(f) = pieces.get(frame) {
-                surface.draw_sprite(f, x, y, Mirror::default());
-            }
-        }
-        base.pixels = surface.pixels;
-
-        Some(Scenery {
-            base,
+        let mut scenery = Scenery {
+            base: sea_only.clone(),
+            sea_only,
             pieces,
+            raft,
+            day,
+            backdrop: Backdrop::default(),
             counters: [2, 2, 2],
             next: now,
             waves: Vec::new(),
             wave_next: now,
             drift: 1,
             sea,
-            extras,
-        })
+            extras: roll / 3 % 2 == 1,
+        };
+        scenery.rebuild();
+        Some(scenery)
+    }
+
+    /// Lay the island down over the sea again: the pieces, then the raft.
+    ///
+    /// `seg3:0x0262` draws the island, the two optional pieces, the scrub and
+    /// the palm; `seg3:0x1D69` puts the raft on afterwards.
+    fn rebuild(&mut self) {
+        let mut surface = Surface::new(self.sea_only.width, self.sea_only.height);
+        surface.draw_background(&self.sea_only);
+        if !self.backdrop.cutaway {
+            let rock = self.extras && !self.backdrop.no_rock;
+            for &(frame, x, y, always) in ISLAND.iter() {
+                if !always && !rock {
+                    continue;
+                }
+                if let Some(f) = self.pieces.get(frame) {
+                    surface.draw_sprite(f, x, y, Mirror::default());
+                }
+            }
+            if !self.backdrop.no_raft {
+                if let Some(f) = self.raft.as_ref() {
+                    let (x, y) = RAFT_AT[rock as usize];
+                    surface.draw_sprite(f, x, y, Mirror::default());
+                }
+            }
+        } else {
+            // `seg3:0x01C4` clears the whole 640x480 to colour 5 rather than
+            // drawing a sea at all.
+            surface.fill(crate::render::BLACK);
+        }
+        self.base.pixels = surface.pixels;
+    }
+
+    /// The story moved on, or a scene wants the island a particular way.
+    /// Returns whether anything actually changed.
+    pub fn set_story(&mut self, archive: &Archive, day: u8, backdrop: Backdrop) -> bool {
+        if self.day == day && self.backdrop == backdrop {
+            return false;
+        }
+        if raft_frame(day) != raft_frame(self.day) {
+            self.raft = archive
+                .get("MRAFT.BMP")
+                .and_then(|b| dgds::read_bitmap(b).ok())
+                .and_then(|frames| frames.into_iter().nth(raft_frame(day)));
+        }
+        self.day = day;
+        self.backdrop = backdrop;
+        self.rebuild();
+        true
     }
 
     /// Step the surf if its 64ms is up. Returns whether anything moved.

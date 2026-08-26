@@ -4,7 +4,8 @@
 //!     cargo run --release --bin jcisland -- 300
 //!
 //! Arguments: a tick count, an optional RNG seed. `JC_NOWRITE=1` skips the
-//! PNG output; `JC_FAITHFUL=1` restores the 1992 walk-router bug.
+//! PNG output; `JC_FAITHFUL=1` restores the 1992 walk-router bug; `JC_DAY=n`
+//! starts on story day `n`, which is what decides how far the raft has got.
 
 use johnny::{dgds::Archive, director::Director, png};
 use std::process::ExitCode;
@@ -42,6 +43,11 @@ fn main() -> ExitCode {
 
     let mut d = Director::new(seed);
     d.faithful_router = std::env::var("JC_FAITHFUL").is_ok();
+    // Start on a given story day, to see the island as it is by then --
+    // mostly, to watch the raft get built.
+    if let Some(day) = std::env::var("JC_DAY").ok().and_then(|v| v.parse().ok()) {
+        d.day = day;
+    }
     let mut frame = 0usize;
     let mut logged = 0usize;
     let mut waves_max = 0usize;
