@@ -10,7 +10,7 @@
 use crate::ads::{Action, Repeat, Rng, SceneState, Sequencer};
 use crate::dgds::{self, Archive, Frame};
 use crate::render::Mirror;
-use crate::scenery::{Backdrop, Scenery};
+use crate::scenery::{self, Backdrop, Scenery};
 use crate::tables::{self, Scene, WalkStep};
 use crate::ttm::{self, Instance, Program, Stage};
 use std::collections::HashMap;
@@ -27,12 +27,6 @@ pub const ISLAND_Y: i32 = 0x117;
 
 /// The scene table's "no script" marker, in the ADS file id at `+0x0F`.
 pub const NO_ADS_FILE: u8 = 0xFF;
-
-/// How long a script-less entry holds Johnny still. Its `cost` is 5, and the
-/// chooser prices scenes in it, so a few seconds is the shape of it.
-fn idle_ticks(scene: &Scene) -> u32 {
-    scene.cost.max(1) as u32 * TICKS_PER_SECOND
-}
 
 /// The story runs for eleven days and then wraps (`seg4:0x0BC8`).
 pub const STORY_DAYS: u8 = 11;
@@ -101,6 +95,61 @@ pub mod category {
     pub const SECONDARY: u32 = 0x02;
     /// Self-contained gags that end back at "anywhere" (`seg4:0x091C`).
     pub const STANDALONE: u32 = 0x04;
+    /// The story. Not really a category: `seg4:0x0D9E` takes this one as a
+    /// signal to roll one in ten and then match on the day instead
+    /// (`seg4:0x08DC`).
+    pub const STORY: u32 = 0x80;
+}
+
+/// What one queue may spend. `seg4:0x0640` passes 300 and every scene queued
+/// takes its `cost` out of it; the queue closes when nothing affordable is
+/// left. Scenes cost 5 to 105, so a queue is a handful of them.
+pub const QUEUE_BUDGET: i32 = 300;
+
+/// The queue's hard ceiling (`seg4:0x0B0F`). A backstop, not a target.
+const QUEUE_CAP: usize = 0x12A;
+
+/// The budget the standalone slot is picked against. `seg4:0x0D90` throws the
+/// caller's away and uses this, so the gag that closes a queue is never
+/// priced out of it.
+const UNPRICED: i32 = 0x3E7;
+
+/// How long a script-less queue entry holds Johnny still: `seg4:0x075B` rolls
+/// `rand() % 240 + 180` ticks, which is three to seven seconds.
+const IDLE_SPAN: u32 = 0xF0;
+const IDLE_LEAST: u32 = 0xB4;
+
+/// The dawn the config dialog starts at (`ds:0x00BE`), as HHMM. Segment 2
+/// writes this from the spinner in Screen Antics' settings.
+pub const DEFAULT_DAWN: u16 = 900;
+
+/// How the time of day is decided.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// The original: half-hours since the dawn the user set, counted mod
+    /// sixteen (`seg4:0x0540`). Johnny's day is eight real hours long, so
+    /// with the default dawn of nine the light goes at three and comes back
+    /// at five.
+    Wall { dawn: u16 },
+    /// One phase per queue, so a twenty-minute run still sees a whole day.
+    /// The tools use this; nothing shipped does.
+    PerQueue,
+}
+
+/// The phase a clock time falls in, from `seg4:0x0C48`.
+///
+/// `hhmm` is `hour * 100 + minute`, and the minute is only ever 0 or 30 --
+/// `seg4:0x056B` rounds it down to the half hour before calling. The `+ 14`
+/// and the `mod 16` cancel between the two calls in `seg4:0x0587`; what is
+/// left is the number of half hours from dawn to now.
+pub fn half_hours(hhmm: u16) -> i32 {
+    let hhmm = hhmm as i32;
+    let index = hhmm / 50 + (hhmm % 100) / 30;
+    (index + 14) % 16
+}
+
+pub fn phase_at(hhmm: u16, dawn: u16) -> u8 {
+    (((half_hours(hhmm) - half_hours(dawn)) + 16) % 16) as u8
 }
 
 /// A calendar special. `seg4:0x0560` checks the date and, when it matches,
@@ -134,12 +183,18 @@ enum Activity {
     Walking {
         step: &'static WalkStep,
         index: usize,
+        /// The area the journey started in. The route block is looked up once,
+        /// on the pair, and re-read for wherever Johnny has got to since.
+        origin: u8,
         target: (u8, u8),
         /// Tick at which the next waypoint is due.
         next: u32,
     },
     /// Running a scene's ADS sequence.
     Scene {
+        /// The table row this came from, so the story can tell when its own
+        /// scene has been shown.
+        row: &'static Scene,
         seq: Box<Sequencer>,
         active: Vec<Active>,
         ends_at: (u8, u8),
@@ -267,7 +322,10 @@ pub fn advance_scenes(
             finished.push((a.ttm, a.scene));
             continue;
         }
-        if a.wake <= now {
+        if a.wake > now {
+            // Not its turn to move, but it is still on screen.
+            a.inst.repaint(stage, archive);
+        } else {
             let ended = match a.inst.run_frame(stage, archive) {
                 ttm::Step::Finished => true,
                 ttm::Step::Frame(delay) => {
@@ -297,6 +355,32 @@ pub fn advance_scenes(
     finished
 }
 
+/// The wall clock as HHMM. `seg1:0x020F` is the C runtime's `gettime`; this
+/// is the same idea with whatever this process can see, and the host may know
+/// better -- `johnny.scr` asks Windows for the local time and sets `hhmm`.
+fn since_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+pub fn wall_hhmm() -> u16 {
+    let secs = since_epoch() % 86_400;
+    (secs / 3600 * 100 + secs % 3600 / 60) as u16
+}
+
+/// Days since the epoch. The original compares day, month and year
+/// (`seg4:0x0BBE`); one number does the same job.
+pub fn today() -> u32 {
+    (since_epoch() / 86_400) as u32
+}
+
+/// Two table rows are the same row. The engine compares the pointers it
+/// stored in `ds:0x30E8` and `ds:0x30EA`; so does this.
+fn same(a: Option<&'static Scene>, b: &'static Scene) -> bool {
+    a.is_some_and(|a| std::ptr::eq(a, b))
+}
+
 pub struct Director {
     /// Where Johnny is standing, as (major, minor).
     pub position: (u8, u8),
@@ -316,6 +400,10 @@ pub struct Director {
     /// JOHNWALK.BMP, decoded once. `FILES.VIN` preloads it, and decoding it
     /// per walk frame is 36 LZW passes a tick.
     walk_frames: Option<Rc<Vec<Frame>>>,
+    /// The walk frame Johnny is standing in, so he can be put back after the
+    /// surf repaints the backdrop underneath him. The engine leaves him where
+    /// he was drawn; this port repaints, so it has to draw him again.
+    standing: Option<(u16, u16, u16, Mirror)>,
     /// The sea, the island and the surf. `None` until the first tick loads it.
     scenery: Option<Scenery>,
     /// Whether the backdrop on show is the night one, so nightfall can be
@@ -332,6 +420,43 @@ pub struct Director {
     /// scenes so a long run can say whether any are ever reached.
     pub ads_todo: std::collections::BTreeMap<u16, usize>,
     pub log: Vec<String>,
+
+    // --- the outer loop, `seg4:0x0540` and what it keeps ------------------
+    /// The scenes lined up and how far through them we are (`ds:0x30F4`,
+    /// `ds:0x30F2`).
+    queue: Vec<&'static Scene>,
+    cursor: usize,
+    /// Where the island is allowed to stand this time round (`ds:0x30C0`).
+    /// The queue's scenes vote on it as they are picked, and a scene that
+    /// disagrees with the votes already cast cannot join.
+    island_state: u16,
+    /// What the queue's scenes between them want the island to look like
+    /// (`ds:0x30B0`-`ds:0x30B6`, `ds:0x30C2`).
+    backdrop: Backdrop,
+    /// The last standalone and the last companion, so neither comes round
+    /// twice running (`ds:0x30E8`, `ds:0x30EA`).
+    last_gag: Option<&'static Scene>,
+    last_mate: Option<&'static Scene>,
+    /// The story scene in this queue, if the one-in-ten came up
+    /// (`ds:0x30EC`), and how far it has got: 0 not offered, 1 queued,
+    /// 2 played, 3 counted (`ds:0x30EE`).
+    story_scene: Option<&'static Scene>,
+    story_state: u8,
+    /// The story day on offer, which runs one ahead of the day reached
+    /// (`ds:0x2D9B` against `ds:0x2D9C`, which is `day`).
+    story_offered: u8,
+    /// The calendar day the story last moved on (`ds:0x2D95`-`ds:0x2D99`),
+    /// and today's, as days since the epoch.
+    story_date: Option<u32>,
+    pub date: u32,
+    /// Whether the queue that just ended ran itself out rather than being
+    /// abandoned (`ds:0x30F0`).
+    queue_spent: bool,
+    /// Where the time of day comes from.
+    pub clock: Clock,
+    /// The wall clock as HHMM, when the host knows it better than this
+    /// process does -- `johnny.scr` reads the local time, the tools do not.
+    pub hhmm: Option<u16>,
 }
 
 impl Director {
@@ -348,12 +473,27 @@ impl Director {
             activity: Activity::Idle,
             programs: HashMap::new(),
             walk_frames: None,
+            standing: None,
             scenery: None,
             scenery_night: false,
             scenery_gen: 0,
             tick: 0,
             ads_todo: Default::default(),
             log: Vec::new(),
+            queue: Vec::new(),
+            cursor: 0,
+            island_state: scenery::ANYWHERE,
+            backdrop: Backdrop::default(),
+            last_gag: None,
+            last_mate: None,
+            story_scene: None,
+            story_state: 0,
+            story_offered: 1,
+            story_date: None,
+            date: today(),
+            queue_spent: false,
+            clock: Clock::Wall { dawn: DEFAULT_DAWN },
+            hhmm: None,
         }
     }
 
@@ -383,26 +523,45 @@ impl Director {
     }
 
     /// The chooser at `seg4:0x0D76`: filter, sum the weights, draw against the
-    /// total. The story path is separate — it matches on the day instead of
-    /// the category mask, and is offered on a one-in-ten roll.
-    pub fn choose(&mut self, category: u32, budget: u8) -> Option<&'static Scene> {
+    /// total.
+    ///
+    /// The story path is a category in name only. `category::STORY` rolls one
+    /// in ten, and if it comes up it takes whichever scene carries today's
+    /// story day, never mind the hour, the price or where the island is.
+    pub fn choose(&mut self, category: u32, budget: i32) -> Option<&'static Scene> {
+        // `seg4:0x0D8A`: the standalone slot is picked without regard to cost.
+        let budget = if category == category::STANDALONE {
+            UNPRICED
+        } else {
+            budget
+        };
+        if category == category::STORY {
+            if self.rng.below(10) != 0 {
+                return None;
+            }
+            // `seg4:0x0DB9`: the day on offer catches up to the day reached.
+            self.story_offered = self.day;
+        }
         let mut candidates: Vec<&'static Scene> = Vec::new();
         let mut total = 0u32;
         for scene in tables::SCENES {
-            if scene.sequence == 0 || scene.weight == 0 {
+            if scene.sequence == 0 {
                 continue;
             }
-            if scene.mask & category == 0 || scene.day != 0 {
-                continue;
+            let wanted = if category == category::STORY && scene.day == self.story_offered {
+                true
+            } else {
+                scene.mask & category != 0
+                    && scene.day == 0
+                    && self.phase >= scene.min_phase
+                    && self.phase < scene.max_phase
+                    && (scene.cost as i32) / 2 < budget
+                    && self.island_allows(scene.mask)
+            };
+            if wanted {
+                total += scene.weight as u32;
+                candidates.push(scene);
             }
-            if self.phase < scene.min_phase || self.phase >= scene.max_phase {
-                continue;
-            }
-            if scene.cost / 2 >= budget {
-                continue;
-            }
-            total += scene.weight as u32;
-            candidates.push(scene);
         }
         if total == 0 {
             return None;
@@ -417,25 +576,285 @@ impl Director {
         None
     }
 
-    /// The day's story scene, if the one-in-ten roll comes up.
-    pub fn choose_story(&mut self) -> Option<&'static Scene> {
-        if self.rng.below(10) != 0 {
-            return None;
+    /// Can this scene still agree with the queue about where the island is?
+    ///
+    /// `seg4:0x0EDB`. The six state bits are three pairs, and each pair has a
+    /// left member and a right member: the two pins first, then the four
+    /// quadrants. A scene that wants the island on one side cannot join a
+    /// queue that has already claimed the other, and a scene that wants a
+    /// single quadrant cannot join one that has claimed the opposite half.
+    fn island_allows(&self, mask: u32) -> bool {
+        let state = self.island_state;
+        if state == scenery::ANYWHERE {
+            return true;
         }
-        tables::SCENES
+        let want = (mask >> 16) as u16;
+        let w = |b: u16| want & b != 0;
+        let s = |b: u16| state & b != 0;
+        // 0x15 is the three left bits, 0x2A the three right ones, 0x30 the
+        // bottom two quadrants and 0x0C the top two.
+        if w(0x20) && s(0x2A) {
+            return false;
+        }
+        if w(0x10) && s(0x15) {
+            return false;
+        }
+        if w(0x01) && ((!w(0x02) && s(0x2A)) || (!w(0x04) && s(0x30))) {
+            return false;
+        }
+        if w(0x02) && ((!w(0x01) && s(0x15)) || (!w(0x08) && s(0x30))) {
+            return false;
+        }
+        if w(0x04) && ((!w(0x08) && s(0x2A)) || (!w(0x01) && s(0x0C))) {
+            return false;
+        }
+        if w(0x08) && ((!w(0x04) && s(0x15)) || (!w(0x02) && s(0x0C))) {
+            return false;
+        }
+        true
+    }
+
+    /// Take a scene's wishes for the island (`seg3:0x1C41`).
+    ///
+    /// The low word is what the island looks like; the high word is where it
+    /// may stand. Two bits of the high word nail it to a spot and four are
+    /// quadrants, and they accumulate: the first scene to ask for anything
+    /// clears the "anywhere" marker and every scene after it narrows the
+    /// choice further.
+    fn take_wishes(&mut self, mask: u32) {
+        self.backdrop.apply(mask);
+        let want = (mask >> 16) as u16;
+        if self.island_state == scenery::ANYWHERE && want & 0x3F != 0 {
+            self.island_state = 0;
+        }
+        if want & 0x20 != 0 {
+            self.island_state = 1;
+        } else if want & 0x10 != 0 {
+            self.island_state = 2;
+        }
+        for (bit, quadrant) in [(1u16, 4u16), (2, 8), (4, 0x10), (8, 0x20)] {
+            if want & bit != 0 {
+                self.island_state |= quadrant;
+            }
+        }
+    }
+
+    /// Build the next queue of scenes (`seg4:0x08B9`).
+    ///
+    /// A queue is not a list of things to do next; it is a set of scenes that
+    /// have agreed with each other about where the island is standing, put in
+    /// an order. The engine builds one, places the island to suit it, and then
+    /// plays it out before thinking again.
+    ///
+    /// The shape is: roll for the story, pick the gag that will close the
+    /// queue, then spend three hundred units of allowance on whatever fits in
+    /// between. `cost` is the price, and it is the only thing that ends a
+    /// queue early.
+    fn build_queue(&mut self) {
+        let mut budget = QUEUE_BUDGET;
+        self.queue.clear();
+        self.cursor = 0;
+
+        // The story, one time in ten. It goes in whichever of the two slots
+        // its own category says, and it is dropped if it is one of the two
+        // that ran last time.
+        let (mut gag, mut mate) = (None, None);
+        self.story_scene = None;
+        if let Some(story) = self.choose(category::STORY, 0) {
+            let repeat = same(self.last_gag, story) || same(self.last_mate, story);
+            if !repeat {
+                if story.mask & category::STANDALONE != 0 {
+                    gag = Some(story);
+                } else {
+                    mate = Some(story);
+                }
+                self.story_scene = Some(story);
+            }
+        }
+
+        // The closing gag. When there is a companion scene as well, the gag
+        // has to be one that does not also stand on its own -- `seg4:0x0947`
+        // keeps drawing until it finds one.
+        let mut guard = 0;
+        loop {
+            let bad = match gag {
+                None => true,
+                Some(g) => {
+                    same(self.last_gag, g)
+                        || (mate.is_some() && g.mask & category::PRIMARY != 0)
+                }
+            };
+            if !bad {
+                break;
+            }
+            guard += 1;
+            if guard > 1000 {
+                // Nothing in the table can satisfy this phase. Say so rather
+                // than spin; the caller falls back to an empty queue.
+                self.note("no standalone scene fits this phase".into());
+                return;
+            }
+            gag = self.choose(category::STANDALONE, 0);
+        }
+        let Some(gag) = gag else { return };
+
+        budget -= gag.cost as i32;
+        self.take_wishes(gag.mask);
+        self.last_gag = Some(gag);
+        let mut mate_pending = mate.is_some();
+        if let Some(m) = mate {
+            budget -= m.cost as i32;
+            self.take_wishes(m.mask);
+        }
+        self.last_mate = mate;
+        // `seg4:0x099B`: is the story in this queue at all?
+        if [gag].iter().chain(mate.iter()).any(|s| s.day == self.story_offered) {
+            self.story_state = 1;
+        }
+
+        // A gag that also stands as a primary takes the whole queue. The four
+        // scenes that do this are the cutaways -- the office, Suzy's flat --
+        // and they own the screen while they run.
+        if gag.mask & category::PRIMARY != 0 {
+            self.queue.push(gag);
+            return;
+        }
+
+        // The opening scene, which is also the one that says where Johnny is
+        // standing when the queue starts.
+        if mate_pending && mate.is_some_and(|m| m.mask & category::PRIMARY != 0) && self.coin(50)
+        {
+            self.queue.push(mate.unwrap());
+            mate_pending = false;
+        } else if let Some(first) = self.choose(category::PRIMARY, budget) {
+            budget -= first.cost as i32;
+            self.take_wishes(first.mask);
+            self.queue.push(first);
+        } else {
+            // `seg4:0x0A2D` stores whatever came back without looking. With
+            // this table something always does; if it ever did not, the
+            // original would read a scene out of the start of its own data
+            // segment. Stop instead.
+            self.note("no primary scene fits this phase".into());
+            self.queue.push(gag);
+            return;
+        }
+
+        // Then fill the time. Every so often the companion scene drops in
+        // here instead; the rest is whatever the second category offers, and
+        // the repeatable ones go in several times over.
+        while budget != 0 && self.queue.len() < QUEUE_CAP {
+            if mate_pending && self.coin(5) {
+                self.queue.push(mate.unwrap());
+                mate_pending = false;
+                continue;
+            }
+            let Some(next) = self.choose(category::SECONDARY, budget) else {
+                break;
+            };
+            let mut repeats = 1;
+            // `seg4:0x0AAA`: one to six goes, weighted towards three, redrawn
+            // until the queue can afford however many it asked for.
+            if next.mask & 0x08 != 0 {
+                loop {
+                    let n = self.weighted(&[10, 20, 30, 20, 10, 10]) as i32;
+                    if n == 0 {
+                        continue;
+                    }
+                    if n <= 1 || next.cost as i32 * n <= budget {
+                        repeats = n;
+                        break;
+                    }
+                }
+            }
+            for _ in 0..repeats {
+                if self.queue.len() >= QUEUE_CAP {
+                    break;
+                }
+                self.queue.push(next);
+                budget -= next.cost as i32;
+                self.take_wishes(next.mask);
+            }
+        }
+        // The gag closes the queue.
+        self.queue.push(gag);
+    }
+
+    /// `seg4:0x1F1B` with one weight: true that many times in a hundred.
+    fn coin(&mut self, percent: u32) -> bool {
+        self.weighted(&[percent]) == 1
+    }
+
+    /// The engine's weighted choice (`seg4:0x1F1B`): a 16-bit draw against
+    /// percentages scaled by 655, returning the 1-based position it lands on
+    /// or 0 if it runs off the end.
+    fn weighted(&mut self, weights: &[u32]) -> usize {
+        let mut roll = self.rng.next_u32() & 0xFFFF;
+        for (i, &w) in weights.iter().enumerate() {
+            if w == 0 {
+                break;
+            }
+            let scaled = w * 655;
+            if scaled > roll {
+                return i + 1;
+            }
+            roll -= scaled;
+        }
+        0
+    }
+
+    /// Start the next queue: the clock, the story, the scenes, the island
+    /// (`seg4:0x0540`).
+    fn next_queue(&mut self, archive: &Archive) {
+        self.advance_phase();
+        // `seg3:0x1C41(-1, -1)`: the island forgets what the last queue
+        // wanted before the next one starts asking.
+        self.island_state = scenery::ANYWHERE;
+        self.backdrop = Backdrop::default();
+        self.advance_story();
+        self.build_queue();
+        // `seg4:0x064D`: Johnny is simply put where the first scene needs
+        // him. He walks between the scenes of a queue, never into one.
+        if let Some(first) = self.queue.first() {
+            if first.from.0 != 0 {
+                self.position = first.from;
+            }
+        }
+        self.cursor = 0;
+        self.load_scenery(archive);
+        let names: Vec<String> = self
+            .queue
             .iter()
-            .find(|s| s.day == self.day && s.sequence != 0)
+            .map(|s| format!("{}:{}", s.ads, s.sequence))
+            .collect();
+        self.note(format!(
+            "queue phase {} day {} island {:?} {:?}: {}",
+            self.phase,
+            self.day,
+            self.island_state,
+            self.backdrop,
+            names.join(" ")
+        ));
     }
 
     /// Pick the next walk step towards `target`, from `seg4:0x0094`.
-    fn next_step(&mut self, target: (u8, u8)) -> Option<&'static WalkStep> {
-        let (from, to) = (self.position.0, target.0);
-        if from == to || from == 0 || to == 0 {
+    ///
+    /// The route block is chosen once, on the pair Johnny set out on
+    /// (`seg4:0x03AC` indexes a six by six table of them), and every step of
+    /// the journey re-reads that same block for the area he is standing in
+    /// now (`seg4:0x00EA` scans it for a `-area` marker). That matters: a
+    /// block's own mid-journey sections are the ones that bring him in, while
+    /// looking the pair up afresh each leg would offer him the full spread of
+    /// ways to set out again -- which is a walk that wanders for half a
+    /// minute rather than one that arrives.
+    fn next_step(&mut self, origin: u8, target: (u8, u8)) -> Option<&'static WalkStep> {
+        let (at, to) = (self.position.0, target.0);
+        if at == to || origin == 0 || to == 0 {
             return None;
         }
         let options = tables::ROUTE_TABLE
             .iter()
-            .find(|(f, t, at, _)| *f == from && *t == to && *at == from)
+            .find(|(f, t, a, _)| *f == origin && *t == to && *a == at)
             .map(|(_, _, _, o)| *o)?;
         let total: u32 = options.iter().map(|o| o.weight as u32).sum();
         // The original draws rand() % 100 here regardless of the total, which
@@ -487,9 +906,10 @@ impl Director {
             // and `to` the same place: Johnny stays where he is and does
             // nothing for a moment. That is the scene, not a gap in it.
             if scene.ads == NO_ADS_FILE {
-                self.note(format!("idle at {:?} for {} ticks", self.position, idle_ticks(scene)));
+                let ticks = IDLE_LEAST + self.rng.below(IDLE_SPAN);
+                self.note(format!("idle at {:?} for {ticks} ticks", self.position));
                 self.activity = Activity::Idling {
-                    until: self.tick + idle_ticks(scene),
+                    until: self.tick + ticks,
                 };
                 return;
             }
@@ -505,7 +925,7 @@ impl Director {
             // teleporting across the island between one gag and the next.
             if scene.from.0 == self.position.0 {
                 self.position.1 = scene.from.1;
-            } else if let Some(step) = self.next_step(scene.from) {
+            } else if let Some(step) = self.next_step(self.position.0, scene.from) {
                 self.note(format!(
                     "walk {:?} -> {:?} via step {} ({} waypoints)",
                     self.position,
@@ -516,6 +936,7 @@ impl Director {
                 self.activity = Activity::Walking {
                     step,
                     index: 0,
+                    origin: self.position.0,
                     target: scene.from,
                     next: self.tick,
                 };
@@ -538,9 +959,10 @@ impl Director {
             self.note(format!("{file} has no sequence {}", scene.sequence));
             return;
         }
-        // What this scene wants the island to look like. `seg3:0x1C41` reads
-        // it out of the same 32-bit mask the chooser matched on.
-        self.set_backdrop(archive, Backdrop::from_mask(scene.mask));
+        // `seg4:0x07DF`: a scene can ask to be drawn 272 pixels to the right
+        // of the island, and eight of them do. Everything else follows the
+        // island wherever the queue put it.
+        self.set_draw_offset(scene.mask & 0x400 != 0);
         let label = seq
             .labels
             .get(&(scene.sequence as u16))
@@ -550,7 +972,10 @@ impl Director {
             "play {file} seq {} \"{label}\" at {:?} phase {}",
             scene.sequence, self.position, self.phase
         ));
+        // A scene draws its own Johnny.
+        self.standing = None;
         self.activity = Activity::Scene {
+            row: scene,
             seq: Box::new(seq),
             active: Vec::new(),
             ends_at: scene.to,
@@ -579,18 +1004,18 @@ impl Director {
         true
     }
 
-    /// Tell the backdrop what the story and the scene want of it, and put it
-    /// back on screen if that changed anything.
-    fn set_backdrop(&mut self, archive: &Archive, backdrop: Backdrop) {
-        let day = self.day;
-        let Some(scenery) = self.scenery.as_mut() else {
-            return;
+    /// Where drawing opcodes land, once the island has moved (`seg3:0x00FC`).
+    ///
+    /// A cutaway scene owns the whole screen and draws in absolute
+    /// coordinates; everything else is drawn against the island, one pixel to
+    /// its right, and eight scenes ask for a further 272 on top of that.
+    fn set_draw_offset(&mut self, shifted: bool) {
+        self.stage.draw_offset = if self.backdrop.cutaway {
+            (0, 0)
+        } else {
+            let (dx, dy) = self.scenery.as_ref().map_or((0, 0), |s| s.offset);
+            (dx + if shifted { 0x110 } else { 0 }, dy)
         };
-        if scenery.set_story(archive, day, backdrop) {
-            let frame = scenery.compose();
-            self.stage.set_background(frame);
-            self.scenery_gen = self.stage.background_gen;
-        }
     }
 
     /// Put the island back up after a scene has had the backdrop.
@@ -621,19 +1046,28 @@ impl Director {
             }
         }
         let roll = self.rng.next_u32();
-        self.scenery_night = self.is_night();
+        // `seg3:0x01E7`: night by the clock, or because a scene in the queue
+        // asked for it.
+        self.scenery_night = self.is_night() || self.backdrop.night;
         match Scenery::build(archive, self.scenery_night, roll, self.tick, self.day) {
             Some(s) => {
-                self.note(format!(
-                    "scenery: {}{}",
-                    s.sea,
-                    if s.extras { " + rock and sandbar" } else { "" }
-                ));
                 let mut s = s;
+                s.set_story(archive, self.day, self.backdrop);
                 s.start_sky(&mut self.rng);
+                // `seg3:0x0233`: the island is dropped where this queue's
+                // scenes are willing to have it, and everything drawn against
+                // it moves with it.
+                s.place(self.island_state, &mut self.rng);
+                self.note(format!(
+                    "scenery: {}{} at {:?}",
+                    s.sea,
+                    if s.sandbar() { " + rock and sandbar" } else { "" },
+                    s.offset
+                ));
                 self.stage.set_background(s.compose());
                 self.scenery_gen = self.stage.background_gen;
                 self.scenery = Some(s);
+                self.set_draw_offset(false);
             }
             None => {
                 // No sea in the archive. Fall back to the backdrop the scenes
@@ -651,24 +1085,31 @@ impl Director {
     /// Advance one tick. Returns true if the surface changed.
     pub fn tick(&mut self, archive: &Archive) -> bool {
         self.tick += 1;
-        if !self.stage.has_background() {
-            self.load_scenery(archive);
-        }
+        // The backdrop is laid down when a queue is built and not before:
+        // where the island goes depends on what that queue's scenes want.
         let surf = self.step_surf();
-        surf | match std::mem::replace(&mut self.activity, Activity::Idle) {
+        let acted = match std::mem::replace(&mut self.activity, Activity::Idle) {
             Activity::Idle => {
-                // Night fell, or day broke, while the last scene was running.
-                if self.scenery.is_some() && self.is_night() != self.scenery_night {
-                    self.load_scenery(archive);
+                // `seg4:0x06D4`: take the next entry, and when there is none
+                // left build another queue. The clock only moves here, so a
+                // queue plays out in the light it started in.
+                if self.cursor >= self.queue.len() {
+                    self.queue_spent = true;
+                    self.next_queue(archive);
                 }
-                // Offer the day's story scene first, then an ordinary one.
-                let scene = self
-                    .choose_story()
-                    .or_else(|| self.choose(category::PRIMARY, 100))
-                    .or_else(|| self.choose(category::STANDALONE, 100));
-                match scene {
-                    Some(s) => self.begin_scene(archive, s),
-                    None => self.note("nothing playable this phase".into()),
+                match self.queue.get(self.cursor).copied() {
+                    Some(s) => {
+                        self.cursor += 1;
+                        self.begin_scene(archive, s);
+                    }
+                    None => {
+                        // Nothing playable at all. Wait rather than spin, and
+                        // let the next queue try again.
+                        self.note("nothing playable this phase".into());
+                        self.activity = Activity::Idling {
+                            until: self.tick + TICKS_PER_SECOND,
+                        };
+                    }
                 }
                 false
             }
@@ -681,6 +1122,7 @@ impl Director {
             Activity::Walking {
                 step,
                 index,
+                origin,
                 target,
                 next,
             } => {
@@ -689,6 +1131,7 @@ impl Director {
                     self.activity = Activity::Walking {
                         step,
                         index,
+                        origin,
                         target,
                         next,
                     };
@@ -704,6 +1147,7 @@ impl Director {
                     self.activity = Activity::Walking {
                         step,
                         index: index + 1,
+                        origin,
                         target,
                         next: self.tick + WALK_TICKS_PER_WAYPOINT,
                     };
@@ -713,10 +1157,11 @@ impl Director {
                     // target is further on; the route block is re-entered.
                     self.position = step.lands;
                     if self.position.0 != target.0 {
-                        if let Some(next_step) = self.next_step(target) {
+                        if let Some(next_step) = self.next_step(origin, target) {
                             self.activity = Activity::Walking {
                                 step: next_step,
                                 index: 0,
+                                origin,
                                 target,
                                 next: self.tick + WALK_TICKS_PER_WAYPOINT,
                             };
@@ -728,6 +1173,7 @@ impl Director {
                 }
             }
             Activity::Scene {
+                row,
                 mut seq,
                 mut active,
                 ends_at,
@@ -745,18 +1191,20 @@ impl Director {
                 // skips instances carrying the self-loop flag at +0xC).
                 let settled = active.iter().all(|a| a.looping);
                 if (done && settled) || over_time {
-                    if ends_at.0 != 0 {
-                        self.position = ends_at;
-                    }
+                    self.position = self.landing(ends_at);
                     for (op, n) in seq.todo_seen.iter() {
                         *self.ads_todo.entry(*op).or_insert(0) += n;
                     }
-                    self.set_backdrop(archive, Backdrop::default());
                     self.restore_island();
                     self.note(format!("scene over, Johnny at {:?}", self.position));
-                    self.advance_clock();
+                    if same(self.story_scene, row) {
+                        // `seg4:0x0884`: the story got told.
+                        self.story_scene = None;
+                        self.story_state = 2;
+                    }
                 } else {
                     self.activity = Activity::Scene {
+                        row,
                         seq,
                         active,
                         ends_at,
@@ -766,6 +1214,19 @@ impl Director {
                 }
                 drew
             }
+        };
+        // Between scenes Johnny is a single walk frame standing still, and
+        // the backdrop under him has just been repainted.
+        if !matches!(self.activity, Activity::Scene { .. }) {
+            self.redraw_standing(archive);
+        }
+        surf | acted
+    }
+
+    /// Put the standing Johnny back on top of the backdrop.
+    fn redraw_standing(&mut self, archive: &Archive) {
+        if let Some((frame, x, y, mirror)) = self.standing {
+            self.draw_walk_frame(archive, frame, x, y, mirror);
         }
     }
 
@@ -781,11 +1242,17 @@ impl Director {
         let Some(frames) = self.walk_frames.clone() else {
             return;
         };
+        let (sx, sy) = (x, y);
+        // `seg4:0x02EA` adds the island's offset to every waypoint, so
+        // Johnny walks the beach wherever the beach has got to.
+        let (x, y) = self
+            .scenery
+            .as_ref()
+            .map_or((x as i32, y as i32), |s| s.at(x as i32, y as i32));
         if let Some(f) = frames.get(frame as usize) {
-            self.stage
-                .surface
-                .draw_sprite(f, x as i32, y as i32, mirror);
+            self.stage.surface.draw_sprite(f, x, y, mirror);
         }
+        self.standing = Some((frame, sx, sy, mirror));
     }
 
     fn run_scene(
@@ -833,6 +1300,9 @@ impl Director {
                         .find(|(_, f)| **f == file)
                         .map(|(id, _)| *id)
                         .unwrap_or(0);
+                    if std::env::var_os("JC_TRACE").is_some() {
+                        self.note(format!("  play {file} scene {scene} {repeat:?}"));
+                    }
                     if let Some(program) = self.program(archive, &file) {
                         let mut inst = Instance::new(program);
                         if inst.seek_scene(scene) {
@@ -853,15 +1323,72 @@ impl Director {
         self.stage.has_background()
     }
 
-    /// Move the day on. The story only advances on a real calendar day in the
-    /// original; here each completed scene nudges the phase, and a wrap of the
-    /// phase counter moves the story on.
-    fn advance_clock(&mut self) {
-        self.phase = (self.phase + 1) % PHASES_PER_DAY;
-        if self.phase == 0 {
-            self.day = if self.day >= STORY_DAYS { 1 } else { self.day + 1 };
-            self.note(format!("--- day {} ---", self.day));
+    /// Where a scene leaves Johnny standing (`seg4:0x081C`).
+    ///
+    /// A scene that says "anywhere" does not mean "where he was": the engine
+    /// rolls an area and a spot inside it, so a gag that could have happened
+    /// anywhere leaves him somewhere new.
+    fn landing(&mut self, ends_at: (u8, u8)) -> (u8, u8) {
+        let major = if ends_at.0 == 0 {
+            (self.rng.below(6) + 1) as u8
+        } else {
+            ends_at.0
+        };
+        let minor = if ends_at.1 == 0 {
+            (self.rng.next_u32() & 7) as u8
+        } else {
+            ends_at.1
+        };
+        (major, minor)
+    }
+
+    /// What phase it is now (`seg4:0x0554`).
+    fn advance_phase(&mut self) {
+        match self.clock {
+            Clock::Wall { dawn } => {
+                let now = self.hhmm.unwrap_or_else(wall_hhmm);
+                self.phase = phase_at(now, dawn);
+            }
+            Clock::PerQueue => {
+                self.phase = (self.phase + 1) % PHASES_PER_DAY;
+            }
         }
+    }
+
+    /// Move the story on (`seg4:0x0BA5`).
+    ///
+    /// The story is a calendar, not a timer. `day` only moves when the real
+    /// date does, and then only if the day already on offer was actually
+    /// shown -- so eleven days of story take eleven days, and a machine that
+    /// is off on Tuesday picks up where it left off on Wednesday.
+    fn advance_story(&mut self) {
+        // A test clock has no calendar to wait for: let the story move when
+        // the day it stands for wraps.
+        let today = match self.clock {
+            Clock::Wall { .. } => self.date,
+            Clock::PerQueue => self.tick / (PHASES_PER_DAY as u32 * 4096),
+        };
+        if self.story_date != Some(today) {
+            let was = self.day;
+            if self.day < self.story_offered {
+                self.day += 1;
+            }
+            if self.day > STORY_DAYS || self.day < 2 {
+                self.day = 1;
+                self.story_offered = 1;
+            }
+            self.story_date = Some(today);
+            if self.day != was || self.story_date.is_none() {
+                self.note(format!("--- day {} ---", self.day));
+            }
+        }
+        // `seg4:0x0C1A`: the day on offer moves on once its scene has played
+        // and the queue that held it has run out.
+        if self.queue_spent && self.story_state != 0 && self.story_offered <= self.day {
+            self.story_offered += 1;
+        }
+        self.story_state = 0;
+        self.queue_spent = false;
     }
 
     /// How many waves are on the open water right now.

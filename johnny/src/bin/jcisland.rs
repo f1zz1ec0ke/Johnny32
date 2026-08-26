@@ -5,7 +5,9 @@
 //!
 //! Arguments: a tick count, an optional RNG seed. `JC_NOWRITE=1` skips the
 //! PNG output; `JC_FAITHFUL=1` restores the 1992 walk-router bug; `JC_DAY=n`
-//! starts on story day `n`, which is what decides how far the raft has got.
+//! starts on story day `n`, which is what decides how far the raft has got;
+//! `JC_HHMM=hhmm` pins the wall clock instead of stepping a phase per queue;
+//! `JC_FROM`/`JC_TO` bound which ticks get written as PNGs.
 
 use johnny::{dgds::Archive, director::Director, png};
 use std::process::ExitCode;
@@ -33,6 +35,9 @@ fn main() -> ExitCode {
     };
 
     let write_frames = std::env::var("JC_NOWRITE").is_err();
+    // Write only part of a long run: `JC_FROM`/`JC_TO` are tick numbers.
+    let from: u32 = std::env::var("JC_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let to: u32 = std::env::var("JC_TO").ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
     let out = std::path::Path::new("frames");
     if write_frames {
         if let Err(e) = std::fs::create_dir_all(out) {
@@ -47,7 +52,20 @@ fn main() -> ExitCode {
     // mostly, to watch the raft get built.
     if let Some(day) = std::env::var("JC_DAY").ok().and_then(|v| v.parse().ok()) {
         d.day = day;
+        d.date = 0;
     }
+    // The shipped clock is the wall clock: half hours since the dawn the user
+    // set. A test run is minutes long, so step the phase per queue instead and
+    // let a long one walk through a whole day.
+    d.clock = match std::env::var("JC_HHMM").ok().and_then(|v| v.parse().ok()) {
+        Some(hhmm) => {
+            d.hhmm = Some(hhmm);
+            johnny::director::Clock::Wall {
+                dawn: johnny::director::DEFAULT_DAWN,
+            }
+        }
+        None => johnny::director::Clock::PerQueue,
+    };
     let mut frame = 0usize;
     let mut logged = 0usize;
     let mut waves_max = 0usize;
@@ -68,7 +86,7 @@ fn main() -> ExitCode {
             println!("[{t:6} {secs:7.1}s] {}", d.log[logged]);
             logged += 1;
         }
-        if drew && write_frames {
+        if drew && write_frames && (from..=to).contains(&d.ticks()) {
             let path = out.join(format!("island_{frame:04}.png"));
             let _ = png::write_indexed(
                 &path,

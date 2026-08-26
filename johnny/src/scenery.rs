@@ -181,6 +181,23 @@ struct Glint {
 /// Where the raft sits, without and with the rock (`seg3:0x1DCB`).
 const RAFT_AT: [(i32, i32); 2] = [(0x201, 0x10A), (0x212, 0x119)];
 
+/// The two places a scene can nail the island to, rather than let it roam:
+/// hard left and low (`seg3:0x1B41`), or the middle at the front
+/// (`seg3:0x1B24`). Indexed by the state bit that asks for them, 1 then 2.
+const PINNED: [(i32, i32); 2] = [(0x011, 0x135), (0x121, 0x12B)];
+
+/// The rectangle the island is dropped into otherwise (`seg3:0x1B56`): x, y,
+/// width, height, for the bare island and then for the one with the sandbar.
+/// The sandbar's is much tighter, because there is more of it to fit.
+const PLACEMENT: [(i32, i32, i32, i32); 2] = [
+    (0x043, 0x0FF, 0x0E2, 0x081),
+    (0x0A8, 0x0FF, 0x06F, 0x03B),
+];
+
+/// The island state before anything has asked for anything (`ds:0x30C0` at
+/// -1). `seg3:0x1B0F` reads it as zero -- the whole rectangle.
+pub const ANYWHERE: u16 = 0xFFFF;
+
 /// What a scene asks of the backdrop, out of its 32-bit mask.
 ///
 /// `seg3:0x1C41` takes the mask the chooser landed on and turns bits of it
@@ -190,22 +207,47 @@ const RAFT_AT: [(i32, i32); 2] = [(0x201, 0x10A), (0x212, 0x119)];
 pub struct Backdrop {
     /// Bit 0x2000 (`seg3:0x1CDC`): not the island at all. The screen is
     /// cleared and the scene's own `.SCR` is the whole picture -- this is how
-    /// the office and Suzy's flat get shown.
+    /// the office and Suzy's flat get shown. `ds:0x30B4` at 2.
     pub cutaway: bool,
+    /// Bit 0x0800 (`seg3:0x1CCB`): night, whatever the hour says. `ds:0x30B4`
+    /// at 1, which `seg3:0x01E7` reads as "not one of the oceans" and falls
+    /// through to `NIGHT.SCR`.
+    pub night: bool,
     /// Bit 0x0200 (`seg3:0x1C87`): no rock and no sandbar this time.
     pub no_rock: bool,
     /// Bit 0x4000 (`seg3:0x1C98`): no raft. The scene is about the raft and
     /// draws its own.
     pub no_raft: bool,
+    /// Bit 0x1000 (`seg3:0x1CBA`): `ds:0x30B2`, which `seg3:0x037F` reads to
+    /// decide how many objects the water may have -- thirty, or none. The
+    /// waves and the glints share that pool, so this is a flat calm.
+    pub still_water: bool,
+    /// Bit 0x0010 (`seg3:0x1CA9`): `ds:0x30B6`, the switch `seg3:0x1E73`
+    /// checks before drawing the holiday decoration on the island. The port
+    /// has no decorations to draw yet, so this is carried and not used.
+    pub no_holiday: bool,
 }
 
 impl Backdrop {
     pub fn from_mask(mask: u32) -> Backdrop {
-        Backdrop {
-            cutaway: mask & 0x2000 != 0,
-            no_rock: mask & 0x0200 != 0,
-            no_raft: mask & 0x4000 != 0,
-        }
+        let mut b = Backdrop::default();
+        b.apply(mask);
+        b
+    }
+
+    /// Fold one scene's wishes in. The engine ORs the whole queue's masks
+    /// together this way before it draws anything (`seg3:0x1C41`), so what a
+    /// queue's scenes ask for between them is what the island looks like for
+    /// all of them.
+    pub fn apply(&mut self, mask: u32) {
+        self.no_rock |= mask & 0x0200 != 0;
+        self.no_raft |= mask & 0x4000 != 0;
+        self.no_holiday |= mask & 0x0010 != 0;
+        self.still_water |= mask & 0x1000 != 0;
+        // The last two share `ds:0x30B4`, and the cutaway is written second,
+        // so it wins.
+        self.night |= mask & 0x0800 != 0;
+        self.cutaway |= mask & 0x2000 != 0;
     }
 }
 
@@ -251,16 +293,28 @@ fn draw_shells() -> bool {
     std::env::var_os("JC_FAITHFUL").is_some()
 }
 
-/// The colour the sea's unused index is shown as.
+/// What the sea's index-0 pixels are shown as.
 ///
 /// The three ocean screens are the only artwork in the game that draws with
-/// index 0, the engine's transparency key: about 10,000 pixels each, in
-/// wave-crest shapes. Every one of them sits inside index 9 water -- for
-/// `OCEAN00` all 9,917 are index 9 in `OCEAN01`, and every neighbouring pixel
-/// in its own image is index 9 too. Whatever the engine puts there, it is a
-/// second shade of open water, and it is not a palette effect: the binary
-/// imports no `AnimatePalette` or `SetPaletteEntries`. Until that is settled,
-/// the water they sit in is the one choice that cannot be wrong by much.
+/// index 0, the engine's transparency key: about 10,000 pixels each, in large
+/// connected patches inside the open water. Every one of them sits in index 9
+/// water -- for `OCEAN00` all 9,917 are index 9 in `OCEAN01`, and every
+/// neighbouring pixel in its own image is index 9 too.
+///
+/// The palette is no help. `JOHNCAST.PAL` puts magenta at 0 and black at 5,
+/// the other way round from the standard sixteen, so that the blitter's key
+/// sits on a colour nothing wants -- `seg3:0x01C4` clears the screen to 5 for
+/// the same reason. Showing the patches as what is behind the hole, then,
+/// means black, and that was tried: it turns the near water into mud, which
+/// is not what a sea looks like and not what the rest of the screen is doing.
+/// The water below those patches is a clean 9-and-5 checkerboard -- half
+/// bright blue, half black -- so the artist did have a way to draw deep water
+/// and did not use it here.
+///
+/// Whatever the engine puts there, it is a second shade of open water, and it
+/// is not a palette effect: the binary imports no `AnimatePalette` or
+/// `SetPaletteEntries`. Until that is settled, the water they sit in is the
+/// one choice that cannot be wrong by much.
 const SEA_KEY_AS: u8 = 9;
 
 /// White. `seg3:0x07DE` is the only place the backdrop sets a draw colour.
@@ -299,6 +353,10 @@ pub struct Scenery {
     /// The sea and nothing else, so the island can be laid down again when the
     /// story changes without decoding the screen a second time.
     sea_only: Frame,
+    /// How far the island has wandered from its nominal anchor, in pixels.
+    /// `ds:0x30C6`/`ds:0x30C4`, after `seg3:0x0236` has taken the anchor off
+    /// them. Everything that belongs to the island moves with it.
+    pub offset: (i32, i32),
 }
 
 impl Scenery {
@@ -359,6 +417,7 @@ impl Scenery {
             drift: 1,
             sea,
             extras: roll / 3 % 2 == 1,
+            offset: (0, 0),
         };
         scenery.rebuild();
         Some(scenery)
@@ -450,6 +509,80 @@ impl Scenery {
         moved
     }
 
+    /// Whether the rock and the sandbar are part of the island this time.
+    /// `ds:0x30C2`: a coin flip per queue, unless a scene said no.
+    pub fn sandbar(&self) -> bool {
+        self.extras && !self.backdrop.no_rock
+    }
+
+    /// How many things the water is allowed at once.
+    ///
+    /// `ds:0x2F42` is an array of thirty twelve-byte slots and `ds:0x2F40`
+    /// says how many of them the stepper at `seg3:0x04B4` looks at. The waves
+    /// and the glints share it, so `seg3:0x0386` setting it to nothing is not
+    /// "no glints" -- it is a flat calm.
+    fn objects(&self) -> usize {
+        if self.backdrop.still_water {
+            0
+        } else {
+            GLINTS
+        }
+    }
+
+    /// Where a piece of the island actually goes, once the island has moved.
+    pub fn at(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            x + self.offset.0 + ORIGIN.0,
+            y + self.offset.1 + ORIGIN.1,
+        )
+    }
+
+    /// Drop the island somewhere it is allowed to be (`seg3:0x1B00`).
+    ///
+    /// The island does not sit still between one queue of scenes and the next.
+    /// It is placed at random inside a rectangle, and the rectangle is
+    /// narrowed by whatever the queued scenes asked for: the four low bits of
+    /// `state` are the four quadrants, so one bit is a quadrant, two adjacent
+    /// bits are a half, and none at all is the lot. The two high bits nail it
+    /// to a fixed spot instead.
+    ///
+    /// This is why `ISLETEMP.SCR` is a *template*: the scenes are drawn
+    /// against a nominal island and the whole picture -- island, surf, raft,
+    /// Johnny's walk and every sprite a scene puts up -- shifts together.
+    pub fn place(&mut self, state: u16, rng: &mut Rng) {
+        let anchor = (ISLAND[0].1, ISLAND[0].2);
+        let state = if state == ANYWHERE { 0 } else { state };
+        for (bit, spot) in [(2u16, PINNED[1]), (1, PINNED[0])] {
+            if state & bit != 0 {
+                self.offset = (spot.0 - anchor.0, spot.1 - anchor.1);
+                self.rebuild();
+                return;
+            }
+        }
+        let (mut x, mut y, mut w, mut h) = PLACEMENT[self.sandbar() as usize];
+        let set = |b: u16| state & b != 0;
+        // The shift is taken off the full extent and the extent is halved
+        // afterwards, so a single quadrant lands in the right corner.
+        if matches!(state, 0x10 | 0x20 | 0x30) {
+            y += h / 2;
+        }
+        if !((set(4) && set(0x10)) || (set(8) && set(0x20))) {
+            h /= 2;
+        }
+        if matches!(state, 8 | 0x20 | 0x28) {
+            x += w / 2;
+        }
+        if !((set(4) && set(8)) || (set(0x10) && set(0x20))) {
+            w /= 2;
+        }
+        // `seg3:0x14BF` with no sprite to inset by: a uniform point inside.
+        self.offset = (
+            x + span_roll(rng, w) - anchor.0,
+            y + span_roll(rng, h) - anchor.1,
+        );
+        self.rebuild();
+    }
+
     /// Lay the island down over the sea again: the pieces, then the raft.
     ///
     /// `seg3:0x0262` draws the island, the two optional pieces, the scrub and
@@ -458,7 +591,7 @@ impl Scenery {
         let mut surface = Surface::new(self.sea_only.width, self.sea_only.height);
         surface.draw_background(&self.sea_only);
         if !self.backdrop.cutaway {
-            let rock = self.extras && !self.backdrop.no_rock;
+            let rock = self.sandbar();
             for &(frame, x, y, always) in ISLAND.iter() {
                 if !always && !rock {
                     continue;
@@ -467,13 +600,15 @@ impl Scenery {
                     continue;
                 }
                 if let Some(f) = self.pieces.get(frame) {
-                    surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
+                    let (x, y) = self.at(x, y);
+                    surface.draw_sprite(f, x, y, Mirror::default());
                 }
             }
             if !self.backdrop.no_raft {
                 if let Some(f) = self.raft.as_ref() {
                     let (x, y) = RAFT_AT[rock as usize];
-                    surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
+                    let (x, y) = self.at(x, y);
+                    surface.draw_sprite(f, x, y, Mirror::default());
                 }
             }
         } else {
@@ -559,11 +694,11 @@ impl Scenery {
         // 100. That is a speed index -- segment 2 times a calibration loop
         // and divides -- so on a 386 the extra objects were simply skipped.
         // Any machine running this port is over the line.
-        if weighted(rng, &[35]) == 1 {
+        if self.waves.len() + self.glints.len() < self.objects() && weighted(rng, &[35]) == 1 {
             // Weights from `seg3:0x04EE`: a glint, then the three wave sizes.
             match weighted(rng, &[35, 5, 5, 5]) {
                 1 => {
-                    if self.glints.len() < GLINTS {
+                    {
                         if let Some(g) = self.spawn_glint(rng) {
                             self.glints.push(g);
                             moved = true;
@@ -615,10 +750,10 @@ impl Scenery {
         let x = bx + span_roll(rng, sx);
         let y = by + span_roll(rng, sy);
         // Two pixels wide, so the test is the point against each rectangle.
-        if NOT_WATER
-            .iter()
-            .any(|&(rx, ry, rw, rh)| x + 1 >= rx && x < rx + rw && y >= ry && y < ry + rh)
-        {
+        if NOT_WATER.iter().any(|&(rx, ry, rw, rh)| {
+            let (rx, ry) = self.at(rx, ry);
+            x + 1 >= rx && x < rx + rw && y >= ry && y < ry + rh
+        }) {
             return None;
         }
         Some(Glint {
@@ -664,14 +799,15 @@ impl Scenery {
                 surface.draw_sprite(f, c.x, c.y, Mirror::default());
             }
         }
-        let sandbar = self.extras && !self.backdrop.no_rock;
+        let sandbar = self.sandbar();
         for &(x, y, first, counter, belongs_to_sandbar) in SURF.iter() {
             if belongs_to_sandbar != sandbar {
                 continue;
             }
             let frame = first + self.counters[counter] as usize;
             if let Some(f) = self.pieces.get(frame) {
-                surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
+                let (x, y) = self.at(x, y);
+                surface.draw_sprite(f, x, y, Mirror::default());
             }
         }
         for w in self.waves.iter() {

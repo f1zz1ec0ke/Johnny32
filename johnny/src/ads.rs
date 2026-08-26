@@ -137,11 +137,16 @@ pub enum Op {
     ChainOr,
     Stop,
     End,
-    /// `F000`, `F200` and `F210` resolve another ADS context by id
-    /// (`seg10:0x19E7`) and work on its state field at +0x12. `F200` opens
-    /// every STAND sequence. What they do to the other context is not pinned
-    /// down; they are decoded and counted, not guessed at.
-    ContextOp { opcode: u16, arg: u16 },
+    /// `F000`, `F200` and `F210` name another sequence of this same script
+    /// and run it.
+    ///
+    /// `STAND.ADS` settles what the operand is: every one of its twelve
+    /// standing sequences opens with `F200 14`, and 14 is its own `TAG:`
+    /// entry "STAND INIT" -- a four-instruction sequence that puts up the
+    /// base pose, `MJAMBWLK.TTM` scene 42. So this is a call, and `F010` with
+    /// -1 at the end of a sequence is the return. Without it Johnny stands
+    /// about with no Johnny in the picture.
+    Call { opcode: u16, sequence: u16 },
     Todo { opcode: u16, args: Vec<u16> },
 }
 
@@ -188,9 +193,9 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             0x3010 => Op::RandomBegin,
             0x30FF => Op::RandomEnd,
             0x3020 => Op::RandomSkip { weight: a(0) },
-            0xF000 | 0xF200 | 0xF210 => Op::ContextOp {
+            0xF000 | 0xF200 | 0xF210 => Op::Call {
                 opcode: w,
-                arg: a(0),
+                sequence: a(0),
             },
             0x1420 | 0x1430 => Op::ChainOr,
             0xFFFF => Op::End,
@@ -320,8 +325,14 @@ pub struct Sequencer {
     /// scenes into alternating ones. Remembering that a scene has run lets a
     /// block fire late.
     ran: std::collections::BTreeSet<(u16, u16)>,
+    /// Where to carry on after a called sequence returns.
+    calls: Vec<usize>,
     pub todo_seen: BTreeMap<u16, usize>,
 }
+
+/// How deep a call may go. Nothing shipped nests at all; this is a guard
+/// against a script that calls itself, not a limit anything reaches.
+const CALL_DEPTH: usize = 8;
 
 impl Sequencer {
     /// Load an `.ADS` record: its `RES:` file table, `TAG:` labels and script.
@@ -341,6 +352,7 @@ impl Sequencer {
             pc: 0,
             states: BTreeMap::new(),
             ran: Default::default(),
+            calls: Vec::new(),
             todo_seen: BTreeMap::new(),
         })
     }
@@ -476,8 +488,15 @@ impl Sequencer {
             };
             self.pc += 1;
             match op {
-                Op::Sequence(_) => return Action::Done,
-                Op::End | Op::Stop => return Action::Done,
+                // Falling off the end of a called sequence, or reaching its
+                // `F010 -1`, comes back to the caller.
+                Op::Sequence(_) | Op::End | Op::Stop => match self.calls.pop() {
+                    Some(back) => {
+                        self.pc = back;
+                        continue;
+                    }
+                    None => return Action::Done,
+                },
                 // A step is a yield, not a join. `seg10:0x1925` interprets
                 // instructions until one of these bumps the counter at
                 // `ds:0x460C` and then returns, so a sequence advances by one
@@ -553,8 +572,20 @@ impl Sequencer {
                         to_front,
                     }
                 }
-                Op::ContextOp { opcode, .. } => {
-                    *self.todo_seen.entry(opcode).or_insert(0) += 1;
+                Op::Call { opcode, sequence } => {
+                    let target = self
+                        .ops
+                        .iter()
+                        .position(|(_, op)| matches!(op, Op::Sequence(n) if *n == sequence));
+                    match target {
+                        Some(i) if self.calls.len() < CALL_DEPTH => {
+                            self.calls.push(self.pc);
+                            self.pc = i + 1;
+                        }
+                        // No such sequence, or too deep. Count it and carry
+                        // on rather than pretend it happened.
+                        _ => *self.todo_seen.entry(opcode).or_insert(0) += 1,
+                    }
                 }
                 Op::Todo { opcode, .. } => {
                     *self.todo_seen.entry(opcode).or_insert(0) += 1;

@@ -113,11 +113,12 @@ that sails away in it. `JC_DAY=n` on `jcisland` starts on a given day, which
 is the quick way to watch it get built.
 
 Overhead, clouds drift across the sky at their own speeds and are replaced as
-they leave; on the water, thirty two-pixel glints come and go. Everything that
-drifts drifts the same way, because the wind is one variable rolled once when
-the sky is set up. In twenty-one minutes of simulated island — 75,000 frames —
-nothing is reached that the port does not implement — no TTM opcode, no ADS
-opcode.
+they leave; on the water, thirty two-pixel glints come and go — the waves and
+the glints share one array of thirty slots, so a scene that asks for a flat
+calm takes both away. Everything that drifts drifts the same way, because the
+wind is one variable rolled once when the sky is set up. In twenty-six minutes
+of simulated island — 54,000 frames — nothing is reached that the port does
+not implement: no TTM opcode, no ADS opcode.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and
@@ -127,7 +128,23 @@ time of day, walking him to them, and running them:
 cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
 ```
 
-`JC_NOWRITE=1` skips the PNG output. `JC_FAITHFUL=1` restores the 1992
+He does not get one scene at a time. The engine builds a **queue**: it spends
+an allowance of 300 on ten or twenty scenes, ending on a self-contained gag,
+and only then does the clock move and the next queue get built. The point of
+a queue is that everything in it has agreed about **where the island is** —
+because the island does not sit still. `seg3:0x1B00` drops it at random in a
+rectangle, and the queue's scenes vote that rectangle down to a half or a
+quadrant, or pin it outright. Everything then moves with it: the surf, the
+raft, the glint exclusion zones, Johnny's walk, and every sprite of every
+scene, because `seg12:0x05B9` shifts a drawing opcode's operands before the
+handler ever sees them. That is what `ISLETEMP.SCR` is — the island
+*template*, at the anchor everything is expressed against.
+
+`JC_NOWRITE=1` skips the PNG output. `JC_FROM`/`JC_TO` bound which ticks get
+written, so a long run can be sampled without filling the disk. `JC_HHMM=1430`
+pins the wall clock; without it `jcisland` steps one phase per queue so a
+twenty-minute run still sees a whole day and night, where the screensaver
+itself uses the real clock. `JC_FAITHFUL=1` restores the 1992
 walk-router bug and draws the shells segment 3 puts on the beach that the
 game's own picture of the island does not have — the two places where the
 port and the binary disagree, both kept switchable. `JC_SPEED` is
@@ -142,6 +159,13 @@ its frame gate re-arms each deadline from *now* rather than from the one it
 missed, so a machine that falls behind runs the animation slower and never
 catches up. What people remember is this data on hardware that could not quite
 play it.
+
+The time of day is not a clock in the ordinary sense. The phase is the number
+of **half hours** since a dawn the user set in the config dialog, counted
+modulo sixteen — so Johnny's day is eight real hours long. The shipped default
+is nine in the morning, which puts dusk at three in the afternoon and the next
+dawn at five: somebody wanted an office worker to see a whole day and a whole
+night between arriving and going home.
 
 Timing is settled, and it is not what it first looks like. The engine's
 software clock has a 4 ms unit — `seg2:0x1516` sets it to `1000 / (13 * 18)` —

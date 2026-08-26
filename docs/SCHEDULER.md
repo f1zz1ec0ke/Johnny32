@@ -70,6 +70,143 @@ the result is zero — so **the story scene has a one-in-ten chance** each time
 it is offered. It then sets the story stage to the day counter and matches on
 `+0x0A` instead of the category mask.
 
+Category `0x04` throws the caller's cost ceiling away and uses 999
+(`seg4:0x0D90`), so the gag that closes a queue is never priced out of it.
+
+There is a sixth test, and it is the interesting one: `seg4:0x0EDB` is asked
+whether the entry's mask can still agree with the queue about where the island
+is standing. That needs the next section.
+
+## The queue
+
+Scenes are not chosen one at a time. `seg4:0x08B9` builds a **queue** of them,
+and the point of a queue is that everything in it has agreed on one island.
+
+`seg4:0x0645` is the only caller and passes a budget of **300**. Every entry
+queued takes its `cost` out of that, and the queue closes when nothing
+affordable is left. Scenes cost 5 to 105, so a queue is ten to twenty of them —
+twenty minutes or so of screensaver.
+
+The build, in order:
+
+1. Roll for the story (`choose(0x80)`). If it comes up and is not one of the
+   two that ran last time, it is held aside — as the closing gag if its mask
+   has the standalone bit, otherwise as a companion.
+2. Draw the **closing gag** from category `0x04`, redrawing while it is the
+   one that closed the last queue, or while there is a companion and the gag
+   also stands as a primary.
+3. Charge both to the budget and hand both masks to `seg3:0x1C41`.
+4. If the gag *is* a primary, the queue is just that one scene and the build
+   stops. The four entries that do this are the cutaways — the office, Suzy's
+   flat — and they own the screen while they run.
+5. Otherwise fill slot 0: the companion, if it is a primary, on a coin flip
+   at 50%; else a fresh category `0x01` draw.
+6. Then loop: a 5% chance the companion drops in here, otherwise a category
+   `0x02` draw. An entry whose mask has bit 3 is **repeatable**, and the
+   engine rolls 1-6 goes for it weighted 10/20/30/20/10/10, redrawing until
+   the budget can afford however many it asked for.
+7. Push the gag on the end.
+
+Two things fall out of the order. The first entry is what Johnny's position is
+set from (`seg4:0x064D` writes `ds:0x30E4`/`ds:0x30E0` straight from its `from`
+field, with no walk), so **he is placed for the first scene of a queue and
+walks between all the rest**. And the gag really is last, so a queue ends on a
+punchline.
+
+`ds:0x30F4` is the queue itself and `ds:0x30F2` the cursor. `seg4:0x06D4` reads
+the entry under the cursor each pass, and when it finds a null one it calls
+`seg4:0x0540` — which advances the clock, checks the calendar, and builds the
+next queue. **The clock only moves between queues**, so a queue plays out in
+the light it started in.
+
+## Where the island stands
+
+`ds:0x30C0` is six bits that say where on screen the island may be, and it is
+the thing the queue is really built around.
+
+`seg3:0x1C41` takes a scene's 32-bit mask. The low word is what the island
+looks like; the **high** word is where it may stand:
+
+| High bit | Effect on `ds:0x30C0` |
+| --- | --- |
+| `0x20` | `= 1` — pinned hard left and low, at (0x011, 0x135) |
+| `0x10` | `= 2` — pinned at (0x121, 0x12B) |
+| `0x01` | `\|= 4` — top-left quadrant |
+| `0x02` | `\|= 8` — top-right quadrant |
+| `0x04` | `\|= 0x10` — bottom-left quadrant |
+| `0x08` | `\|= 0x20` — bottom-right quadrant |
+
+The queue's masks are ORed together as it is built, and `seg4:0x0633` resets
+the word to -1 ("anywhere") first. So the state accumulates constraints over
+one queue and starts clean on the next.
+
+`seg4:0x0EDB` is the gate. The six bits are three pairs, and each pair has a
+left member and a right member — `0x15` is the three left bits and `0x2A` the
+three right ones. A scene that wants the island on one side cannot join a
+queue that has claimed the other, and a scene that wants a single quadrant
+cannot join one that has claimed the opposite half. That is what keeps a queue
+coherent: everything in it can be drawn against the same island.
+
+Then `seg3:0x1B00` places it. Pinned states return their fixed spot; otherwise
+it picks a **uniform random point in a rectangle**:
+
+| Layout | x | y | width | height |
+| --- | --- | --- | --- | --- |
+| bare island | 0x043 | 0x0FF | 0x0E2 | 0x081 |
+| with the sandbar | 0x0A8 | 0x0FF | 0x06F | 0x03B |
+
+and the quadrant bits halve it: the shift is taken off the full extent and the
+extent halved afterwards, so one bit is a corner, two adjacent bits are a half,
+and none at all is the lot.
+
+`seg3:0x0236` then subtracts the nominal anchor (0x121, 0x117), leaving
+`ds:0x30C6`/`ds:0x30C4` as an **offset**, and everything moves by it:
+
+* every piece of the island, the surf, the raft and the palm (`seg3:0x0262`
+  onwards)
+* the rectangles the glints and the waves are kept out of (`seg3:0x08A5`,
+  `seg3:0x0F05`)
+* every waypoint of Johnny's walk (`seg4:0x02EA`)
+* **every drawing opcode of every scene** — `seg3:0x00FC` copies the offset
+  plus one into `ds:0x46E4`/`ds:0x46E6`, and `seg12:0x05B9` adds it to an
+  opcode's first coordinate pair before the handler sees it, for the whole
+  `0xA000` family plus `0x4004` and `0x4204`. `0x4004` and `0xA0A4` get their
+  second pair shifted too, off the table at `cs:0x1379`; `0xA601`, `0xAF1F`
+  and `0xAF2F` get nothing.
+
+Two exceptions: a cutaway scene (`ds:0x30B4` at 2) draws in absolute
+coordinates, and a scene whose low mask has `0x400` is drawn a further 272
+pixels to the right.
+
+This is what `ISLETEMP.SCR` is for. It is the island **template** — the
+composition at the nominal anchor — and the scripts load it so their sprites
+have something to be absolute against. The live island is the same picture
+somewhere else, and the whole scene moves with it.
+
+## What else the mask asks for
+
+The low word, from `seg3:0x1C7C`:
+
+| Bit | Variable | Meaning |
+| --- | --- | --- |
+| `0x0010` | `ds:0x30B6 = 0` | no holiday decoration |
+| `0x0200` | `ds:0x30C2 = 0` | no rock and no sandbar |
+| `0x0400` | — | read per scene at `seg4:0x07DF`: draw 272px right |
+| `0x0800` | `ds:0x30B4 = 1` | night, whatever the hour says |
+| `0x1000` | `ds:0x30B2 = 1` | flat calm |
+| `0x2000` | `ds:0x30B4 = 2` | cutaway: no island at all |
+| `0x4000` | `ds:0x30B0 = 1` | no raft |
+
+The flat calm is not "no glints". `ds:0x2F42` is an array of thirty twelve-byte
+slots and `ds:0x2F40` says how many of them the stepper at `seg3:0x04B4` looks
+at; the waves and the glints share it, so `seg3:0x0386` setting it to nothing
+takes both away.
+
+`ds:0x30C2` is a coin flip per queue (`seg3:0x021F`, when the reset left it at
+-1), and seventeen of the seventy-nine live scenes force it to 0. With ten to
+twenty entries in a queue that makes the sandbar layout rare — about one queue
+in twenty — which is why it reads as a variant rather than an alternative.
+
 ## Positions and walking
 
 Johnny's current position is a pair: `ds:0x30E4` (major) and `ds:0x30E0`
@@ -154,8 +291,16 @@ where `jc_reborn` reports its remaining inaccuracy.
 
 ## Time of day
 
-`seg4:0x0560` computes it: take the wall clock, subtract the `StartTime` stored
-in `SCRANTIC.INI`, and reduce modulo 16. The result lives in `ds:0x30BA`.
+`seg4:0x0554` computes it, and the unit is the **half hour**. `seg4:0x0C48`
+turns an HHMM clock reading into `hhmm / 50 + (hhmm % 100) / 30`, which is the
+number of half hours since midnight; the phase is that for now minus that for
+the `StartTime` in `SCRANTIC.INI`, modulo 16. The result lives in `ds:0x30BA`.
+
+Sixteen half hours is **eight hours**, so Johnny's day is a third of a real
+one. `ds:0x00BE` ships at 900 — nine in the morning — which puts dusk at three
+in the afternoon and the next dawn at five. Somebody chose that on purpose: an
+office worker at their desk from nine to five sees a whole day and a whole
+night without staying late.
 
 * phases **0-11** are day — the sea is one of `OCEAN00/01/02.SCR`, picked at
   random each redraw
@@ -459,9 +604,9 @@ each other the seven patches never move together.
 ### The colour that is not there
 
 The three ocean screens are the only artwork in the game that draws with
-index 0, the transparency key — about 10,000 pixels each, in wave-crest
-shapes. What the engine puts there is not yet known, but the shape of the
-answer is:
+index 0, the transparency key — about 10,000 pixels each, in large connected
+patches inside the open water. What the engine puts there is not yet known,
+but the shape of the answer is:
 
 * every one of `OCEAN00`'s 9,917 index-0 pixels is index 9 in `OCEAN01`, and
   every neighbouring pixel in its own image is index 9 as well. Whatever goes
@@ -472,6 +617,14 @@ answer is:
 * `ISLETEMP.SCR`, which is the same island painted once and frozen, has white
   and cyan crests in the same water. Filling the key with white does make the
   oceans read as foam.
+* **black is the obvious answer and it is wrong.** `JOHNCAST.PAL` puts magenta
+  at 0 and black at 5, the other way round from the standard sixteen, so the
+  blitter's key sits on a colour nothing wants and `seg3:0x01C4` clears the
+  screen to 5. Showing the patches as what is behind the hole therefore means
+  black — and it turns the near water to mud. Counting the screens by rows
+  also shows the water *below* those patches is a clean 9-and-5 checkerboard,
+  half bright blue and half black: the artist had a way to draw deep water and
+  did not use it here.
 
 The port fills it with index 9 — the water it sits in — which cannot be far
 wrong either way.
@@ -512,24 +665,24 @@ back to normal between scenes.
 Seventeen of the eighty scenes ask for no rock; four are cutaways — Suzy's
 city, meeting Suzy, the office, and the ending — and one asks for no raft.
 
-### The island is placed at random, and the port does not do it
+### The island is placed at random, and the scenes follow it
 
-`seg3:0x1B00` picks the island's position rather than fixing it. It hands
-`seg3:0x14BF` a rectangle — (168, 255) by 111x59 with the rock, (67, 255) by
-226x129 without — and the high bits of the scene mask (`ds:0x30C0`) narrow it
-to a quadrant or replace it outright: bit 21 puts the island at (17, 309), bit
-20 at (289, 299). Everything else in segment 3 is drawn relative to the result,
-and so is Johnny's walking: `seg4:0x02EA` adds `ds:0x30C6`/`ds:0x30C4` to each
-waypoint before blitting him.
+`seg3:0x1B00` picks the island's position rather than fixing it, out of the
+rectangle the queue's scenes agreed on — see "Where the island stands" above.
 
-The port keeps the island at (289, 279), which is the anchor the offsets are
-all expressed against and the placement `ISLETEMP.SCR` was painted at. The
-reason not to move it is that **the scenes do not follow**: the TTM sprite
-handler at `seg12:0x025B` draws at absolute coordinates, and segment 12 does
-not reference the origin at all — only segments 3 and 4 do. Move the island
-and Johnny acts out his scenes over open water. Whether the original had the
-same problem, or whether something else pins the origin in practice, is not
-settled.
+The reason to believe it is that **the scenes do follow**. It looked for a
+long time as though they could not: the TTM sprite handler at `seg12:0x025B`
+draws at absolute coordinates and segment 12 never mentions `ds:0x30C6`. But
+it does not have to. `seg12:0x05B9` shifts an opcode's operands before the
+handler ever sees them, from `ds:0x46E4`/`ds:0x46E6` — and `seg3:0x00FC` is
+the only thing that writes those, from the island offset plus one. Segment 12
+does not reference the origin because the origin has already been applied.
+
+So everything moves together: the island, the surf, the raft, the exclusion
+zones, Johnny's walk, and every sprite of every scene. The port does the same,
+and `ISLETEMP.SCR` — the island at the nominal anchor, which is what the
+scripts load as their backdrop — is the template the whole thing is expressed
+against.
 
 ### Waves on the open water
 
@@ -611,135 +764,48 @@ that array holds is sparkle. One that lands on the palm is thrown away rather
 than drawn (`seg3:0x055E` tests the trunk, `seg3:0x058A` the fronds) — these
 are reflections, and the palm is not water.
 
-### The raft
-
-The one thing on the island that changes with the story. `MRAFT.BMP` is
-loaded next to `BACKGRND.BMP` at `seg3:0x0179` and kept in `ds:0x30AE`; it
-holds five frames of a raft under construction, 72x39 growing to 128x39.
-
-`seg3:0x1D7E` reads the story day out of `ds:0x2D9C`, takes one off it and
-clamps to 1..5, so there is a raft from the first day, it grows through days
-three to six, and from day six it is finished. It goes at (513, 266), or
-(530, 281) when the rock and sandbar are there (`seg3:0x1DCB`).
-
-One scene turns it off — `MARY.ADS` sequence 5, "JOHNNY LEAVES", the day-eight
-story scene where he sails away on it. The scene animates the raft itself, so
-the backdrop must not also be drawing one.
-
-### What a scene asks of the backdrop
-
-The scene table's 32-bit mask at `+0x0B` is not only a category filter. The
-chooser hands it to `seg3:0x1C41`, which reads more bits out of it:
-
-| Bit | Effect |
-| --- | --- |
-| `0x0010` | clears `ds:0x30B6` |
-| `0x0200` | `ds:0x30C2 = 0` — no rock and no sandbar |
-| `0x0800` | `ds:0x30B4 = 1` |
-| `0x1000` | sets `ds:0x30B2` |
-| `0x2000` | `ds:0x30B4 = 2` — a cutaway: `seg3:0x01C4` clears the whole 640x480 to black instead of drawing a sea, and the scene's own `.SCR` is the picture |
-| `0x4000` | sets `ds:0x30B0` — no raft |
-| `0x010000`-`0x200000` | the island placement bits below |
-
-Passing all ones resets the lot (`seg3:0x1C4B`), which is what puts the island
-back to normal between scenes.
-
-Seventeen of the eighty scenes ask for no rock; four are cutaways — Suzy's
-city, meeting Suzy, the office, and the ending — and one asks for no raft.
-
-### The island is placed at random, and the port does not do it
-
-`seg3:0x1B00` picks the island's position rather than fixing it. It hands
-`seg3:0x14BF` a rectangle — (168, 255) by 111x59 with the rock, (67, 255) by
-226x129 without — and the high bits of the scene mask (`ds:0x30C0`) narrow it
-to a quadrant or replace it outright: bit 21 puts the island at (17, 309), bit
-20 at (289, 299). Everything else in segment 3 is drawn relative to the result,
-and so is Johnny's walking: `seg4:0x02EA` adds `ds:0x30C6`/`ds:0x30C4` to each
-waypoint before blitting him.
-
-The port keeps the island at (289, 279), which is the anchor the offsets are
-all expressed against and the placement `ISLETEMP.SCR` was painted at. The
-reason not to move it is that **the scenes do not follow**: the TTM sprite
-handler at `seg12:0x025B` draws at absolute coordinates, and segment 12 does
-not reference the origin at all — only segments 3 and 4 do. Move the island
-and Johnny acts out his scenes over open water. Whether the original had the
-same problem, or whether something else pins the origin in practice, is not
-settled.
-
-### Waves on the open water
-
-There is a second wave system, and this one comes and goes. `seg3:0x04BD`
-walks an array of twelve-byte object records at `ds:0x2F42`; an empty slot may
-be filled, a live one is moved on.
-
-Three of the four kinds are waves, and each is a four-frame `BACKGRND.BMP`
-animation played as a ping-pong. The sequences live at `ds:0x0268`, `ds:0x0270`
-and `ds:0x0278`, terminated by `0xFF`:
-
-| Kind | Sequence | Frames | Size | On the water at once | Spawns in | Set up at |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | `ds:0x0278` | 18-21 | 32x6 | 4 | x -10 +650, y 249 +40 | `seg3:0x05CA` |
-| 2 | `ds:0x0270` | 22-25 | 64x12 | 2 | x -40 +680, y 289 +93 | `seg3:0x0627` |
-| 3 | `ds:0x0268` | 26-29 | 104x16 | 1 | x -70 +710, y 382 +142 | `seg3:0x0682` |
-
-The three sizes are three distances: the small one high and far out, the big
-one low and close. `seg3:0x14BF` picks the spot inside the band, taking the
-sprite's own size off the span so it lands whole, and the caps come from
-`seg3:0x046E`.
-
-A slot is filled by two rolls through the weighted chooser at `seg4:0x1F1B`,
-whose arguments are percentages (it scales each by 655, a hundredth of 65536,
-and walks them against a 16-bit draw). First a flat 35% for the slot to be
-filled at all (`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it
-(`seg3:0x04EE`): 35% a glint, 5% each wave size, 50% nothing after all.
-
-A wave holds each frame for 0, 1 or 2 steps — `seg4:0x1F1B(30, 50)`, so 30%
-one, 50% two, 20% none — and a step is 160ms, from the delay slot at
-`ds:0x028A` (`seg3:0x0A19`). Seven frames later the cursor hits the `0xFF` and
-the wave retires, giving its slot back. So one lasts between about one and
-three and a half seconds.
-
-They barely travel. Each step adds `ds:0x0280` to the x, and that is +1 or -1,
-re-rolled at `seg3:0x0A59` on a straight 50/50. The effect is a crest that
-swells, shimmers and subsides where it is, not one that rolls ashore.
-
-### The speed gate
-
-Nothing in that array spawns unless `ds:0x30BE` is over 100 (`seg3:0x04E4`),
-and `ds:0x30BE` is a **speed index**: `seg2:0x1600` times a calibration loop
-against the system clock and divides `100000 * iterations` by the elapsed
-time, twice by ten. On a slow 386 the decorative objects were simply skipped.
-Any machine running this port is over the line, so the port spawns them.
-
-### Glints, not yet ported
-
-The fourth kind (spawn at `seg3:0x0515`, update at `seg3:0x07DE`) has a budget
-of thirty and is the only one that gets 35% of the roll rather than 5%. It is
-not sprite-based: it blits small regions between the three pages at
-`ds:0x1EB0`, `ds:0x1EB2` and `ds:0x1EB4` and puts them back when its hold
-expires. `seg3:0x055E` rejects any position overlapping the palm trunk
-(24x145 at 443,148) or the fronds (152x69 at 366,122), which is what gives it
-away as something on the water rather than on the island — thirty glints
-twinkling on the sea. Porting it needs the page semantics of the blitter at
-`seg13:0x007E`, which are not read out yet.
-
 ## In the port
 
 `tools/gen_tables.py` emits these tables as `johnny/src/tables.rs`, so the port
 does not need the 16-bit binary at run time. `johnny/src/director.rs`
-implements the chooser, the walk router and the clock; `jcisland` runs it.
+implements the queue, the chooser, the walk router and the clock;
+`johnny/src/scenery.rs` places and draws the island; `jcisland` runs the lot.
 
-Two things the port had to get right that are easy to get wrong:
+The one deliberate difference is the clock. `Clock::Wall` is the shipped
+behaviour — half hours since the dawn the user set — and `johnny.scr` uses it,
+feeding it the local time from `GetLocalTime`. The tools default to
+`Clock::PerQueue`, one phase per queue, so a twenty-minute run still walks
+through a whole day and night.
+
+Things the port had to get right that are easy to get wrong:
 
 * `GotoFrame` does not jump on the spot. `seg12:0x0FC3` stashes the target and
   it is taken at the frame boundary — jumping immediately makes a scene that
   loops back on itself spin forever inside one call rather than yielding.
-* The island backdrop. `seg3:0x01E7` picks `NIGHT.SCR` or one of
-  `OCEAN00/01/02.SCR`, but all four are 640x480 and use palette index 0 — the
-  transparency key — across thousands of pixels. They are the VGA mode's
-  animated sea, drawn over something else, not a backdrop in their own right.
-  The port uses `ISLETEMP.SCR` for now, which is the 640x350 island the scenes
-  themselves load and matches the geometry the sprites and walk paths expect.
+* **Johnny is still on screen between scenes.** Walking and standing about
+  are not scenes; they are one `JOHNWALK.BMP` frame drawn and left there. The
+  surf repaints the backdrop under him every 64ms, so the port has to draw him
+  again after it.
+* **A held frame still has to be painted.** The engine leaves what a frame
+  drew on the screen until something paints over it; scripts save and restore
+  the rectangles they disturb (`4204` and `A064`) rather than the whole
+  picture. This port repaints the backdrop every tick, so it has to repaint
+  the frames on top of it every tick too. Only drawing an instance on the tick
+  its own delay expired put Johnny on screen one tick in seven — a strobe, not
+  an animation.
+* **The route block is chosen once, on the pair Johnny set out on.**
+  `seg4:0x03AC` indexes a six by six table of blocks and `seg4:0x00EA` scans
+  the block it returned for a `-area` marker matching wherever he has got to
+  since. Looking the pair up afresh each leg instead offers him the full
+  spread of ways to *set out* again from there, and he wanders: 4 → 3 → 6 → 5
+  → 4 → 3 → 1 where the block would have taken him 4 → 3 → 1. Twenty-three
+  seconds of walking instead of four.
+* **`F200` is a call.** Every one of `STAND.ADS`'s twelve standing sequences
+  opens with `F200 14`, and 14 is its own `TAG:` entry "STAND INIT" — four
+  instructions that put up the base pose, `MJAMBWLK.TTM` scene 42. So the
+  `F000`/`F200`/`F210` family names a sequence of the same script and runs it,
+  and the `F010 -1` at the end of a sequence is the return. Without it Johnny
+  stands about with no Johnny in the picture.
 
 ## Still open
 
@@ -747,19 +813,14 @@ Two things the port had to get right that are easy to get wrong:
   0-7 look like an island region and a spot within it, but that is inference
   from the tables rather than something the code states. The waypoint
   coordinates should settle it once they are plotted over a background.
-* `seg3:0x1C41`, which the picker hands the chosen entry's mask to.
-* The outer loop, which is further along than it was. `seg4:0x0A30` shows the
-  shape: after the chooser lands on an entry it does `budget -= cost` and
-  stores the entry into a **list** at `ds:0x30F4`, indexed by a counter, going
-  round again while the budget holds. So the scheduler picks a *run of scenes*
-  against a time allowance rather than one at a time, which is what `cost` is
-  a price in. Where the allowance comes from and what refills it is still to
-  be read.
-* What the engine draws in the oceans' index-0 crests, above under "The
-  colour that is not there".
+* What the engine draws in the oceans' index-0 patches, above under "The
+  colour that is not there". Showing them as what is behind the transparency
+  key — black, which is index 5 in this palette — was tried and turns the near
+  water to mud, so the port still shows them as water.
 * ADS `0x4000`: `seg10:0x15FB` unlinks a scene from the instance list and
   puts it back somewhere else, so it and `0x4010` are "in front of" and
   "behind". Which is which is not read out. Only `0x4000` is used, four times,
   in `BUILDING.ADS`, always on the same scene.
-* Whether the island's random placement can be honoured — above, under "The
-  island is placed at random".
+* The holiday decoration. `seg3:0x1E50` draws `HOLIDAY.BMP` over the island at
+  a per-holiday spot, gated on `ds:0x30B6`; the port carries the switch and
+  does not draw anything yet.

@@ -175,6 +175,24 @@ mod win {
         ) -> i32;
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct SYSTEMTIME {
+        pub year: u16,
+        pub month: u16,
+        pub day_of_week: u16,
+        pub day: u16,
+        pub hour: u16,
+        pub minute: u16,
+        pub second: u16,
+        pub milliseconds: u16,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetLocalTime(time: *mut SYSTEMTIME);
+    }
+
     pub type HMONITOR = *mut core::ffi::c_void;
     pub type MonitorEnumProc =
         unsafe extern "system" fn(HMONITOR, HDC, *mut RECT, isize) -> i32;
@@ -582,6 +600,11 @@ fn windows_main() {
                 continue;
             }
             last = last.wrapping_add(due * ms_per_tick);
+            // The time of day is the user's, not UTC's: the phase is half
+            // hours since a dawn they set, so it has to be the local clock.
+            let mut wall = SYSTEMTIME::default();
+            GetLocalTime(&mut wall);
+            director.hhmm = Some(wall.hour * 100 + wall.minute);
             let mut drew = false;
             while due > 0 {
                 drew |= director.tick(&archive);

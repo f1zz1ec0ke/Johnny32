@@ -314,6 +314,18 @@ pub struct Stage {
     pub rng: crate::ads::Rng,
     /// Opcodes decoded but not implemented, tallied so they stay visible.
     pub todo_seen: std::collections::BTreeMap<u16, usize>,
+    /// Where the island is standing, added to every drawing opcode.
+    ///
+    /// `seg12:0x05B9` shifts an opcode's first coordinate pair by
+    /// `ds:0x46E4`/`ds:0x46E6` before the handler sees it, but only for the
+    /// `0xA000` family and `0x4004`/`0x4204`, and only when the offset is not
+    /// zero. Two of those -- `0x4004` and `0xA0A4`, the ones whose second pair
+    /// is another point rather than a size -- get both pairs shifted
+    /// (`seg12:0x0608`, off the table at `cs:0x1379`).
+    ///
+    /// `seg3:0x00FC` sets it: the island's own offset plus one, or nothing at
+    /// all for a scene that has taken the screen over.
+    pub draw_offset: (i32, i32),
 }
 
 impl Default for Stage {
@@ -329,6 +341,7 @@ impl Default for Stage {
             bg: 0,
             rng: crate::ads::Rng::new(0x7A11_5EED),
             todo_seen: Default::default(),
+            draw_offset: (0, 0),
         }
     }
 }
@@ -336,6 +349,11 @@ impl Default for Stage {
 impl Stage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A drawing opcode's coordinates, once the island has moved.
+    fn at(&self, x: i16, y: i16) -> (i32, i32) {
+        (x as i32 + self.draw_offset.0, y as i32 + self.draw_offset.1)
     }
 
     pub fn palette(&self) -> &[[u8; 3]; 256] {
@@ -455,6 +473,15 @@ pub struct Instance {
     /// The frame just run contained an `EndScene`: the engine's `ds:0x4644`,
     /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
     pub ended: bool,
+    /// Where the frame on screen starts, so it can be painted again.
+    ///
+    /// The engine leaves what a frame drew on screen until something paints
+    /// over it: scripts save and restore the rectangles they disturb
+    /// (`4204` and `A064`) rather than the whole picture. This port repaints
+    /// the backdrop every tick, so it has to repaint the frames on top of it
+    /// every tick too, or a sprite would only be on screen for the one tick
+    /// in seven its own script advanced on.
+    frame_start: usize,
 }
 
 impl Instance {
@@ -468,7 +495,24 @@ impl Instance {
             pending_goto: None,
             last_goto: None,
             ended: false,
+            frame_start: 0,
         }
+    }
+
+    /// Paint the frame that is already on screen again, without advancing.
+    ///
+    /// Everything between two `EndFrame`s is drawing plus the odd delay or
+    /// colour change, so running it a second time paints the same picture.
+    /// The instance's own state is put back afterwards: this is a repaint,
+    /// not a step.
+    pub fn repaint(&mut self, stage: &mut Stage, archive: &Archive) {
+        let (pc, delay, ended, goto) = (self.pc, self.delay, self.ended, self.pending_goto);
+        self.pc = self.frame_start;
+        let _ = self.run_ops(stage, archive);
+        self.pc = pc;
+        self.delay = delay;
+        self.ended = ended;
+        self.pending_goto = goto;
     }
 
     pub fn seek_scene(&mut self, scene: u16) -> bool {
@@ -487,6 +531,11 @@ impl Instance {
     /// program that never reaches an `EndFrame` should end the scene, not hang
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
+        self.frame_start = self.pc;
+        self.run_ops(stage, archive)
+    }
+
+    fn run_ops(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
         // Both of these are per-frame in the engine too: `seg10:0x1CAE` clears
         // the end flag and `seg12:0x0452` resets the goto target before the
         // frame runs.
@@ -545,37 +594,33 @@ impl Instance {
                 }
                 Op::DrawPixel { x, y } => {
                     let fg = stage.fg;
-                    stage.surface.draw_line(x as i32, y as i32, x as i32, y as i32, fg);
+                    let (x, y) = stage.at(x, y);
+                    stage.surface.draw_line(x, y, x, y, fg);
                 }
                 Op::SetColors { fg, bg } => {
                     stage.fg = fg;
                     stage.bg = bg;
                 }
                 Op::SetClip { x1, y1, x2, y2 } => {
-                    stage.surface.clip = Some(Clip {
-                        x1: x1 as i32,
-                        y1: y1 as i32,
-                        x2: x2 as i32,
-                        y2: y2 as i32,
-                    });
+                    let (x1, y1) = stage.at(x1, y1);
+                    let (x2, y2) = stage.at(x2, y2);
+                    stage.surface.clip = Some(Clip { x1, y1, x2, y2 });
                 }
                 Op::DrawLine { x1, y1, x2, y2 } => {
                     let fg = stage.fg;
-                    stage
-                        .surface
-                        .draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, fg);
+                    let (x1, y1) = stage.at(x1, y1);
+                    let (x2, y2) = stage.at(x2, y2);
+                    stage.surface.draw_line(x1, y1, x2, y2, fg);
                 }
                 Op::DrawRect { x, y, w, h, filled } => {
                     let fg = stage.fg;
-                    stage
-                        .surface
-                        .draw_rect(x as i32, y as i32, w as i32, h as i32, fg, filled);
+                    let (x, y) = stage.at(x, y);
+                    stage.surface.draw_rect(x, y, w as i32, h as i32, fg, filled);
                 }
                 Op::DrawEllipse { x, y, w, h, filled } => {
                     let fg = stage.fg;
-                    stage
-                        .surface
-                        .draw_ellipse(x as i32, y as i32, w as i32, h as i32, fg, filled);
+                    let (x, y) = stage.at(x, y);
+                    stage.surface.draw_ellipse(x, y, w as i32, h as i32, fg, filled);
                 }
                 Op::FreeShapes => stage.slots[self.bitmap_slot].clear(),
                 Op::DrawSprite {
@@ -586,8 +631,9 @@ impl Instance {
                     mirror,
                 } => {
                     let slot = (slot as usize).min(15);
+                    let (x, y) = stage.at(x, y);
                     if let Some(f) = stage.slots[slot].get(frame as usize) {
-                        stage.surface.draw_sprite(f, x as i32, y as i32, mirror);
+                        stage.surface.draw_sprite(f, x, y, mirror);
                     }
                 }
                 Op::GotoFrame(n) => self.pending_goto = Some(n),
@@ -610,7 +656,10 @@ impl Instance {
                     y,
                     w,
                     h,
-                } => stage.restore_region(x as i32, y as i32, w as i32, h as i32),
+                } => {
+                    let (x, y) = stage.at(x, y);
+                    stage.restore_region(x, y, w as i32, h as i32)
+                }
                 // The other six have no use in any shipped script. Counted, so
                 // that stays true rather than being assumed.
                 Op::RegionOp { opcode, .. } => {
