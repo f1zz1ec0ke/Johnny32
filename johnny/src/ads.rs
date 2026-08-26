@@ -116,9 +116,18 @@ pub enum Op {
     /// A weighted "play nothing" choice inside a random block.
     RandomSkip { weight: u16 },
     /// Reset a scene to idle (`seg10:0x0E9B` writes state 0).
-    StopScene { ttm: u16, scene: u16 },
+    StopScene {
+        ttm: u16,
+        scene: u16,
+        /// Its third operand, which is what a random block weighs it by.
+        weight: u16,
+    },
     /// Mark a scene finished (`seg10:0x0E6E` writes state 5).
-    FinishScene { ttm: u16, scene: u16 },
+    FinishScene {
+        ttm: u16,
+        scene: u16,
+        weight: u16,
+    },
     /// Move a scene in the draw order.
     ///
     /// Both handlers unlink the scene from the instance list and put it back
@@ -183,10 +192,12 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             0x2010 => Op::StopScene {
                 ttm: a(0),
                 scene: a(1),
+                weight: a(2),
             },
             0x2015 => Op::FinishScene {
                 ttm: a(0),
                 scene: a(1),
+                weight: a(2),
             },
             0xF010 => Op::Stop { sequence: a(0) },
             0x4000 | 0x4010 => Op::Reorder {
@@ -332,12 +343,61 @@ pub struct Sequencer {
     seqs: BTreeMap<u16, u8>,
     /// The sequence being interpreted right now, `ds:0x2606`.
     current: u16,
+    /// How many guarded blocks deep the interpreter is. `seg10:0x1758` runs a
+    /// true block through a nested `seg10:0x1925`, and `seg10:0x194A` swallows
+    /// the yield that block ends on -- so a `Step` inside a block closes the
+    /// block and the pass carries on, while one at the top closes the pass.
+    depth: u16,
     /// How many times each scene has been started, `[si+0x2D]`: zeroed when
     /// the instance record is made (`seg10:0x0B8F`) and bumped by every
     /// `PlayScene` (`seg10:0x0E25`). It is never cleared, which is what makes
     /// `1330` mean "never played" rather than "not playing".
     plays: BTreeMap<(u16, u16), u32>,
     pub todo_seen: BTreeMap<u16, usize>,
+}
+
+/// What a random block weighs an instruction by (`seg10:0x0C8D`): the word at
+/// offset 6 -- the third operand -- except for the two that play a scene,
+/// which use the fourth, and the bare weight, which is all operand.
+fn weight_of(op: &Op) -> u16 {
+    match op {
+        Op::PlayScene { weight, .. } => *weight,
+        Op::RandomSkip { weight } => *weight,
+        Op::StopScene { weight, .. } | Op::FinishScene { weight, .. } => *weight,
+        // Anything else has no third operand to read, so it weighs nothing
+        // and cannot be drawn. Nothing shipped puts one in a block.
+        _ => 0,
+    }
+}
+
+/// The raw opcode an `Op` came from, for counting one this port meets
+/// somewhere it did not expect.
+fn opcode_of(op: &Op) -> u16 {
+    match op {
+        Op::Sequence(_) => 0x0001,
+        Op::PlayScene { .. } => 0x2005,
+        Op::StopScene { .. } => 0x2010,
+        Op::FinishScene { .. } => 0x2015,
+        Op::Reorder { to_front, .. } => {
+            if *to_front {
+                0x4000
+            } else {
+                0x4010
+            }
+        }
+        Op::If { .. } => 0x1350,
+        Op::And => 0x1420,
+        Op::Or => 0x1430,
+        Op::Stop { .. } => 0xF010,
+        Op::End => 0xFFFF,
+        Op::Run { opcode, .. } => *opcode,
+        Op::Step => 0x1510,
+        Op::StepEnd => 0x1520,
+        Op::RandomBegin => 0x3010,
+        Op::RandomEnd => 0x30FF,
+        Op::RandomSkip { .. } => 0x3020,
+        Op::Todo { opcode, .. } => *opcode,
+    }
 }
 
 /// A pass over one sequence cannot execute more instructions than the script
@@ -364,6 +424,7 @@ impl Sequencer {
             states: BTreeMap::new(),
             seqs: BTreeMap::new(),
             current: 0,
+            depth: 0,
             plays: BTreeMap::new(),
             todo_seen: BTreeMap::new(),
         })
@@ -417,6 +478,7 @@ impl Sequencer {
             .iter()
             .find(|(id, state)| **state == 1 && **id > self.current)
             .map(|(id, _)| *id);
+        self.depth = 0;
         match next.and_then(|id| self.body_of(id).map(|pc| (id, pc))) {
             Some((id, pc)) => {
                 self.current = id;
@@ -519,9 +581,16 @@ impl Sequencer {
         sticky || result
     }
 
-    /// Skip forward past the end of the current guarded block.
+    /// Skip a block that is not going to run (`seg10:0x106B`).
+    ///
+    /// The scan stops at this block's own `Step`. A condition met on the way
+    /// is consumed **whole** -- its chain, its block, and the `Step` that ends
+    /// that block -- because a rule nested inside a skipped rule must not
+    /// steal its terminator. `BUILDING.ADS` builds its fire out of exactly
+    /// that shape, and a skipper that stops at the first `Step` it sees leaves
+    /// the sequence stuck for good.
     fn skip_block(&mut self) {
-        while let Some((_, op)) = self.ops.get(self.pc) {
+        while let Some((_, op)) = self.ops.get(self.pc).cloned() {
             self.pc += 1;
             match op {
                 Op::Step | Op::StepEnd => return,
@@ -529,7 +598,25 @@ impl Sequencer {
                     self.pc -= 1;
                     return;
                 }
+                Op::If { .. } => {
+                    self.skip_chain();
+                    self.skip_block();
+                }
                 _ => {}
+            }
+        }
+    }
+
+    /// Step over the `And`/`Or` links after a condition, and the predicates
+    /// they join, without evaluating any of them.
+    fn skip_chain(&mut self) {
+        while matches!(
+            self.ops.get(self.pc),
+            Some((_, Op::And)) | Some((_, Op::Or))
+        ) {
+            self.pc += 1;
+            if matches!(self.ops.get(self.pc), Some((_, Op::If { .. }))) {
+                self.pc += 1;
             }
         }
     }
@@ -546,18 +633,16 @@ impl Sequencer {
         let mut total = 0u32;
         let mut i = start;
         while let Some((_, op)) = self.ops.get(i) {
-            match op {
-                Op::RandomEnd => break,
-                Op::PlayScene { weight, .. } => {
-                    total += *weight as u32;
-                    entries.push((i, *weight as u32));
-                }
-                Op::RandomSkip { weight } => {
-                    total += *weight as u32;
-                    entries.push((i, *weight as u32));
-                }
-                _ => {}
+            if matches!(op, Op::RandomEnd) {
+                break;
             }
+            // Every instruction in the block is a candidate, weighted by
+            // `seg10:0x0C8D`. Only counting the ones that play a scene means
+            // an entry that stops one can never come up -- which is how the
+            // twelve standing sequences end, so they never did.
+            let weight = weight_of(op) as u32;
+            total += weight;
+            entries.push((i, weight));
             i += 1;
         }
         let end = i + 1; // past RandomEnd
@@ -620,6 +705,10 @@ impl Sequencer {
                 // and the pass carries on to the next rule. Reaching one at
                 // the top level ends the pass.
                 Op::Step | Op::StepEnd => {
+                    if self.depth > 0 {
+                        self.depth -= 1;
+                        continue;
+                    }
                     if self.next_sequence() {
                         continue;
                     }
@@ -630,31 +719,42 @@ impl Sequencer {
                     // skip it. There is no third answer -- the engine never
                     // sits on a guard waiting for one to settle.
                     if self.eval_chain(cond, ttm, scene) {
+                        self.depth += 1;
                         continue;
                     }
                     self.skip_block();
                 }
                 Op::And | Op::Or => {}
                 Op::RandomBegin => {
+                    // `seg10:0x0D9C` hands the entry it landed on to the
+                    // general dispatcher, so a random block can hold anything.
+                    // The shipped scripts use three: play a scene, stop one,
+                    // and a bare weight that means "do nothing this time".
                     if let Some(idx) = self.pick_random(rng) {
-                        if let Some((
-                            _,
-                            Op::PlayScene {
-                                ttm, scene, flags, ..
-                            },
-                        )) = self.ops.get(idx).cloned()
-                        {
-                            if let Some(action) = self.begin(ttm, scene, flags) {
-                                return action;
+                        match self.ops.get(idx).cloned() {
+                            Some((_, Op::PlayScene { ttm, scene, flags, .. })) => {
+                                if let Some(action) = self.begin(ttm, scene, flags) {
+                                    return action;
+                                }
+                            }
+                            Some((_, Op::StopScene { ttm, scene, .. })) => {
+                                self.states.insert((ttm, scene), SceneState::Idle);
+                            }
+                            Some((_, Op::FinishScene { ttm, scene, .. })) => {
+                                self.states.insert((ttm, scene), SceneState::Finished);
+                            }
+                            Some((_, Op::RandomSkip { .. })) | None => {}
+                            Some((_, other)) => {
+                                *self.todo_seen.entry(opcode_of(&other)).or_insert(0) += 1;
                             }
                         }
                     }
                 }
                 Op::RandomEnd | Op::RandomSkip { .. } => {}
-                Op::StopScene { ttm, scene } => {
+                Op::StopScene { ttm, scene, .. } => {
                     self.states.insert((ttm, scene), SceneState::Idle);
                 }
-                Op::FinishScene { ttm, scene } => {
+                Op::FinishScene { ttm, scene, .. } => {
                     self.states.insert((ttm, scene), SceneState::Finished);
                 }
                 Op::PlayScene {

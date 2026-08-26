@@ -276,6 +276,48 @@ State 4 lasts exactly one pass (`seg10:0x1DE2` clears it the next time the
 instance is stepped), which is why instances have to be stepped before the
 scripts are interpreted and not after.
 
+### Rules nest, and that is load-bearing
+
+A rule's block is everything up to its `Step`, and a rule *inside* a block is
+nested in it. `seg10:0x1758` runs a true block through a nested copy of the
+interpreter, and `seg10:0x194A` swallows the yield that block ends on — so a
+`Step` closes the block it is in and the pass carries on to the next rule.
+Only a `Step` at the top level ends the pass. A script that fires four rules in
+one pass is normal; one that fires at most one per pass stalls.
+
+The skipper has to agree. `seg10:0x106B` scans past a block that is not going
+to run and stops at that block's own `Step`, but a condition it meets on the
+way is consumed **whole** — its chain, its block, and the `Step` that ends it,
+by recursion. `BUILDING.ADS` builds Johnny's fire out of exactly that shape:
+
+```
+IF RUNNING[3,142] {
+    RANDOM { play 38 x15 / play 38 x8 / play 40 x3 / nothing }
+    IF (IDLE[3,38] AND IDLE[3,40]) {
+        play 39, 80, 81
+    }                              <- Step, closes the inner rule
+}                                  <- Step, closes the outer
+IF RUNNING[3,40] { ... }           <- top level, reached every pass
+```
+
+A skipper that stops at the first `Step` it sees leaves the pointer inside the
+outer rule and the sequence never reaches the rule after it. The fire is built
+and then nothing happens, for ever.
+
+### Random blocks hold instructions, not just scenes
+
+`seg10:0x0CDA` sums the weight of **every** instruction between `3010` and
+`30FF`, draws against the total, and hands whichever it lands on to the general
+dispatcher (`seg10:0x0D9C`) — so a random block can contain anything. The
+shipped scripts use three: `2005` play a scene, `2010` stop one, and `3020`, a
+bare weight that means "do nothing this time".
+
+The weight is not always in the same place (`seg10:0x0C8D`): `2000` and `2005`
+use the fourth operand, `3020` uses the first, and **everything else uses the
+third**. Weighing only the entries that play a scene means an entry that stops
+one can never be drawn — and that is how the twelve standing sequences end, so
+they do not.
+
 What those states mean, and how the repeat operand drives them, is in
 `docs/SCHEDULER.md` under "How long a scene lasts". It is the part that
 decides pacing, and it is not obvious from the bytecode alone.

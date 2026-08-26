@@ -66,6 +66,16 @@ fn main() -> ExitCode {
         }
         None => johnny::director::Clock::PerQueue,
     };
+    // The sound effects live in the original's executable, not the archive.
+    let sounds = ["SCRANTIC.EXE", "scrantic.exe"]
+        .iter()
+        .find_map(|name| std::fs::read(format!("{dir}/{name}")).ok())
+        .and_then(|exe| johnny::sound::Sounds::from_exe(&exe));
+    match sounds.as_ref() {
+        Some(s) => println!("sounds: {} of {} found", s.count(), johnny::sound::LAST),
+        None => println!("sounds: no SCRANTIC.EXE in {dir}"),
+    }
+    let mut heard: std::collections::BTreeMap<u16, usize> = Default::default();
     let mut frame = 0usize;
     let mut logged = 0usize;
     let mut waves_max = 0usize;
@@ -75,6 +85,9 @@ fn main() -> ExitCode {
 
     for _ in 0..ticks {
         let drew = d.tick(&archive);
+        for id in d.take_sounds() {
+            *heard.entry(id).or_insert(0) += 1;
+        }
         waves_max = waves_max.max(d.wave_count());
         waves_total += d.wave_count();
         clouds_max = clouds_max.max(d.cloud_count());
@@ -105,6 +118,21 @@ fn main() -> ExitCode {
     println!(
         "\nwaves: {waves_max} at most, {:.1} on average; clouds: {clouds_max}, glints: {glints_max}",
         waves_total as f32 / ticks.max(1) as f32
+    );
+    let played: usize = heard.values().sum();
+    let silent: Vec<u16> = heard
+        .keys()
+        .copied()
+        .filter(|id| sounds.as_ref().map_or(true, |s| s.wave(*id).is_none()))
+        .collect();
+    println!(
+        "sounds: {played} played, {} distinct{}",
+        heard.len(),
+        if silent.is_empty() {
+            String::new()
+        } else {
+            format!(" ({silent:?} have no resource)")
+        }
     );
     println!(
         "{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",

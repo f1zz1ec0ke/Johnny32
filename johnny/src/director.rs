@@ -1188,6 +1188,11 @@ impl Director {
                 // the engine passes over it the same way (`seg10:0x07E3`
                 // skips instances carrying the self-loop flag at +0xC).
                 let settled = active.iter().all(|a| a.looping);
+                if over_time {
+                    self.note(format!(
+                        "scene ran past {MAX_SCENE_TICKS} ticks, cutting it short"
+                    ));
+                }
                 if (done && settled) || over_time {
                     self.position = self.landing(ends_at);
                     for (op, n) in seq.todo_seen.iter() {
@@ -1396,6 +1401,11 @@ impl Director {
         }
         self.story_state = 0;
         self.queue_spent = false;
+    }
+
+    /// Sound ids the last tick asked for, taken off the stage.
+    pub fn take_sounds(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.stage.sounds)
     }
 
     /// How many waves are on the open water right now.

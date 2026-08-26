@@ -314,6 +314,10 @@ pub struct Stage {
     pub rng: crate::ads::Rng,
     /// Opcodes decoded but not implemented, tallied so they stay visible.
     pub todo_seen: std::collections::BTreeMap<u16, usize>,
+    /// Sound ids the frames just run asked for, oldest first. The host
+    /// drains it: making a noise is the one thing left that has to know what
+    /// platform it is on.
+    pub sounds: Vec<u16>,
     /// Where the island is standing, added to every drawing opcode.
     ///
     /// `seg12:0x05B9` shifts an opcode's first coordinate pair by
@@ -341,6 +345,7 @@ impl Default for Stage {
             bg: 0,
             rng: crate::ads::Rng::new(0x7A11_5EED),
             todo_seen: Default::default(),
+            sounds: Vec::new(),
             draw_offset: (0, 0),
         }
     }
@@ -507,8 +512,12 @@ impl Instance {
     /// not a step.
     pub fn repaint(&mut self, stage: &mut Stage, archive: &Archive) {
         let (pc, delay, ended, goto) = (self.pc, self.delay, self.ended, self.pending_goto);
+        // A repaint is not a step, so it does not make a noise either: the
+        // frame's `PlaySound` already fired on the pass that ran it.
+        let quiet = stage.sounds.len();
         self.pc = self.frame_start;
         let _ = self.run_ops(stage, archive);
+        stage.sounds.truncate(quiet);
         self.pc = pc;
         self.delay = delay;
         self.ended = ended;
@@ -639,10 +648,15 @@ impl Instance {
                 Op::GotoFrame(n) => self.pending_goto = Some(n),
                 Op::EndScene => self.ended = true,
                 // Markers, no-ops and the not-yet-implemented, all explicit.
-                Op::SceneMarker(_)
-                | Op::SetBackground(_)
-                | Op::PlaySound(_)
-                | Op::NoOp(_) => {}
+                // `seg5:0x00BA`: one noise at a time, since `sndPlaySound`
+                // replaces whatever is already going.
+                Op::PlaySound(id) => {
+                    stage.sounds.push(id);
+                    if stage.sounds.len() > 8 {
+                        stage.sounds.remove(0);
+                    }
+                }
+                Op::SceneMarker(_) | Op::SetBackground(_) | Op::NoOp(_) => {}
                 // Known, named, and not yet drawn. Counted rather than
                 // silently skipped so they stay visible.
                 // The record half. Nothing to do: this port repaints the

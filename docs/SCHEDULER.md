@@ -814,6 +814,51 @@ Things the port had to get right that are easy to get wrong:
   shows up the same way — two scenes animating over each other, or a cascade
   that stops after its first step.
 
+## Every opcode, audited
+
+The shipped scripts use thirty TTM opcodes and nineteen ADS ones. Every one is
+either implemented or a no-op the disassembly proves is a no-op:
+
+| TTM | Uses | What the port does |
+| --- | --- | --- |
+| `0FF0` `1021` `2022` `1201` `0110` | 6631, 1148, 152, 75, 528 | frame boundary, delay, random delay, goto, scene end |
+| `F01F` `F02F` `F05F` `1051` `1061` `0080` | 40, 263, 41, 456, 41, 190 | load screen / bitmap / palette, slot select, free |
+| `A504` `A524` | 12546, 2822 | sprites, unmirrored and mirrored |
+| `A0A4` `A104` `A002` | 784, 111, 63 | line, filled rect, pixel |
+| `A404` | 437 | circle. `seg12:0x01C4` halves the **fourth** operand for a radius and ignores the third; all 437 uses have them equal, so a bounding-box reading agrees with every one |
+| `2002` `4004` | 217, 52 | colours, clip |
+| `A054` `A064` `B606` | 1, 1, 6 | region save (nothing to do) and restore |
+| `C051` | 535 | sound, see below |
+| `1101` `1111` `5005` | 5, 611, 0 | scene markers. `seg12` sends all three to its "done" label |
+| `4214` | 60 | `seg12:0x0860` reaches "done" whichever way its test goes |
+| `A601` | 6814 | so does `seg12:0x02D8`, and it is the most-used opcode in the data after the sprite draw |
+| `1121` | 61 | writes `[bx+0x16]` on the instance, which only opcode `00C0` reads, and nothing uses `00C0` |
+| `2012` | 52 | flags the **next** bitmap load to build pre-flipped copies. `ds:0x4108` reaches `seg9:0x018A`, and the data segment carries the error string "Bitmaps won't be flipped." for when there is no memory for them. This port mirrors at draw time, so it has nothing to build |
+| `4204` | 38 | page-to-page region save, and only when `ds:0x2641` says there are three pages. One surface, nothing to save |
+
+The ADS side is in `docs/FILE_FORMATS.md`, which now covers the parts that are
+easy to read wrongly: the rule-set model, `1350` meaning "has just ended",
+`1420` and `1430` being AND and OR, how blocks nest, and how random blocks are
+weighed.
+
+## The sound
+
+`RESOURCE.001` has no audio in it. The twenty-three effects are Windows
+resources in `SCRANTIC.EXE` itself — type `WAVE`, named `WAVESFX1` upwards —
+and `seg5:0x001A` pulls them out at startup with `FindResource`,
+`LoadResource` and `LockResource`, leaving far pointers at `ds:0x355A`. They
+are 8-bit mono PCM at 11025Hz.
+
+Playing one is `seg5:0x00BA`: bounds-check the id, look the pointer up, and
+call `sndPlaySound` with flags 7 — `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`.
+Because `sndPlaySound` stops whatever is playing, the island only ever makes
+one noise at a time.
+
+The loader looks for twenty-five and finds twenty-three; the scripts ask for
+ids 1 to 24, so one of them is silent in the original too. `ds:0x00BC` is the
+`Sounds` switch from `SCRANTIC.INI`, and when it is off the loader does not
+even run.
+
 ## Still open
 
 * What the two position components mean geometrically. Major 0-6 and minor
@@ -831,3 +876,9 @@ Things the port had to get right that are easy to get wrong:
 * The holiday decoration. `seg3:0x1E50` draws `HOLIDAY.BMP` over the island at
   a per-holiday spot, gated on `ds:0x30B6`; the port carries the switch and
   does not draw anything yet.
+* `INTRO.SCR`, which `seg2:0x14F0` loads at startup. The port goes straight to
+  the island.
+* The settings. `SCRANTIC.INI` keeps `Background`, `Clouds`, `Waves`, `Sounds`,
+  `Password` and `StartTime`, and the first four are switches the drawing code
+  already reads (`ds:0x00B6`-`ds:0x00BC`). The port has environment variables
+  and a message box where the original has three dialogs.

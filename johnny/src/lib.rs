@@ -4,7 +4,8 @@
 //! Everything here is derived from a disassembly of the original 16-bit
 //! executable rather than from watching it run; see `docs/` in the repository
 //! for the write-up. The original data files are not redistributed — the
-//! engine reads `RESOURCE.MAP` and `RESOURCE.001` from a copy you supply.
+//! engine reads `RESOURCE.MAP`, `RESOURCE.001` and `SCRANTIC.EXE` from a copy
+//! you supply.
 
 pub mod ads;
 pub mod dgds;
@@ -12,5 +13,6 @@ pub mod director;
 pub mod png;
 pub mod render;
 pub mod scenery;
+pub mod sound;
 pub mod tables;
 pub mod ttm;

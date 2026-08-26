@@ -8,7 +8,9 @@
 //!
 //! Rename the resulting `johnny_scr.exe` to `Johnny.scr`, drop it in
 //! `C:\Windows\System32`, and put `RESOURCE.001` and `RESOURCE.MAP` from your
-//! own copy of the original beside it (or point `JC_DATA` at them).
+//! own copy of the original beside it (or point `JC_DATA` at them). Put
+//! `SCRANTIC.EXE` there too and you get the sound effects, which live in its
+//! resource table rather than in the archive.
 //!
 //! Everything below the shell is platform independent; this file is the only
 //! Windows-specific part of the port.
@@ -195,6 +197,15 @@ mod win {
     #[link(name = "kernel32")]
     extern "system" {
         pub fn GetLocalTime(time: *mut SYSTEMTIME);
+    }
+
+    /// `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`, which is the 7 the original
+    /// passes at `seg5:0x00F7`.
+    pub const SND_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
+
+    #[link(name = "winmm")]
+    extern "system" {
+        pub fn sndPlaySoundW(sound: *const core::ffi::c_void, flags: u32) -> i32;
     }
 
     pub type HMONITOR = *mut core::ffi::c_void;
@@ -428,6 +439,14 @@ fn windows_main() {
         return;
     };
 
+    // The sound effects are Windows resources inside the original's own
+    // executable, not in the archive. Its absence is not fatal -- a silent
+    // island is better than no island.
+    let sounds = ["SCRANTIC.EXE", "scrantic.exe", "SCRANTIC.SCR", "scrantic.scr"]
+        .iter()
+        .find_map(|name| std::fs::read(format!("{dir}/{name}")).ok())
+        .and_then(|exe| johnny::sound::Sounds::from_exe(&exe));
+
     // ---- window ----------------------------------------------------------
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
@@ -627,6 +646,16 @@ fn windows_main() {
                 drew |= director.tick(&archive);
                 due -= 1;
             }
+            // `seg5:0x00BA`, with the flags it passes: asynchronous, from
+            // memory, and no fallback beep for an id that has no resource.
+            // `sndPlaySound` stops whatever is playing, so the island makes
+            // one noise at a time the way it always did.
+            for id in director.take_sounds() {
+                if let Some(wave) = sounds.as_ref().and_then(|s| s.wave(id)) {
+                    sndPlaySoundW(wave.as_ptr() as *const _, SND_FLAGS);
+                }
+            }
+
             if !drew {
                 continue;
             }
@@ -688,6 +717,9 @@ fn windows_main() {
             ReleaseDC(hwnd, dc);
         }
 
+        // Stop whatever is playing before the buffers go out of scope:
+        // `SND_MEMORY` means Windows is still reading them.
+        sndPlaySoundW(std::ptr::null(), 0);
         if !preview {
             ShowCursor(1);
         }

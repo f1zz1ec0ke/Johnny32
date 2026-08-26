@@ -118,7 +118,11 @@ the glints share one array of thirty slots, so a scene that asks for a flat
 calm takes both away. Everything that drifts drifts the same way, because the
 wind is one variable rolled once when the sky is set up. In twenty-six minutes
 of simulated island — 54,000 frames — nothing is reached that the port does
-not implement: no TTM opcode, no ADS opcode.
+not implement: no TTM opcode, no ADS opcode. That claim is now stronger than a
+soak test: every one of the thirty TTM opcodes and nineteen ADS opcodes the
+shipped scripts use has been walked back to its handler, and the ones the port
+treats as no-ops are ones the disassembly shows reaching their "done" label
+whichever way they branch. The audit table is in `docs/SCHEDULER.md`.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and
@@ -139,6 +143,13 @@ raft, the glint exclusion zones, Johnny's walk, and every sprite of every
 scene, because `seg12:0x05B9` shifts a drawing opcode's operands before the
 handler ever sees them. That is what `ISLETEMP.SCR` is — the island
 *template*, at the anchor everything is expressed against.
+
+**And it makes a noise now.** There is no audio in `RESOURCE.001` at all — the
+twenty-three sound effects are Windows resources inside `SCRANTIC.EXE`, type
+`WAVE`, named `WAVESFX1` upwards, 8-bit mono at 11025Hz. Put that file next to
+the data and the screensaver pulls them out and plays them the way the original
+does: `sndPlaySound`, asynchronous, from memory, one noise at a time. The
+scripts ask for sound 535 times across 32 of the 41 of them.
 
 `JC_NOWRITE=1` skips the PNG output. `JC_FROM`/`JC_TO` bound which ticks get
 written, so a long run can be sampled without filling the disk. `JC_HHMM=1430`
@@ -218,7 +229,9 @@ cargo check --manifest-path johnny/Cargo.toml --target x86_64-pc-windows-msvc
 
 Rename the result to `Johnny.scr` and put it in `C:\Windows\System32`, with
 `RESOURCE.001` and `RESOURCE.MAP` from your own copy of the original beside it
-— or point `JC_DATA` at the folder holding them.
+— or point `JC_DATA` at the folder holding them. Put `SCRANTIC.EXE` there too
+and you get the sound; without it the island is silent but everything else
+works.
 
 It has been run, on a three-monitor Windows desktop: it comes up, draws the
 island, plays scenes and exits on input. Development happens on a headless
