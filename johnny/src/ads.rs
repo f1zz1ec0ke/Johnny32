@@ -254,6 +254,7 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
 /// So the whole run is determined by one number from 0 to 65535 -- which is
 /// what makes it possible to check this port against the binary instead of
 /// against another copy of my own reasoning.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Rng {
     table: [u16; 56],
     i: usize,

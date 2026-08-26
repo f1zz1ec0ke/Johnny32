@@ -169,6 +169,35 @@ which is how the first run found that the island's placement rectangle was
 being narrowed in the one case `seg3:0x1B7F` skips the narrowing entirely,
 pinning the island to a quarter of the water it should have had all of.
 
+## Checking the port against itself, where the binary cannot reach
+
+The oracle covers the deciding: which scene, when, where. It cannot reach the
+drawing, because getting the archive open inside the interpreter means running
+the Borland C runtime's startup. That half needs an invariant of its own.
+
+The engine leaves what a frame drew on the screen until something paints over
+it, so it runs each frame exactly once. This port instead repaints the backdrop
+every tick and puts the held frames back on top — which is only the same
+picture if putting a frame back draws exactly what stepping it drew and changes
+nothing else. `JC_CHECK=1` holds every tick to that: paint the whole tick
+again out of the frames alone, and compare the pixels, the loaded artwork, the
+palette, the clip, the sound queue, the generator and each instance's cursor.
+
+```sh
+JC_CHECK=1 JC_NOWRITE=1 cargo run --release --manifest-path johnny/Cargo.toml \
+    --bin jcisland -- 40000
+```
+
+The first thing it said was that thirty-seven of the sixty-five scenes could
+not be repainted. Every scene on screen shares one set of sixteen bitmap slots,
+and the scripts load and free those from inside frames rather than from a
+header — sixty-six frames in the data load or free artwork *and* draw with it.
+Re-running such a frame reads a slot that now holds something else, so it
+paints the wrong sprite or none at all for as long as the frame is held. So an
+instance now keeps what its frame drew rather than where it drew it from: a
+list of resolved marks, artwork and colour and clip already worked out.
+Replaying that cannot load, cannot make a noise and cannot read a slot.
+
 Porting the engine's own generator is what made this possible. It is a
 fifty-six entry additive lagged Fibonacci with a constant table in the data
 segment, and "seeding" is `seg4:0x1EDC` calling it *n* times and throwing the

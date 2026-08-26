@@ -79,6 +79,11 @@ fn main() -> ExitCode {
         }
     }
 
+    // `JC_CHECK=1` holds the repaint model to its invariant every tick; see
+    // `director::check_repaint`.
+    let check = std::env::var("JC_CHECK").is_ok();
+    let mut complaints = 0usize;
+
     let mut rng = ads::Rng::new(seed);
     let mut stage = ttm::Stage::new();
     let mut programs: HashMap<String, Rc<ttm::Program>> = HashMap::new();
@@ -98,6 +103,15 @@ fn main() -> ExitCode {
         for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
             println!("[tick {tick:5}] scene {scene} finished");
         }
+        // Before the script runs: it can start scenes that have not been
+        // painted yet, and those are not part of this tick's picture.
+        if check && stage.has_background() {
+            for what in johnny::director::check_repaint(&mut active, &mut stage) {
+                println!("[tick {tick:5}] {what}");
+                complaints += 1;
+            }
+        }
+
         seq.begin_pass();
         for _ in 0..johnny::ads::PASS_BUDGET {
             match seq.next_action(&mut rng) {
@@ -185,6 +199,16 @@ fn main() -> ExitCode {
         "\n{frame} frames over {tick} ticks, {:.1}s at {MS_PER_TICK}ms/tick",
         (tick * MS_PER_TICK) as f64 / 1000.0
     );
+    if check {
+        println!(
+            "repaint check: {}",
+            if complaints == 0 {
+                "clean".to_string()
+            } else {
+                format!("{complaints} complaints")
+            }
+        );
+    }
     if !stage.todo_seen.is_empty() {
         println!("TTM opcodes not implemented:");
         for (op, n) in &stage.todo_seen {

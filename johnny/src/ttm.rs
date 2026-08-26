@@ -289,22 +289,72 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
     }
 }
 
-/// Why a frame's instructions are being run.
+/// One resolved drawing operation, kept so a held frame can be painted again.
 ///
 /// The engine leaves what a frame drew on the screen until something paints
 /// over it, so it only ever runs a frame once. This port repaints the backdrop
-/// every tick and so has to paint the frames on top again -- but *only* the
-/// painting. All 263 of the `LOAD_BITMAP`s in the shipped scripts are inside
-/// scenes rather than in a header, along with 190 `FREE_SHAPES`, and running
-/// those on every repaint means decoding artwork sixty times a second and
-/// throwing it away -- plus five `LOAD_SCREEN`s that would replace the whole
-/// backdrop under everything else.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum Pass {
-    /// The frame's turn has come: run all of it.
-    Step,
-    /// Put the same frame back on a freshly repainted backdrop.
-    Repaint,
+/// every tick and so has to put every held frame back on top of it -- and
+/// re-running the frame's instructions is *not* the same thing.
+///
+/// One set of bitmap slots is shared by every scene on screen, and slots are
+/// loaded and freed from inside frames rather than from a header: 263
+/// `LOAD_BITMAP`s and 190 `FREE_SHAPES` in the shipped scripts, all of them
+/// inside scenes, and sixty-six frames that load or free artwork *and* draw
+/// with it. By the time such a frame is painted again the slot it drew from
+/// holds something else, or nothing. Re-running it then paints the wrong
+/// sprite or no sprite at all, for as many ticks as the frame is held.
+///
+/// So what is kept is what the frame *drew*: the artwork itself, with the
+/// colour, the clip and the island's offset already resolved. Replaying that
+/// cannot load anything, cannot make a noise and cannot read a slot, which
+/// makes the invariant the repaint model needs true by construction rather
+/// than by discipline.
+pub struct Paint {
+    /// The clip in force when the frame drew this, already in screen
+    /// coordinates.
+    clip: Option<Clip>,
+    mark: Mark,
+}
+
+enum Mark {
+    Sprite {
+        art: Rc<Frame>,
+        x: i32,
+        y: i32,
+        mirror: Mirror,
+    },
+    Line {
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        colour: u8,
+    },
+    Rect {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        colour: u8,
+        filled: bool,
+    },
+    Ellipse {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        colour: u8,
+        filled: bool,
+    },
+    /// `A064` and `B606`: put a rectangle of the backdrop back over whatever
+    /// has been drawn on it. Kept in the list because it is part of the
+    /// picture the frame made, not a side effect of making it.
+    Restore {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
 }
 
 /// The resources a set of concurrently running scenes share: the loaded
@@ -315,7 +365,7 @@ enum Pass {
 /// slots are common. That is why one `.TTM` file can have several of its
 /// scenes live at once without reloading anything.
 pub struct Stage {
-    slots: Vec<Vec<Frame>>,
+    slots: Vec<Vec<Rc<Frame>>>,
     background: Option<Frame>,
     /// Bumped every time the background is replaced. The director watches it
     /// to know whether the island it composed is still the one on show, or
@@ -336,6 +386,14 @@ pub struct Stage {
     /// drains it: making a noise is the one thing left that has to know what
     /// platform it is on.
     pub sounds: Vec<u16>,
+    /// How many times artwork has been loaded or freed.
+    ///
+    /// Nothing in the engine counts this. It is here so a repaint can be
+    /// held to its promise: painting a frame again must not reload a bitmap,
+    /// free a slot, or put a new backdrop up. Comparing a counter catches a
+    /// reload that happens to produce byte-identical artwork, which comparing
+    /// the artwork would not.
+    pub loads: u64,
     /// Where the island is standing, added to every drawing opcode.
     ///
     /// `seg12:0x05B9` shifts an opcode's first coordinate pair by
@@ -364,6 +422,7 @@ impl Default for Stage {
             rng: crate::ads::Rng::new(0x7A11_5EED),
             todo_seen: Default::default(),
             sounds: Vec::new(),
+            loads: 0,
             draw_offset: (0, 0),
         }
     }
@@ -442,6 +501,94 @@ impl Stage {
     pub fn has_background(&self) -> bool {
         self.background.is_some()
     }
+
+    /// Draw one recorded mark. The only way a held frame reaches the screen.
+    pub fn paint(&mut self, p: &Paint) {
+        let was = self.surface.clip;
+        self.surface.clip = p.clip;
+        match &p.mark {
+            Mark::Sprite { art, x, y, mirror } => {
+                self.surface.draw_sprite(art, *x, *y, *mirror)
+            }
+            Mark::Line { x1, y1, x2, y2, colour } => {
+                self.surface.draw_line(*x1, *y1, *x2, *y2, *colour)
+            }
+            Mark::Rect { x, y, w, h, colour, filled } => {
+                self.surface.draw_rect(*x, *y, *w, *h, *colour, *filled)
+            }
+            Mark::Ellipse { x, y, w, h, colour, filled } => {
+                self.surface.draw_ellipse(*x, *y, *w, *h, *colour, *filled)
+            }
+            Mark::Restore { x, y, w, h } => {
+                self.surface.clip = None;
+                self.restore_region(*x, *y, *w, *h);
+            }
+        }
+        self.surface.clip = was;
+    }
+
+    /// Everything a repaint is required to leave exactly as it found it.
+    ///
+    /// See `Untouched`.
+    pub fn untouched(&self) -> Untouched {
+        Untouched {
+            background_gen: self.background_gen,
+            loads: self.loads,
+            last_screen: self.last_screen.clone(),
+            palette: self.palette,
+            sounds: self.sounds.len(),
+            rng: self.rng.clone(),
+            fg: self.fg,
+            bg: self.bg,
+            clip: self.surface.clip,
+            draw_offset: self.draw_offset,
+        }
+    }
+}
+
+/// Everything a repaint is required to leave exactly as it found it.
+///
+/// The port paints the whole picture again every tick, which is only the same
+/// thing the engine does if painting a frame a second time changes nothing
+/// but the pixels it draws. Four separate bugs came from an opcode that
+/// quietly broke that -- a bitmap reloaded, a whole backdrop replaced, a
+/// sound made twice, a clip left behind -- so the invariant is checked rather
+/// than assumed. `director::check_repaint` does the checking; `jcplay` and
+/// `jcisland` turn it on with `JC_CHECK=1`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Untouched {
+    background_gen: u64,
+    loads: u64,
+    last_screen: Option<String>,
+    palette: [[u8; 3]; 256],
+    sounds: usize,
+    rng: crate::ads::Rng,
+    fg: u8,
+    bg: u8,
+    clip: Option<Clip>,
+    draw_offset: (i32, i32),
+}
+
+impl Untouched {
+    /// Name whatever moved between two of these, for a report.
+    pub fn differences(&self, then: &Untouched) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut note = |ok: bool, what: &str| {
+            if !ok {
+                out.push(what.to_string());
+            }
+        };
+        note(self.background_gen == then.background_gen, "put a new backdrop up");
+        note(self.loads == then.loads, "loaded or freed artwork");
+        note(self.last_screen == then.last_screen, "changed the screen on show");
+        note(self.palette == then.palette, "changed the palette");
+        note(self.sounds == then.sounds, "made a noise");
+        note(self.rng == then.rng, "drew from the generator");
+        note(self.fg == then.fg && self.bg == then.bg, "changed the drawing colours");
+        note(self.clip == then.clip, "changed the clip");
+        note(self.draw_offset == then.draw_offset, "moved the island");
+        out
+    }
 }
 
 /// A decoded `.TTM` program. Shared by every instance of the same file.
@@ -496,15 +643,16 @@ pub struct Instance {
     /// The frame just run contained an `EndScene`: the engine's `ds:0x4644`,
     /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
     pub ended: bool,
-    /// Where the frame on screen starts, so it can be painted again.
+    /// What the frame on screen drew, so it can be painted again.
     ///
     /// The engine leaves what a frame drew on screen until something paints
     /// over it: scripts save and restore the rectangles they disturb
     /// (`4204` and `A064`) rather than the whole picture. This port repaints
-    /// the backdrop every tick, so it has to repaint the frames on top of it
+    /// the backdrop every tick, so it has to put the frames back on top of it
     /// every tick too, or a sprite would only be on screen for the one tick
-    /// in seven its own script advanced on.
-    frame_start: usize,
+    /// in seven its own script advanced on. See `Paint` for why this keeps
+    /// the drawings rather than replaying the instructions.
+    painted: Vec<Paint>,
 }
 
 impl Instance {
@@ -518,24 +666,52 @@ impl Instance {
             pending_goto: None,
             last_goto: None,
             ended: false,
-            frame_start: 0,
+            painted: Vec::new(),
         }
     }
 
-    /// Paint the frame that is already on screen again, without advancing.
+    /// Draw something, and keep it so the frame can be painted again.
+    fn mark(&mut self, stage: &mut Stage, mark: Mark) {
+        let p = Paint {
+            clip: stage.surface.clip,
+            mark,
+        };
+        stage.paint(&p);
+        self.painted.push(p);
+    }
+
+    /// Put the frame that is already on screen back, without advancing.
     ///
-    /// Everything between two `EndFrame`s is drawing plus the odd delay or
-    /// colour change, so running it a second time paints the same picture.
-    /// The instance's own state is put back afterwards: this is a repaint,
-    /// not a step.
-    pub fn repaint(&mut self, stage: &mut Stage, archive: &Archive) {
-        let (pc, delay, ended, goto) = (self.pc, self.delay, self.ended, self.pending_goto);
-        self.pc = self.frame_start;
-        let _ = self.run_ops(stage, archive, Pass::Repaint);
-        self.pc = pc;
-        self.delay = delay;
-        self.ended = ended;
-        self.pending_goto = goto;
+    /// Nothing but drawing happens here: the frame's marks were resolved when
+    /// it ran, so this cannot load a bitmap, make a noise, draw from the
+    /// generator or move the instance on. It does not even need the archive.
+    pub fn repaint(&mut self, stage: &mut Stage) {
+        for p in &self.painted {
+            stage.paint(p);
+        }
+    }
+
+    /// What the frame on screen is made of, for the tools.
+    pub fn marks(&self) -> usize {
+        self.painted.len()
+    }
+
+    /// Where the instance stands: everything a repaint saves and puts back.
+    ///
+    /// Compared before and after a repaint, this catches the other half of
+    /// the invariant -- a frame painted again must not advance its own
+    /// program, change its delay, or leave a different slot selected.
+    pub fn cursor(&self) -> (usize, usize, u16, usize, usize, Option<u16>, Option<u16>, bool) {
+        (
+            self.pc,
+            self.painted.len(),
+            self.delay,
+            self.bitmap_slot,
+            self.palette_slot,
+            self.pending_goto,
+            self.last_goto,
+            self.ended,
+        )
     }
 
     pub fn seek_scene(&mut self, scene: u16) -> bool {
@@ -554,11 +730,11 @@ impl Instance {
     /// program that never reaches an `EndFrame` should end the scene, not hang
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
-        self.frame_start = self.pc;
-        self.run_ops(stage, archive, Pass::Step)
+        self.painted.clear();
+        self.run_ops(stage, archive)
     }
 
-    fn run_ops(&mut self, stage: &mut Stage, archive: &Archive, pass: Pass) -> Step {
+    fn run_ops(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
         // Both of these are per-frame in the engine too: `seg10:0x1CAE` clears
         // the end flag and `seg12:0x0452` resets the goto target before the
         // frame runs.
@@ -583,17 +759,8 @@ impl Instance {
                     }
                     return Step::Frame(self.delay);
                 }
-                // These happen once, when the frame is stepped. A repaint
-                // puts the same picture up again; it must not reload the
-                // artwork under it, and certainly must not put a whole new
-                // backdrop up or make the noise a second time.
-                Op::LoadScreen(_)
-                | Op::LoadBitmap(_)
-                | Op::LoadPalette(_)
-                | Op::FreeShapes
-                | Op::PlaySound(_)
-                    if pass == Pass::Repaint => {}
                 Op::LoadScreen(name) => {
+                    stage.loads += 1;
                     if let Some(body) = archive.get(&name) {
                         if let Ok(f) = dgds::read_screen(body) {
                             stage.set_background(f);
@@ -602,13 +769,18 @@ impl Instance {
                     }
                 }
                 Op::LoadBitmap(name) => {
+                    stage.loads += 1;
                     if let Some(body) = archive.get(&name) {
                         if let Ok(frames) = dgds::read_bitmap(body) {
-                            stage.slots[self.bitmap_slot] = frames;
+                            // Shared, so a frame that drew from this slot
+                            // keeps its artwork when the slot is loaded over.
+                            stage.slots[self.bitmap_slot] =
+                                frames.into_iter().map(Rc::new).collect();
                         }
                     }
                 }
                 Op::LoadPalette(name) => {
+                    stage.loads += 1;
                     if let Some(body) = archive.get(&name) {
                         if let Ok(p) = dgds::read_palette(body) {
                             stage.palette = p;
@@ -626,9 +798,8 @@ impl Instance {
                     };
                 }
                 Op::DrawPixel { x, y } => {
-                    let fg = stage.fg;
                     let (x, y) = stage.at(x, y);
-                    stage.surface.draw_line(x, y, x, y, fg);
+                    self.mark(stage, Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: stage.fg });
                 }
                 Op::SetColors { fg, bg } => {
                     stage.fg = fg;
@@ -640,22 +811,38 @@ impl Instance {
                     stage.surface.clip = Some(Clip { x1, y1, x2, y2 });
                 }
                 Op::DrawLine { x1, y1, x2, y2 } => {
-                    let fg = stage.fg;
                     let (x1, y1) = stage.at(x1, y1);
                     let (x2, y2) = stage.at(x2, y2);
-                    stage.surface.draw_line(x1, y1, x2, y2, fg);
+                    self.mark(stage, Mark::Line { x1, y1, x2, y2, colour: stage.fg });
                 }
                 Op::DrawRect { x, y, w, h, filled } => {
-                    let fg = stage.fg;
                     let (x, y) = stage.at(x, y);
-                    stage.surface.draw_rect(x, y, w as i32, h as i32, fg, filled);
+                    let mark = Mark::Rect {
+                        x,
+                        y,
+                        w: w as i32,
+                        h: h as i32,
+                        colour: stage.fg,
+                        filled,
+                    };
+                    self.mark(stage, mark);
                 }
                 Op::DrawEllipse { x, y, w, h, filled } => {
-                    let fg = stage.fg;
                     let (x, y) = stage.at(x, y);
-                    stage.surface.draw_ellipse(x, y, w as i32, h as i32, fg, filled);
+                    let mark = Mark::Ellipse {
+                        x,
+                        y,
+                        w: w as i32,
+                        h: h as i32,
+                        colour: stage.fg,
+                        filled,
+                    };
+                    self.mark(stage, mark);
                 }
-                Op::FreeShapes => stage.slots[self.bitmap_slot].clear(),
+                Op::FreeShapes => {
+                    stage.loads += 1;
+                    stage.slots[self.bitmap_slot].clear();
+                }
                 Op::DrawSprite {
                     x,
                     y,
@@ -665,8 +852,8 @@ impl Instance {
                 } => {
                     let slot = (slot as usize).min(15);
                     let (x, y) = stage.at(x, y);
-                    if let Some(f) = stage.slots[slot].get(frame as usize) {
-                        stage.surface.draw_sprite(f, x, y, mirror);
+                    if let Some(art) = stage.slots[slot].get(frame as usize).cloned() {
+                        self.mark(stage, Mark::Sprite { art, x, y, mirror });
                     }
                 }
                 Op::GotoFrame(n) => self.pending_goto = Some(n),
@@ -696,7 +883,8 @@ impl Instance {
                     h,
                 } => {
                     let (x, y) = stage.at(x, y);
-                    stage.restore_region(x, y, w as i32, h as i32)
+                    let mark = Mark::Restore { x, y, w: w as i32, h: h as i32 };
+                    self.mark(stage, mark);
                 }
                 // The other six have no use in any shipped script. Counted, so
                 // that stays true rather than being assumed.
@@ -712,7 +900,13 @@ impl Instance {
                     to,
                 } => {
                     if from == 2 && to == 1 {
-                        stage.restore_region(x as i32, y as i32, w as i32, h as i32);
+                        let mark = Mark::Restore {
+                            x: x as i32,
+                            y: y as i32,
+                            w: w as i32,
+                            h: h as i32,
+                        };
+                        self.mark(stage, mark);
                     } else {
                         // A copy between two pages the port does not keep
                         // apart. No script does this; count it if one ever

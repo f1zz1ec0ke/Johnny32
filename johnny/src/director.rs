@@ -369,7 +369,7 @@ pub fn advance_scenes(
         }
         if a.wake > now {
             // Not its turn to move, but it is still on screen.
-            a.inst.repaint(stage, archive);
+            a.inst.repaint(stage);
         } else {
             let ended = match a.inst.run_frame(stage, archive) {
                 ttm::Step::Finished => true,
@@ -398,6 +398,73 @@ pub fn advance_scenes(
     }
     active.retain(|a| !finished.contains(&(a.ttm, a.scene)));
     finished
+}
+
+/// Hold the repaint model to its promise, and report anything that broke it.
+///
+/// The port paints the whole picture afresh every tick, so a held frame has
+/// to go back on top of the new backdrop each time. That is only the same
+/// picture the engine would have left standing if putting a frame back (a)
+/// draws exactly what stepping it drew and (b) changes nothing else at all --
+/// no bitmap loaded, no noise made, no clip left over, no draw from the
+/// generator.
+///
+/// Four bugs came from an opcode that quietly broke one half or the other,
+/// and every one of them was found by watching the screensaver rather than by
+/// testing. So this checks it: take the picture a tick finished with, paint
+/// the whole tick again out of the frames' recorded drawings alone, and
+/// compare both the pixels and everything else. Since `Instance::repaint`
+/// only replays resolved marks it should not be *able* to fail -- which is
+/// the point. What the check still catches is a drawing opcode that paints
+/// without recording, so the list stays complete as opcodes are added.
+///
+/// It is a diagnostic rather than part of the engine -- `jcplay` and
+/// `jcisland` switch it on with `JC_CHECK=1`.
+pub fn check_repaint(active: &mut [Active], stage: &mut Stage) -> Vec<String> {
+    let painted = stage.surface.pixels.clone();
+    let stepped = stage.untouched();
+    let cursors: Vec<_> = active.iter().map(|a| a.inst.cursor()).collect();
+
+    stage.restore_background();
+    for a in active.iter_mut() {
+        a.inst.repaint(stage);
+    }
+
+    let mut bad: Vec<String> = stage
+        .untouched()
+        .differences(&stepped)
+        .into_iter()
+        .map(|w| format!("a repaint {w}"))
+        .collect();
+    if stage.surface.pixels != painted {
+        let n = stage
+            .surface
+            .pixels
+            .iter()
+            .zip(&painted)
+            .filter(|(a, b)| a != b)
+            .count();
+        let who: Vec<String> = active
+            .iter()
+            .map(|a| format!("{}/{} x{}", a.ttm, a.scene, a.inst.marks()))
+            .collect();
+        bad.push(format!(
+            "a repaint drew a different picture ({n} pixels), live: {}",
+            who.join(" ")
+        ));
+    }
+    for (a, was) in active.iter().zip(cursors) {
+        if a.inst.cursor() != was {
+            bad.push(format!(
+                "a repaint moved {}/{} on: {:?} -> {:?}",
+                a.ttm,
+                a.scene,
+                was,
+                a.inst.cursor()
+            ));
+        }
+    }
+    bad
 }
 
 /// The wall clock as HHMM. `seg1:0x020F` is the C runtime's `gettime`; this
@@ -530,6 +597,11 @@ pub struct Director {
     /// The wall clock as HHMM, when the host knows it better than this
     /// process does -- `johnny.scr` reads the local time, the tools do not.
     pub hhmm: Option<u16>,
+    /// `JC_CHECK=1`: hold every tick's repaint to its invariant. A diagnostic
+    /// for the tools; see `check_repaint`.
+    checking: bool,
+    /// What that check has complained about, so a run can end with a verdict.
+    pub complaints: Vec<String>,
 }
 
 impl Director {
@@ -572,6 +644,8 @@ impl Director {
             queue_spent: false,
             clock: Clock::Wall { dawn: DEFAULT_DAWN },
             hhmm: None,
+            checking: std::env::var_os("JC_CHECK").is_some(),
+            complaints: Vec::new(),
         }
     }
 
@@ -1416,6 +1490,16 @@ impl Director {
         // reading last pass's answers and would miss half of them.
         self.stage.restore_background();
         advance_scenes(active, seq, &mut self.stage, archive, self.tick);
+
+        // The picture for this tick is complete: everything live has been
+        // painted onto a fresh backdrop. If the repaint model is sound, the
+        // same picture comes back out of the retained frames alone.
+        if self.checking {
+            for what in check_repaint(active, &mut self.stage) {
+                let tick = self.tick;
+                self.complaints.push(format!("[tick {tick}] {what}"));
+            }
+        }
 
         // One pass of the sequencer, not one instruction: `seg10:0x1925`
         // interprets until a `Step` and only then returns, so everything a

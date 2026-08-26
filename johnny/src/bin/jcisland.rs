@@ -154,6 +154,16 @@ fn main() -> ExitCode {
         if d.is_night() { "night" } else { "day" },
         d.position
     );
+    if std::env::var_os("JC_CHECK").is_some() {
+        if d.complaints.is_empty() {
+            println!("repaint check: clean");
+        } else {
+            println!("repaint check: {} complaints", d.complaints.len());
+            for line in d.complaints.iter().take(20) {
+                println!("  {line}");
+            }
+        }
+    }
     if !d.ads_todo.is_empty() {
         println!("ADS opcodes not implemented:");
         for (op, n) in &d.ads_todo {

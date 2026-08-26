@@ -786,13 +786,34 @@ Things the port had to get right that are easy to get wrong:
   are not scenes; they are one `JOHNWALK.BMP` frame drawn and left there. The
   surf repaints the backdrop under him every 64ms, so the port has to draw him
   again after it.
-* **A held frame still has to be painted.** The engine leaves what a frame
-  drew on the screen until something paints over it; scripts save and restore
-  the rectangles they disturb (`4204` and `A064`) rather than the whole
-  picture. This port repaints the backdrop every tick, so it has to repaint
-  the frames on top of it every tick too. Only drawing an instance on the tick
-  its own delay expired put Johnny on screen one tick in seven — a strobe, not
-  an animation.
+* **A held frame still has to be painted, and painting it is not re-running
+  it.** The engine leaves what a frame drew on the screen until something
+  paints over it; scripts save and restore the rectangles they disturb
+  (`4204` and `A064`) rather than the whole picture. This port repaints the
+  backdrop every tick, so it has to put the frames back on top of it every
+  tick too — only drawing an instance on the tick its own delay expired put
+  Johnny on screen one tick in seven, a strobe rather than an animation.
+
+  Running the frame's instructions a second time is the obvious way to do
+  that and it is wrong. Every scene on screen shares one set of sixteen
+  bitmap slots, and slots are loaded and freed from inside frames: 263
+  `LOAD_BITMAP`s and 190 `FREE_SHAPES` in the shipped scripts, every one of
+  them inside a scene rather than in a header, and **sixty-six frames that
+  load or free artwork and also draw with it**. By the time such a frame is
+  painted again the slot it drew from holds something else, or nothing — so
+  it paints the wrong sprite, or none, for as long as the frame is held. Four
+  further bugs came from the same root: a repaint that reloaded a bitmap,
+  replaced the backdrop, made a noise a second time, or drew a delay from the
+  generator.
+
+  So an instance keeps what its frame *drew* rather than where it drew it
+  from: a short list of resolved marks, each with its artwork, its colour and
+  its clip already worked out (`ttm::Paint`). Replaying that cannot touch a
+  slot, cannot load, cannot make a noise and does not need the archive, which
+  makes the invariant true by construction instead of by discipline.
+  `director::check_repaint` still holds it to that every tick under
+  `JC_CHECK=1` — what it catches now is a drawing opcode that paints without
+  recording.
 * **The route block is chosen once, on the pair Johnny set out on.**
   `seg4:0x03AC` indexes a six by six table of blocks and `seg4:0x00EA` scans
   the block it returned for a `-area` marker matching wherever he has got to
