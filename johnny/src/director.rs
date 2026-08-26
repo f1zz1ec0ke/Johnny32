@@ -7,7 +7,7 @@
 //! All of it is read out of `SCRANTIC.EXE` segment 4; see `docs/SCHEDULER.md`
 //! for the write-up and `tables.rs` for the data.
 
-use crate::ads::{Action, Rng, Sequencer};
+use crate::ads::{Action, Repeat, Rng, SceneState, Sequencer};
 use crate::dgds::{self, Archive, Frame};
 use crate::render::Mirror;
 use crate::tables::{self, Scene, WalkStep};
@@ -27,8 +27,37 @@ pub const ISLAND_Y: i32 = 0x117;
 /// The story runs for eleven days and then wraps (`seg4:0x0BC8`).
 pub const STORY_DAYS: u8 = 11;
 
-/// How long one scene may hold the island before the director moves on.
-pub const MAX_SCENE_TICKS: u32 = 240;
+/// One tick, in milliseconds. This is the unit every delay in the data is
+/// counted in, and getting it wrong is the difference between a screensaver
+/// and a slideshow on fast-forward.
+///
+/// `seg2:0x1516` calls the timer setup with 13, and `seg9:0x0781` turns that
+/// into `1000 / (13 * 18)` = 4ms per unit of its software clock. The one
+/// timer the screensaver registers (`seg2:0x1522`) asks for an interval of 4
+/// of those units, so its callback at `seg2:0x16CE` runs every 16ms. That
+/// callback is the whole clock: it bumps the 32-bit tick counter at
+/// `ds:0x2E72` and counts down the five delay slots.
+pub const MS_PER_TICK: u32 = 16;
+
+/// 62.5, rounded. The authors clearly thought in 60ths -- the delays in the
+/// scripts are 60, 120, 180, 240, 360 -- so a tick is near enough a 60th.
+pub const TICKS_PER_SECOND: u32 = 1000 / MS_PER_TICK;
+
+/// Ticks between walk waypoints. `seg4:0x039D` writes 4 into the delay slot at
+/// `ds:0x30D6` after drawing each step of a walk, and `seg4:0x00A3` will not
+/// draw the next one until it reaches zero. 64ms a frame.
+pub const WALK_TICKS_PER_WAYPOINT: u32 = 4;
+
+/// A backstop, not a schedule. Scenes end on their own: the sequence reaches
+/// its `End` and the last scene that can finish does. This catches a script
+/// the port has misread, so a bad scene costs three minutes rather than the
+/// rest of the session.
+///
+/// The scene table's `cost` field is deliberately not used for this. The
+/// chooser compares `cost / 2` against a ceiling when picking (`seg4:0x0D76`),
+/// which makes it a price rather than a duration; what it is a price *in* is
+/// still an open question.
+pub const MAX_SCENE_TICKS: u32 = 180 * TICKS_PER_SECOND;
 
 /// Category masks the chooser is called with, from the four call sites in
 /// segment 4.
@@ -71,6 +100,8 @@ enum Activity {
         step: &'static WalkStep,
         index: usize,
         target: (u8, u8),
+        /// Tick at which the next waypoint is due.
+        next: u32,
     },
     /// Running a scene's ADS sequence.
     Scene {
@@ -78,14 +109,145 @@ enum Activity {
         active: Vec<Active>,
         ends_at: (u8, u8),
         ticks: u32,
+        /// The sequence has reached its `End`. What is still on screen plays
+        /// out; nothing new will start.
+        done: bool,
     },
 }
 
-struct Active {
-    ttm: u16,
-    scene: u16,
-    inst: Instance,
-    wake: u32,
+/// One TTM scene the sequencer has started, and the state the engine keeps
+/// for it at +0x2F of its instance record.
+pub struct Active {
+    pub ttm: u16,
+    pub scene: u16,
+    pub inst: Instance,
+    /// Tick at which this instance's next frame is due.
+    pub wake: u32,
+    /// The run state, which is what the `If` predicates read.
+    pub state: SceneState,
+    /// Passes still owed, for a positive `flags` (the engine's +0x31).
+    pub count: u16,
+    /// Deadline, for a negative `flags` (the engine's +0x33).
+    pub until: u32,
+    /// The scene jumps back to its own start rather than ending: the engine's
+    /// self-loop flag at +0xC, set at `seg10:0x1D9E` by comparing the goto
+    /// target with the scene's own start.
+    pub looping: bool,
+}
+
+impl Active {
+    /// Begin a scene, in whatever repeat mode the sequencer asked for.
+    pub fn start(ttm: u16, scene: u16, inst: Instance, repeat: Repeat, now: u32) -> Active {
+        Active {
+            ttm,
+            scene,
+            inst,
+            wake: now,
+            state: repeat.state(),
+            count: repeat.count(),
+            until: match repeat {
+                Repeat::ForTicks(n) => now + n,
+                _ => 0,
+            },
+            looping: false,
+        }
+    }
+
+    /// The scene's program reached its end. `seg10:0x1D2B` decides what that
+    /// means from the run state, and the answer is never simply "stop":
+    ///
+    /// * queued to play once, it starts over and becomes **running**
+    /// * queued for a count, it starts over until the count runs out
+    /// * queued until a deadline, it starts over until the deadline passes
+    /// * **running**, and only then, it goes idle and is dropped
+    ///
+    /// So a scene played with `flags` of zero runs its program through twice:
+    /// once to get from queued to running, once to finish. That is what makes
+    /// `IF_RUNNING` on the scene you just started ever come true, and every
+    /// script is built on it.
+    pub fn program_ended(&mut self) -> bool {
+        match self.state {
+            SceneState::Queued(1) => {
+                self.state = SceneState::Running;
+                self.restart()
+            }
+            SceneState::Queued(2) if self.count > 0 => {
+                self.count -= 1;
+                self.restart()
+            }
+            SceneState::Queued(2) => {
+                self.state = SceneState::Running;
+                self.restart()
+            }
+            // The deadline is what ends this one; until it passes, keep going.
+            SceneState::Queued(_) => self.restart(),
+            _ => {
+                self.state = SceneState::Idle;
+                false
+            }
+        }
+    }
+
+    fn restart(&mut self) -> bool {
+        if self.inst.seek_scene(self.scene) {
+            true
+        } else {
+            self.state = SceneState::Idle;
+            false
+        }
+    }
+
+    /// `seg10:0x1DEB`: a scene queued until a deadline becomes running once
+    /// that deadline passes, and then ends on its next time round.
+    pub fn check_deadline(&mut self, now: u32) {
+        if self.state == SceneState::Queued(3) && now >= self.until {
+            self.state = SceneState::Running;
+        }
+    }
+}
+
+/// Advance every live scene by one tick and settle the run states.
+///
+/// This is `seg10:0x1C3C`'s loop: walk the instance list, run a frame for each
+/// one that is due, act on the end-of-scene flag, then hand the states back so
+/// the sequencer's `If` predicates see them. Returns the scenes that ended.
+pub fn advance_scenes(
+    active: &mut Vec<Active>,
+    seq: &mut Sequencer,
+    stage: &mut Stage,
+    archive: &Archive,
+    now: u32,
+) -> Vec<(u16, u16)> {
+    let mut finished = Vec::new();
+    for a in active.iter_mut() {
+        if a.wake <= now {
+            let ended = match a.inst.run_frame(stage, archive) {
+                ttm::Step::Finished => true,
+                ttm::Step::Frame(delay) => {
+                    a.wake = now + delay.max(1) as u32;
+                    // The frame carried an `EndScene`, which is how a scene
+                    // says it has reached its end -- it does not stop
+                    // mid-frame, it sets a flag the runner reads afterwards
+                    // (`seg10:0x1D1A`). Every scene in the data ends this way;
+                    // almost none simply run out of instructions.
+                    if a.inst.last_goto == Some(a.scene) {
+                        a.looping = true;
+                    }
+                    a.inst.ended
+                }
+            };
+            if ended && !a.program_ended() {
+                finished.push((a.ttm, a.scene));
+            }
+        }
+        a.check_deadline(now);
+        seq.set_state(a.ttm, a.scene, a.state);
+    }
+    for (t, s) in &finished {
+        seq.set_state(*t, *s, SceneState::Idle);
+    }
+    active.retain(|a| !finished.contains(&(a.ttm, a.scene)));
+    finished
 }
 
 pub struct Director {
@@ -249,6 +411,7 @@ impl Director {
                     step,
                     index: 0,
                     target: scene.from,
+                    next: self.tick,
                 };
                 return;
             }
@@ -282,6 +445,7 @@ impl Director {
             active: Vec::new(),
             ends_at: scene.to,
             ticks: 0,
+            done: false,
         };
     }
 
@@ -340,7 +504,18 @@ impl Director {
                 step,
                 index,
                 target,
+                next,
             } => {
+                // Hold the current waypoint until its turn comes round.
+                if self.tick < next {
+                    self.activity = Activity::Walking {
+                        step,
+                        index,
+                        target,
+                        next,
+                    };
+                    return false;
+                }
                 self.stage.restore_background();
                 if let Some(&(frame, x, y)) = step.path.get(index) {
                     let mirror = Mirror {
@@ -352,6 +527,7 @@ impl Director {
                         step,
                         index: index + 1,
                         target,
+                        next: self.tick + WALK_TICKS_PER_WAYPOINT,
                     };
                     true
                 } else {
@@ -359,11 +535,12 @@ impl Director {
                     // target is further on; the route block is re-entered.
                     self.position = step.lands;
                     if self.position.0 != target.0 {
-                        if let Some(next) = self.next_step(target) {
+                        if let Some(next_step) = self.next_step(target) {
                             self.activity = Activity::Walking {
-                                step: next,
+                                step: next_step,
                                 index: 0,
                                 target,
+                                next: self.tick + WALK_TICKS_PER_WAYPOINT,
                             };
                             return true;
                         }
@@ -377,13 +554,19 @@ impl Director {
                 mut active,
                 ends_at,
                 ticks,
+                mut done,
             } => {
-                let drew = self.run_scene(archive, &mut seq, &mut active);
-                // Scenes loop, so a cap keeps the island moving. The original
-                // ends them by deducting each scene's cost from a time budget;
-                // this stands in for that until the budget is wired up.
+                let drew = self.run_scene(archive, &mut seq, &mut active, &mut done);
+                // Scenes loop, so the budget is what ends them: the original
+                // deducts each scene's cost from a running time allowance.
                 let over_time = ticks > MAX_SCENE_TICKS;
-                if (active.is_empty() && ticks > 2) || over_time {
+                // The sequence has to have run out, and everything it left
+                // running has to have finished. A scene that only loops on
+                // itself never will, and does not count: it is scenery, and
+                // the engine passes over it the same way (`seg10:0x07E3`
+                // skips instances carrying the self-loop flag at +0xC).
+                let settled = active.iter().all(|a| a.looping);
+                if (done && settled) || over_time {
                     if ends_at.0 != 0 {
                         self.position = ends_at;
                     }
@@ -395,6 +578,7 @@ impl Director {
                         active,
                         ends_at,
                         ticks: ticks + 1,
+                        done,
                     };
                 }
                 drew
@@ -426,47 +610,47 @@ impl Director {
         archive: &Archive,
         seq: &mut Sequencer,
         active: &mut Vec<Active>,
+        done: &mut bool,
     ) -> bool {
-        match seq.next_action(&mut self.rng) {
-            Action::Done => {}
-            Action::Wait => {}
-            Action::Play { file, scene } => {
-                let ttm_id = seq
-                    .files
-                    .iter()
-                    .find(|(_, f)| **f == file)
-                    .map(|(id, _)| *id)
-                    .unwrap_or(0);
-                if let Some(program) = self.program(archive, &file) {
-                    let mut inst = Instance::new(program);
-                    if inst.seek_scene(scene) {
-                        active.push(Active {
-                            ttm: ttm_id,
-                            scene,
-                            inst,
-                            wake: self.tick,
-                        });
+        // One pass of the sequencer, not one instruction: `seg10:0x1925`
+        // interprets until a `Step` and only then returns, so everything a
+        // guarded block starts happens on the same tick. The bound is a
+        // backstop against a script that never reaches one.
+        for _ in 0..64 {
+            match seq.next_action(&mut self.rng) {
+                Action::Done => {
+                    *done = true;
+                    break;
+                }
+                Action::Wait => break,
+                Action::Play {
+                    file,
+                    scene,
+                    repeat,
+                } => {
+                    let ttm_id = seq
+                        .files
+                        .iter()
+                        .find(|(_, f)| **f == file)
+                        .map(|(id, _)| *id)
+                        .unwrap_or(0);
+                    if let Some(program) = self.program(archive, &file) {
+                        let mut inst = Instance::new(program);
+                        if inst.seek_scene(scene) {
+                            // Playing a scene that is already going restarts
+                            // it, the way `seg10:0x0BF4` hands back the
+                            // instance it already has rather than making a
+                            // second one.
+                            active.retain(|a| (a.ttm, a.scene) != (ttm_id, scene));
+                            active.push(Active::start(ttm_id, scene, inst, repeat, self.tick));
+                        }
                     }
                 }
             }
         }
 
         self.stage.restore_background();
-        let mut finished = Vec::new();
-        for a in active.iter_mut() {
-            if a.wake > self.tick {
-                continue;
-            }
-            seq.scene_running(a.ttm, a.scene);
-            match a.inst.run_frame(&mut self.stage, archive) {
-                ttm::Step::Finished => finished.push((a.ttm, a.scene)),
-                ttm::Step::Frame(delay) => a.wake = self.tick + delay.max(1) as u32,
-            }
-        }
-        for (t, s) in &finished {
-            seq.scene_finished(*t, *s);
-        }
-        active.retain(|a| !finished.contains(&(a.ttm, a.scene)));
+        advance_scenes(active, seq, &mut self.stage, archive, self.tick);
         self.stage.has_background()
     }
 
@@ -479,6 +663,11 @@ impl Director {
             self.day = if self.day >= STORY_DAYS { 1 } else { self.day + 1 };
             self.note(format!("--- day {} ---", self.day));
         }
+    }
+
+    /// Ticks since the director started; one tick is `MS_PER_TICK`.
+    pub fn ticks(&self) -> u32 {
+        self.tick
     }
 
     pub fn is_night(&self) -> bool {

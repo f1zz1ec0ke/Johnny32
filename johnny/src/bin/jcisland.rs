@@ -48,7 +48,10 @@ fn main() -> ExitCode {
     for _ in 0..ticks {
         let drew = d.tick(&archive);
         while logged < d.log.len() {
-            println!("[tick {frame:5}] {}", d.log[logged]);
+            // Ticks and wall clock, so pacing can be read off the log.
+            let t = d.ticks();
+            let secs = t as f32 * johnny::director::MS_PER_TICK as f32 / 1000.0;
+            println!("[{t:6} {secs:7.1}s] {}", d.log[logged]);
             logged += 1;
         }
         if drew && write_frames {
@@ -68,7 +71,8 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\n{frame} frames, day {}, phase {} ({}), Johnny at {:?}",
+        "\n{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
+        d.ticks() as f32 * johnny::director::MS_PER_TICK as f32 / 1000.0,
         d.day,
         d.phase,
         if d.is_night() { "night" } else { "day" },

@@ -160,19 +160,74 @@ uint16  count
 count * { uint16 id; char name[]; }   // NUL-terminated
 ```
 
-Bytecode in `TT3:` (TTM) and `SCR:` (ADS) is a stream of 16-bit opcodes where
-the low nibble is the operand count and `0x0F` means one inline
-NUL-terminated string padded to a word boundary. Confirmed opcodes:
+`TT3:` (TTM) and `SCR:` (ADS) both hold a stream of 16-bit opcodes, and both
+are compressed — `TT3:` in particular is RLE, which is easy to miss because
+long literal runs leave most of the bytecode readable.
+
+### TTM
+
+The low nibble of the opcode is the operand count, and `0x0F` means one inline
+NUL-terminated string padded to a word boundary. `seg12:0x0461` is the fetch
+loop. Opcodes are looked up in three tables — 47 general (`seg12:0x12BD`), 28
+draw (`seg12:0x03BC`) and 18 in the `Cxxx` family (`seg12:0x00FC`) — each with
+a parallel table of handlers; anything absent is ignored rather than fatal.
+
+All 41 scripts disassemble end to end, 34,781 instructions. The full list is
+in `johnny/src/ttm.rs`, where the opcode enum is exhaustive so a missed one is
+a compile error rather than a silent no-op. The ones worth knowing here:
 
 | Opcode | Operands | Meaning |
 | --- | --- | --- |
-| `F010` | string | load background `.SCR` |
-| `F020` | string | load sprite sheet `.BMP` into the current slot |
-| `F050` | string | load palette `.PAL` |
-| `1050` | 1 | select bitmap slot |
-| `4210` | 4 | rectangle (x, y, w, h) |
-| `A500` | 4 | draw sprite (x, y, frame, slot) |
-| `0FF0` | 0 | end of frame |
+| `0x0FF0` | 0 | end of frame — present what has been drawn and wait |
+| `0x0110` | 0 | end of scene: set `ds:0x4644` and carry on (`seg12:0x0F73`) |
+| `0x1021` | 1 | frame delay, in 16ms ticks |
+| `0x2022` | 2 | frame delay, random in a range |
+| `0x1111` | 1 | scene marker — the id an ADS `PlayScene` names |
+| `0x1201` | 1 | jump to a scene, taken at the next frame boundary |
+| `0xF02F` | string | load a sprite sheet into the current slot |
+| `0xA5x4` | 4 | draw sprite (x, y, frame, slot); `x` is the mirror mode |
 
-**This table is incomplete and the decoder loses sync partway into most
-scripts** — see the "Open" section of `docs/ANALYSIS.md`.
+Three opcodes that look like they should do something do not, in this build:
+`0xC051` is `PLAY_SOUND` (535 call sites, and the screensaver ships no audio),
+and `0xA601` and `0x4214` have empty handlers despite 6,874 call sites between
+them.
+
+### ADS
+
+ADS does **not** use the low-nibble rule. Each handler advances the script
+pointer itself, and the lengths come from a dedicated function at
+`seg10:0x0303` with its own 35-entry table. The opcodes are at `seg10:0x1875`
+with handlers at `0x18CD`.
+
+An `.ADS` record holds numbered sequences. A sequence is a run of guarded
+blocks — a condition, some instructions, a `Step` — and the runner
+(`seg10:0x1925`) interprets until a `Step` and then returns, so one block
+happens per pass. A `Step` is a yield, not a join; what holds a block back is
+the `If` in front of it.
+
+| Opcode | Meaning |
+| --- | --- |
+| `0x2005` | play scene: ttm id, scene id, repeat operand, weight |
+| `0x1510` / `0x1520` | step (yield); `0x1520` also returns from the interpreter |
+| `0x1010`-`0x1080`, `0x1310`-`0x13C1` | conditions on a scene's run state |
+| `0x1420` / `0x1430` | chain the previous condition with OR |
+| `0x3010` ... `0x30FF` | weighted random choice of one enclosed entry |
+| `0x2010` / `0x2015` | stop a scene (state 0) / finish it (state 5) |
+| `0xF010`, `0xFFFF` | end of sequence |
+
+The conditions all read one field — the scene's run state at +0x2F of its
+instance record — and their predicates are at `seg10:0x1351`-`0x13C7`:
+
+| Opcode | True when |
+| --- | --- |
+| `0x1010` / `0x1310` | state 5 (finished) |
+| `0x1020` / `0x1320` | not state 5 |
+| `0x1030` / `0x1330` | never started (+0x2D is zero) |
+| `0x1040` / `0x1340` | started |
+| `0x1050` / `0x1350` | state 4 (running) |
+| `0x1060` / `0x1360` | state 4 or 0 — not waiting its turn |
+| `0x1070` / `0x1370` | state 1, 2 or 3 — queued |
+
+What those states mean, and how the repeat operand drives them, is in
+`docs/SCHEDULER.md` under "How long a scene lasts". It is the part that
+decides pacing, and it is not obvious from the bytecode alone.

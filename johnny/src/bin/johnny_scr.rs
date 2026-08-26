@@ -453,8 +453,8 @@ fn windows_main() {
             colors: [0; 256],
         };
 
-        /// One tick is 4ms, from the original's software timer.
-        const MS_PER_TICK: u32 = 4;
+        /// One tick is 16ms; see `director::MS_PER_TICK`.
+        const MS_PER_TICK: u32 = johnny::director::MS_PER_TICK;
         let mut last = GetTickCount();
         let mut msg: MSG = core::mem::zeroed();
 

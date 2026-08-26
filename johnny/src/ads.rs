@@ -37,8 +37,8 @@ pub enum Cond {
     NotStarted,
     Started,
     Running,
-    Idle,
-    Paused,
+    NotQueued,
+    Queued,
     CountAtMost,
     CountAtLeast,
     VarAtMost,
@@ -54,8 +54,8 @@ impl Cond {
             0x1030 | 0x1330 => Cond::NotStarted,
             0x1040 | 0x1340 => Cond::Started,
             0x1050 | 0x1350 => Cond::Running,
-            0x1060 | 0x1360 => Cond::Idle,
-            0x1070 | 0x1370 => Cond::Paused,
+            0x1060 | 0x1360 => Cond::NotQueued,
+            0x1070 | 0x1370 => Cond::Queued,
             0x1080 | 0x1380 => Cond::CountAtMost,
             0x1390 => Cond::CountAtLeast,
             0x13A0 | 0x13A1 => Cond::VarAtMost,
@@ -85,7 +85,8 @@ pub enum SceneState {
     Queued(u8),
     /// State 4, being advanced by the runner.
     Running,
-    /// State 5.
+    /// State 5. Only `FinishScene` writes this (`seg10:0x0E92`); a scene that
+    /// simply runs out goes back to `Idle` (`seg10:0x1DE2`).
     Finished,
 }
 
@@ -217,11 +218,63 @@ impl Rng {
     }
 }
 
+/// What `PlayScene`'s third operand asks for, from `seg10:0x0DDB`.
+///
+/// The engine keeps it in the scene's run-state field: flags of zero is state
+/// 1, a positive count is state 2 with the count at +0x31, and a negative
+/// value is state 3 with a deadline of `tick + |flags|` at +0x33. When a
+/// scene's program runs off the end, `seg10:0x1D2B` reads that state back to
+/// decide whether to start it again.
+///
+/// The shipped scripts use `-60` through `-1000`, which at the engine's 16ms
+/// tick is one second to sixteen. This is where a scene's length comes from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Repeat {
+    /// Flags 0: run the program through once.
+    Once,
+    /// Flags > 0: run it again this many times.
+    Times(u16),
+    /// Flags < 0: keep running it until this many ticks have passed.
+    ForTicks(u32),
+}
+
+impl Repeat {
+    /// The operand is signed, and the file stores it as a word.
+    pub fn from_flags(flags: u16) -> Repeat {
+        match flags as i16 {
+            0 => Repeat::Once,
+            n if n > 0 => Repeat::Times(n as u16),
+            n => Repeat::ForTicks(n.unsigned_abs() as u32),
+        }
+    }
+
+    /// The run-state the engine writes for this mode.
+    pub fn state(self) -> SceneState {
+        match self {
+            Repeat::Once => SceneState::Queued(1),
+            Repeat::Times(_) => SceneState::Queued(2),
+            Repeat::ForTicks(_) => SceneState::Queued(3),
+        }
+    }
+
+    /// The engine stores one less than the operand (`seg10:0x0DF9`).
+    pub fn count(self) -> u16 {
+        match self {
+            Repeat::Times(n) => n.saturating_sub(1),
+            _ => 0,
+        }
+    }
+}
+
 /// What the sequencer wants next.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     /// Start this scene of this `.TTM` file.
-    Play { file: String, scene: u16 },
+    Play {
+        file: String,
+        scene: u16,
+        repeat: Repeat,
+    },
     /// Wait for the running scene to finish.
     Wait,
     /// The sequence is over.
@@ -292,9 +345,12 @@ impl Sequencer {
             Cond::NotStarted => !known || s == SceneState::Idle,
             Cond::Started => known && s != SceneState::Idle,
             Cond::Running => known && s == SceneState::Running,
-            Cond::Idle => !known || s == SceneState::Running || s == SceneState::Idle,
-            // States 1, 2 and 3 -- queued but not yet advanced.
-            Cond::Paused => known && queued,
+            // `seg10:0x136F`: no record, state 4 or state 0. Not "idle" so
+            // much as "not waiting its turn" -- it is true of a scene that is
+            // playing right now as well as one that has been and gone.
+            Cond::NotQueued => !known || s == SceneState::Running || s == SceneState::Idle,
+            // `seg10:0x1384`: states 1, 2 and 3, queued but not yet advanced.
+            Cond::Queued => known && queued,
             // The counter and story-variable predicates. No shipped script
             // uses them, so there is nothing here to be faithful to yet.
             Cond::CountAtMost
@@ -303,6 +359,18 @@ impl Sequencer {
             | Cond::VarAtLeast
             | Cond::VarEquals => true,
         }
+    }
+
+    /// Has this predicate had its chance yet?
+    ///
+    /// A scene the sequence has just played sits at one of the queued states
+    /// until the runner picks it up, so a predicate about it has not settled.
+    /// Waiting is bounded: the runner moves a queued scene on within a pass or
+    /// two, and once it does the answer is final either way. A scene that was
+    /// never played is `Idle`, which settles immediately -- so the losing arms
+    /// of a random block do not hold anything up.
+    fn settling(&self, cond: Cond, ttm: u16, scene: u16) -> bool {
+        matches!(self.state(ttm, scene), SceneState::Queued(_)) && !self.test(cond, ttm, scene)
     }
 
     /// Skip forward past the end of the current guarded block.
@@ -375,9 +443,16 @@ impl Sequencer {
             match op {
                 Op::Sequence(_) => return Action::Done,
                 Op::End | Op::Stop => return Action::Done,
+                // A step is a yield, not a join. `seg10:0x1925` interprets
+                // instructions until one of these bumps the counter at
+                // `ds:0x460C` and then returns, so a sequence advances by one
+                // block per pass. What holds a block back is the `If` in front
+                // of it, waiting on the state of a scene already playing.
                 Op::Step | Op::StepEnd => return Action::Wait,
                 Op::If { cond, ttm, scene } => {
+                    let guard = self.pc - 1;
                     let mut ok = self.test(cond, ttm, scene);
+                    let mut settling = self.settling(cond, ttm, scene);
                     // A chain continues while the next op is ChainOr.
                     while matches!(self.ops.get(self.pc), Some((_, Op::ChainOr))) {
                         self.pc += 1;
@@ -385,19 +460,34 @@ impl Sequencer {
                         {
                             self.pc += 1;
                             ok |= self.test(cond, ttm, scene);
+                            settling |= self.settling(cond, ttm, scene);
                         }
                     }
-                    if !ok {
-                        self.skip_block();
+                    if ok {
+                        continue;
                     }
+                    if settling {
+                        // Not false so much as not decided yet. Sit on the
+                        // guard and try again next pass: the scripts are
+                        // cascades, each block waiting on the scene the block
+                        // before it started, and a scene takes a pass or two
+                        // to go from queued to running.
+                        self.pc = guard;
+                        return Action::Wait;
+                    }
+                    self.skip_block();
                 }
                 Op::ChainOr => {}
                 Op::RandomBegin => {
                     if let Some(idx) = self.pick_random(rng) {
-                        if let Some((_, Op::PlayScene { ttm, scene, .. })) =
-                            self.ops.get(idx).cloned()
+                        if let Some((
+                            _,
+                            Op::PlayScene {
+                                ttm, scene, flags, ..
+                            },
+                        )) = self.ops.get(idx).cloned()
                         {
-                            if let Some(action) = self.begin(ttm, scene) {
+                            if let Some(action) = self.begin(ttm, scene, flags) {
                                 return action;
                             }
                         }
@@ -410,8 +500,10 @@ impl Sequencer {
                 Op::FinishScene { ttm, scene } => {
                     self.states.insert((ttm, scene), SceneState::Finished);
                 }
-                Op::PlayScene { ttm, scene, .. } => {
-                    if let Some(action) = self.begin(ttm, scene) {
+                Op::PlayScene {
+                    ttm, scene, flags, ..
+                } => {
+                    if let Some(action) = self.begin(ttm, scene, flags) {
                         return action;
                     }
                 }
@@ -425,21 +517,27 @@ impl Sequencer {
         }
     }
 
-    fn begin(&mut self, ttm: u16, scene: u16) -> Option<Action> {
+    fn begin(&mut self, ttm: u16, scene: u16, flags: u16) -> Option<Action> {
         let file = self.files.get(&ttm)?.clone();
-        // Flags 0 means play once, which is all any shipped script uses.
-        self.states.insert((ttm, scene), SceneState::Queued(1));
-        Some(Action::Play { file, scene })
+        let repeat = Repeat::from_flags(flags);
+        self.states.insert((ttm, scene), repeat.state());
+        Some(Action::Play {
+            file,
+            scene,
+            repeat,
+        })
     }
 
-    /// The runner has begun advancing this scene: queued -> running.
-    pub fn scene_running(&mut self, ttm: u16, scene: u16) {
-        self.states.insert((ttm, scene), SceneState::Running);
+    /// The runner owns a scene's run state once it has started it; this is
+    /// how it hands the state back. `seg10:0x1D2B` onwards is the only place
+    /// states 1, 2, 3 and 4 ever change.
+    pub fn set_state(&mut self, ttm: u16, scene: u16, state: SceneState) {
+        self.states.insert((ttm, scene), state);
     }
 
-    /// The scene has been stopped.
-    pub fn scene_finished(&mut self, ttm: u16, scene: u16) {
-        self.states.insert((ttm, scene), SceneState::Finished);
+    /// What the sequence currently believes about a scene.
+    pub fn state_of(&self, ttm: u16, scene: u16) -> SceneState {
+        self.state(ttm, scene)
     }
 }
 

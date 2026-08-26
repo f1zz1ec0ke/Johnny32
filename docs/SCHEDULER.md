@@ -210,6 +210,83 @@ The arc itself, from the `+0x0A` field:
 | 5 | `MARY.ADS` seq 1 | 11 | `JOHNNY.ADS` seq 1 |
 | 6 | `JOHNNY.ADS` seq 3 | | |
 
+## The clock
+
+Everything in the data — animation delays, how long a scene plays, how fast
+Johnny walks — is counted in one unit, and the unit is **16 milliseconds**.
+
+`seg2:0x1516` calls the timer setup at `seg9:0x076A` with 13, and that turns
+into `1000 / (13 * 18)` = 4ms per unit of a software clock (`ds:0x45E0`); the
+18 is the PC's own 18.2Hz tick. There is exactly one timer registered
+(`seg2:0x1522`), asking for an interval of 4 units, so its callback at
+`seg2:0x16CE` runs every 16ms — 62.5 times a second. That callback is the
+whole clock. It does two things:
+
+* bumps the 32-bit tick counter at `ds:0x2E72`
+* counts down five delay slots: `ds:0x30D6`, `ds:0x334E`, `ds:0x0288`,
+  `ds:0x028A` and `ds:0x3F2E`
+
+The authors clearly thought in 60ths of a second. The delays in the scripts
+are 7, 8, 10, 15, 20, 30, 60, 120, 180, 240, 360 — a `SET_DELAY` of 60 is a
+second, of 240 four seconds. `PlayScene`'s durations are -60, -120, -180,
+-240, -300, -360, -1000. At 62.5Hz a 60 is 0.96 seconds, which is near enough
+that nobody would have noticed.
+
+Three consumers of that clock are worth naming:
+
+| What | Where | Rate |
+| --- | --- | --- |
+| Walk, one waypoint | `seg4:0x039D` writes 4 to `ds:0x30D6`, `seg4:0x00A3` waits for zero | 64ms |
+| Ocean, one of three phases | `seg3:0x0E96` writes 4 to `ds:0x0288`, `seg3:0x0E8F` waits | 64ms |
+| Animation frame | `SET_DELAY` into `ds:0x46E8`, armed per instance at `seg10:0x1D02`, gated at `seg10:0x1980` | the delay, in ticks |
+
+The animation gate is worth reading in full, because it is what makes a delay
+mean "between frames" rather than "once": `seg10:0x1980` compares the
+instance's deadline at +0x37 with the tick counter, and when it passes, pushes
+the deadline forward by the delay again before running the frame.
+
+## How long a scene lasts
+
+Nothing in the scene table says. A scene lasts as long as its ADS sequence
+takes, and the sequence is a cascade: each guarded block waits on the state of
+the scene the block before it started.
+
+`PlayScene`'s third operand is the lever. `seg10:0x0DDB` reads it as signed:
+
+| Operand | Run state | Meaning |
+| --- | --- | --- |
+| `0` | 1 | play the program through |
+| `> 0` | 2, count at +0x31 | play it that many times |
+| `< 0` | 3, deadline at +0x33 | keep playing until `tick + \|operand\|` |
+
+The state is then the whole story, and `seg10:0x1D2B` is where it turns:
+
+* a scene reaching the end of its program does **not** stop — state 1 starts
+  it over and becomes **4**, state 2 starts it over until the count runs out,
+  state 3 starts it over until its deadline passes (`seg10:0x1DEB` promotes it
+  to 4 when it does)
+* only a scene already in state **4** stops, going to state **0**
+  (`seg10:0x1DE2`)
+
+So a scene played with an operand of zero runs its program through *twice*:
+once to get from queued to running, once to finish. That is not a quirk to be
+tidied away — it is load-bearing. Every script is a chain of
+`IF_RUNNING(previous) -> play next`, and without that first pass the guard
+would never come true and the chain would never start.
+
+Two more details make the chains work:
+
+* **A scene says when it is done.** TTM opcode `0x0110` is two instructions
+  (`seg12:0x0F73`): set `ds:0x4644` and carry on. The frame still finishes
+  drawing; the runner reads the flag afterwards. All 528 uses of it across the
+  41 scripts are scene terminators — almost no scene simply runs out of
+  instructions.
+* **A scene that jumps back to its own start never ends.** `seg10:0x1D9E`
+  notices (goto target == the scene's start pointer) and sets a self-loop flag
+  at +0xC, and `seg10:0x07E3` passes over instances carrying it. Those are the
+  background layers — a fire, a gull, Johnny standing about — and they must
+  not hold the scene open, or nothing would ever end.
+
 ## In the port
 
 `tools/gen_tables.py` emits these tables as `johnny/src/tables.rs`, so the port
@@ -236,8 +313,10 @@ Two things the port had to get right that are easy to get wrong:
   coordinates should settle it once they are plotted over a background.
 * `seg3:0x1C41`, which the picker hands the chosen entry's mask to.
 * The exact cadence of the outer loop — how often a new scene is requested and
-  what refills the caller's time budget. The port stands in for it with a cap
-  on how long one scene may hold the island.
+  what refills the caller's time budget. Scenes now end on their own, so the
+  port's three-minute cap is a backstop rather than the schedule, but what
+  `cost` is a price *in* is still unanswered: the chooser compares `cost / 2`
+  against a ceiling (`seg4:0x0D76`), which makes it a price, not a duration.
 * How the `OCEAN00/01/02.SCR` and `NIGHT.SCR` screens compose, given they are
   640x480 with transparent regions while the scenes are 640x350.
 * The 42 frames of `BACKGRND.BMP`. The island is assembled from them as Johnny

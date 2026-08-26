@@ -14,24 +14,15 @@
 use johnny::{
     ads::{self, Action},
     dgds::Archive,
+    director::{advance_scenes, Active},
     png, ttm,
 };
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-/// One tick is 4ms. The engine registers a single 4-unit software timer
-/// (`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, Win16's
-/// `GetCurrentTime`, which returns milliseconds.
-const MS_PER_TICK: u32 = 4;
-
-struct Active {
-    ttm: u16,
-    scene: u16,
-    inst: ttm::Instance,
-    /// Tick at which this instance may advance again.
-    wake: u32,
-}
+/// One tick is 16ms; see `director::MS_PER_TICK`.
+const MS_PER_TICK: u32 = johnny::director::MS_PER_TICK;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -112,7 +103,11 @@ fn main() -> ExitCode {
                     }
                 }
                 Action::Wait => {}
-                Action::Play { file, scene } => {
+                Action::Play {
+                    file,
+                    scene,
+                    repeat,
+                } => {
                     let ttm_id = seq
                         .files
                         .iter()
@@ -141,38 +136,21 @@ fn main() -> ExitCode {
                         println!("   (no scene {scene} in {file})");
                         continue;
                     }
-                    println!("[tick {tick:5}] play {file} scene {scene}");
-                    active.push(Active {
-                        ttm: ttm_id,
-                        scene,
-                        inst,
-                        wake: tick,
-                    });
+                    println!("[tick {tick:5}] play {file} scene {scene} {repeat:?}");
+                    active.retain(|a: &Active| (a.ttm, a.scene) != (ttm_id, scene));
+                    active.push(Active::start(ttm_id, scene, inst, repeat, tick));
                     continue;
                 }
             }
         }
 
         // One tick: repaint the background, advance every scene that is due,
-        // and present whatever they composited.
+        // and present whatever they composited. Same runner the director uses,
+        // so what this shows is what the island does.
         stage.restore_background();
-        let mut finished: Vec<(u16, u16)> = Vec::new();
-        for a in active.iter_mut() {
-            if a.wake > tick {
-                continue;
-            }
-            // Advancing a queued scene is what promotes it to running.
-            seq.scene_running(a.ttm, a.scene);
-            match a.inst.run_frame(&mut stage, &archive) {
-                ttm::Step::Finished => finished.push((a.ttm, a.scene)),
-                ttm::Step::Frame(delay) => a.wake = tick + delay.max(1) as u32,
-            }
+        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
+            println!("[tick {tick:5}] scene {scene} finished");
         }
-        for (t, s) in &finished {
-            seq.scene_finished(*t, *s);
-            println!("[tick {tick:5}] scene {s} finished");
-        }
-        active.retain(|a| !finished.contains(&(a.ttm, a.scene)));
 
         if stage.has_background() {
             if write_frames {

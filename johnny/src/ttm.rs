@@ -64,7 +64,12 @@ pub enum Op {
     GotoFrame(u16),
     /// Release the bitmap held in the selected slot.
     FreeShapes,
-    Purge,
+    /// The scene has finished a pass. `seg12:0x0F73` is two instructions --
+    /// set `ds:0x4644` and carry on -- so the frame still finishes drawing;
+    /// it is the ADS runner that reads the flag afterwards (`seg10:0x1D1A`)
+    /// and decides from the repeat mode whether to start the scene again.
+    /// Every scene ends with one: 528 across the 41 scripts.
+    EndScene,
     /// Draw frame `frame` of slot `slot` at `x`,`y`.
     DrawSprite {
         x: i16,
@@ -174,7 +179,7 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         0x1101 | 0x1111 => Op::SceneMarker(a(0) as u16),
         0x1201 => Op::GotoFrame(a(0) as u16),
         0x0080 => Op::FreeShapes,
-        0x0110 => Op::Purge,
+        0x0110 => Op::EndScene,
 
         // The A5xx family is one handler at seg12:0x025B. Operands are
         // x, y, frame, slot, and the mirror mode is (opcode & 0x00F0) >> 4.
@@ -384,6 +389,12 @@ pub struct Instance {
     /// target and it is taken at the frame boundary — which is also what stops
     /// a scene that loops back on itself from spinning inside one call.
     pending_goto: Option<u16>,
+    /// The jump the last frame boundary took, if it took one -- the engine's
+    /// `ds:0x4646`, which `seg10:0x1D84` reads back after each frame.
+    pub last_goto: Option<u16>,
+    /// The frame just run contained an `EndScene`: the engine's `ds:0x4644`,
+    /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
+    pub ended: bool,
 }
 
 impl Instance {
@@ -395,6 +406,8 @@ impl Instance {
             bitmap_slot: 0,
             palette_slot: 0,
             pending_goto: None,
+            last_goto: None,
+            ended: false,
         }
     }
 
@@ -414,6 +427,10 @@ impl Instance {
     /// program that never reaches an `EndFrame` should end the scene, not hang
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
+        // Both of these are per-frame in the engine too: `seg10:0x1CAE` clears
+        // the end flag and `seg12:0x0452` resets the goto target before the
+        // frame runs.
+        self.ended = false;
         let mut budget = 100_000u32;
         loop {
             budget -= 1;
@@ -426,7 +443,8 @@ impl Instance {
             self.pc += 1;
             match op {
                 Op::EndFrame => {
-                    if let Some(target) = self.pending_goto.take() {
+                    self.last_goto = self.pending_goto.take();
+                    if let Some(target) = self.last_goto {
                         if !self.seek_scene(target) {
                             return Step::Finished;
                         }
@@ -513,10 +531,10 @@ impl Instance {
                     }
                 }
                 Op::GotoFrame(n) => self.pending_goto = Some(n),
+                Op::EndScene => self.ended = true,
                 // Markers, no-ops and the not-yet-implemented, all explicit.
                 Op::SceneMarker(_)
                 | Op::SetBackground(_)
-                | Op::Purge
                 | Op::PlaySound(_)
                 | Op::NoOp(_) => {}
                 // Known, named, and not yet drawn. Counted rather than
