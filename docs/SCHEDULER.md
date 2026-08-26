@@ -287,6 +287,101 @@ Two more details make the chains work:
   background layers — a fire, a gull, Johnny standing about — and they must
   not hold the scene open, or nothing would ever end.
 
+## The island itself
+
+The screen is **640x480**. `seg2:0x1483` writes 640 and 480 into `ds:0x2562`
+and `ds:0x2564`, and `seg3:0x01D1` clears a rectangle that size. The scene
+backdrops the animation scripts load are 640x350 and cover the top of it; the
+sea is the full height.
+
+`seg3:0x01E7` builds the picture in three passes.
+
+**The sea.** Before phase 12, one of `OCEAN00/01/02.SCR` at random, from the
+pointer table at `ds:0x0262`. From phase 12, `NIGHT.SCR` at `ds:0x02D3`. All
+four are 640x480.
+
+**The island**, six pieces out of `BACKGRND.BMP`, blitted through the handle
+table at `ds:0x30AC`:
+
+| Frame | Size | At | Drawn at | What |
+| --- | --- | --- | --- | --- |
+| 0 | 280x52 | (289, 279) | `seg3:0x0270` | the island |
+| 1 | 384x69 | (250, 303) | `seg3:0x0293` | sandbar, optional |
+| 2 | 64x30 | (151, 328) | `seg3:0x02B0` | rock, optional |
+| 14 | 104x28 | (397, 279) | `seg3:0x02EA` | scrub |
+| 13 | 24x145 | (443, 148) | `seg3:0x0307` | the palm trunk |
+| 12 | 152x69 | (366, 122) | `seg3:0x0324` | the fronds |
+
+The two optional pieces come and go on a coin flip that is rolled once and
+kept in `ds:0x30C2` (`seg3:0x0226`).
+
+**The surf.** Seven patches of breaking water round the shore, three frames
+each:
+
+| At | Frames | Size | Counter | Set up at |
+| --- | --- | --- | --- | --- |
+| (271, 306) | 3-5 | 72x29 | 0 | `seg3:0x13A0` |
+| (365, 319) | 6-8 | 160x25 | 1 | `seg3:0x13C9` |
+| (519, 303) | 9-11 | 72x32 | 2 | `seg3:0x13F2` |
+| (234, 323) | 30-32 | 120x48 | 0 | `seg3:0x141B` |
+| (368, 356) | 33-35 | 176x28 | 1 | `seg3:0x1444` |
+| (559, 323) | 36-38 | 88x48 | 2 | `seg3:0x146D` |
+| (130, 340) | 39-41 | 104x29 | 0 | `seg3:0x1496` |
+
+Three counters (`ds:0x0282`, `ds:0x0284`, `ds:0x0286`) say which frame each
+patch is showing. They step every 4 ticks — 64ms, from the delay slot at
+`ds:0x0288` — and only one of them moves per step (`seg3:0x0E9C`):
+
+```
+if c0 == c2      { c0 += 1 }
+else if c1 != c0 { c1 += 1 }
+else             { c2 += 1 }
+each wraps 3 -> 0
+```
+
+All three start at 2 (`seg3:0x02C5`). From there it is a nine-step cycle, so
+the shoreline comes back round every 576ms, and because the counters chase
+each other the seven patches never move together.
+
+### The colour that is not there
+
+The three ocean screens are the only artwork in the game that draws with
+index 0, the transparency key — about 10,000 pixels each, in wave-crest
+shapes. What the engine puts there is not yet known, but the shape of the
+answer is:
+
+* every one of `OCEAN00`'s 9,917 index-0 pixels is index 9 in `OCEAN01`, and
+  every neighbouring pixel in its own image is index 9 as well. Whatever goes
+  there is a second shade of open water.
+* it is not a palette trick. The binary imports no `AnimatePalette`, no
+  `SetPaletteEntries`, no `CreatePalette` — the whole GDI import list stops at
+  ordinal 119 apart from the DIB calls.
+* `ISLETEMP.SCR`, which is the same island painted once and frozen, has white
+  and cyan crests in the same water. Filling the key with white does make the
+  oceans read as foam.
+
+The port fills it with index 9 — the water it sits in — which cannot be far
+wrong either way.
+
+### Rolling waves, not yet ported
+
+There is a second wave system, and this one moves. `ds:0x0268`, `ds:0x0270`
+and `ds:0x0278` hold three sequences of `BACKGRND.BMP` frame indices,
+terminated by `0xFF`:
+
+```
+1a 1b 1c 1d 1c 1b 1a ff     frames 26-29, 104x16
+16 17 18 19 18 17 16 ff     frames 22-25, 64x12
+12 13 14 15 14 13 12 ff     frames 18-21, 32x6
+```
+
+Each is a four-frame animation played as a ping-pong, and the three sizes are
+three distances — a wave that grows as it comes in. `seg3:0x06FA` walks one:
+a record holds a position, a cursor into the sequence and a hold count; every
+time the 160ms slot at `ds:0x028A` comes round the position advances by
+`ds:0x0280` and the cursor may step; reaching the `0xFF` retires the wave.
+The spawn positions are still to be read out.
+
 ## In the port
 
 `tools/gen_tables.py` emits these tables as `johnny/src/tables.rs`, so the port
@@ -317,7 +412,8 @@ Two things the port had to get right that are easy to get wrong:
   port's three-minute cap is a backstop rather than the schedule, but what
   `cost` is a price *in* is still unanswered: the chooser compares `cost / 2`
   against a ceiling (`seg4:0x0D76`), which makes it a price, not a duration.
-* How the `OCEAN00/01/02.SCR` and `NIGHT.SCR` screens compose, given they are
-  640x480 with transparent regions while the scenes are 640x350.
-* The 42 frames of `BACKGRND.BMP`. The island is assembled from them as Johnny
-  builds, so which frames are drawn is part of the story state.
+* What the engine draws in the oceans' index-0 crests, and where the rolling
+  waves are spawned — both above, under "The island itself".
+* The rest of the 42 frames of `BACKGRND.BMP`. Six are the island and
+  twenty-one are the surf; the remainder (a raft, a hut, a signal fire) are
+  what Johnny builds, so which of them are drawn is part of the story state.

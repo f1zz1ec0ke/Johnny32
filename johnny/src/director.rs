@@ -10,6 +10,7 @@
 use crate::ads::{Action, Repeat, Rng, SceneState, Sequencer};
 use crate::dgds::{self, Archive, Frame};
 use crate::render::Mirror;
+use crate::scenery::Scenery;
 use crate::tables::{self, Scene, WalkStep};
 use crate::ttm::{self, Instance, Program, Stage};
 use std::collections::HashMap;
@@ -269,6 +270,13 @@ pub struct Director {
     /// JOHNWALK.BMP, decoded once. `FILES.VIN` preloads it, and decoding it
     /// per walk frame is 36 LZW passes a tick.
     walk_frames: Option<Rc<Vec<Frame>>>,
+    /// The sea, the island and the surf. `None` until the first tick loads it.
+    scenery: Option<Scenery>,
+    /// The background generation the island backdrop was written at. While
+    /// the stage still reports it, the island is what is on show and the surf
+    /// may keep repainting it; once a scene loads its own backdrop the number
+    /// moves on and the surf leaves it alone.
+    scenery_gen: u64,
     tick: u32,
     pub log: Vec<String>,
 }
@@ -287,6 +295,8 @@ impl Director {
             activity: Activity::Idle,
             programs: HashMap::new(),
             walk_frames: None,
+            scenery: None,
+            scenery_gen: 0,
             tick: 0,
             log: Vec::new(),
         }
@@ -385,6 +395,15 @@ impl Director {
         // The header before the first scene marker does the loads.
         let mut header = Instance::new(Rc::clone(&p));
         let _ = header.run_frame(&mut self.stage, archive);
+        // Thirty-two of the forty-one scripts load `ISLETEMP.SCR` there, and
+        // it is the island: the same sea, the same horizon, the same palm,
+        // the same ripples -- painted once and frozen. The live one has all
+        // of that and moves, so keep it and let the scene draw over it. The
+        // handful of scripts that load somewhere else (the office, Suzy's
+        // beach) mean it, and those do replace the backdrop.
+        if self.stage.last_screen.as_deref() == Some("ISLETEMP.SCR") {
+            self.restore_island();
+        }
         Some(p)
     }
 
@@ -449,6 +468,34 @@ impl Director {
         };
     }
 
+    /// Move the surf on, and repaint the island if it moved.
+    ///
+    /// Only while the island is still the backdrop on show. A scene that puts
+    /// up its own `.SCR` owns the background until it is over, and the surf
+    /// waits it out rather than flickering underneath.
+    fn step_surf(&mut self) -> bool {
+        let now = self.tick;
+        let Some(scenery) = self.scenery.as_mut() else {
+            return false;
+        };
+        if !scenery.tick(now) || self.stage.background_gen != self.scenery_gen {
+            return false;
+        }
+        let frame = scenery.compose();
+        self.stage.set_background(frame);
+        self.scenery_gen = self.stage.background_gen;
+        true
+    }
+
+    /// Put the island back up after a scene has had the backdrop.
+    fn restore_island(&mut self) {
+        if let Some(scenery) = self.scenery.as_ref() {
+            let frame = scenery.compose();
+            self.stage.set_background(frame);
+            self.scenery_gen = self.stage.background_gen;
+        }
+    }
+
     /// Lay down the island and the palette.
     ///
     /// `seg3:0x01E7` picks the sea: `NIGHT.SCR` once the phase reaches 12,
@@ -467,18 +514,29 @@ impl Director {
                 self.stage.set_palette(p);
             }
         }
-        let base = if self.is_night() {
-            "NIGHT.SCR"
-        } else {
-            "ISLETEMP.SCR"
-        };
-        if let Some(body) = archive.get(base) {
-            if let Ok(f) = dgds::read_screen(body) {
-                self.stage.set_background(f);
+        let roll = self.rng.next_u32();
+        match Scenery::build(archive, self.is_night(), roll, self.tick) {
+            Some(s) => {
+                self.note(format!(
+                    "scenery: {}{}",
+                    s.sea,
+                    if s.extras { " + rock and sandbar" } else { "" }
+                ));
+                self.stage.set_background(s.compose());
+                self.scenery_gen = self.stage.background_gen;
+                self.scenery = Some(s);
+            }
+            None => {
+                // No sea in the archive. Fall back to the backdrop the scenes
+                // load themselves, so the island still appears.
+                if let Some(f) = archive.get("ISLETEMP.SCR").and_then(|b| dgds::read_screen(b).ok())
+                {
+                    self.stage.set_background(f);
+                }
+                self.note("scenery: ISLETEMP.SCR (no sea found)".into());
             }
         }
         self.stage.restore_background();
-        self.note(format!("scenery: {base}"));
     }
 
     /// Advance one tick. Returns true if the surface changed.
@@ -487,7 +545,8 @@ impl Director {
         if !self.stage.has_background() {
             self.load_scenery(archive);
         }
-        match std::mem::replace(&mut self.activity, Activity::Idle) {
+        let surf = self.step_surf();
+        surf | match std::mem::replace(&mut self.activity, Activity::Idle) {
             Activity::Idle => {
                 // Offer the day's story scene first, then an ordinary one.
                 let scene = self
@@ -570,6 +629,7 @@ impl Director {
                     if ends_at.0 != 0 {
                         self.position = ends_at;
                     }
+                    self.restore_island();
                     self.note(format!("scene over, Johnny at {:?}", self.position));
                     self.advance_clock();
                 } else {

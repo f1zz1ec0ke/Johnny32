@@ -11,5 +11,6 @@ pub mod dgds;
 pub mod director;
 pub mod png;
 pub mod render;
+pub mod scenery;
 pub mod tables;
 pub mod ttm;

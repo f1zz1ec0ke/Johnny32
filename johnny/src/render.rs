@@ -8,7 +8,15 @@
 use crate::dgds::Frame;
 
 pub const SCREEN_W: u16 = 640;
-pub const SCREEN_H: u16 = 350;
+/// 480, not the 350 the scene backdrops are drawn at. `seg2:0x1483` writes
+/// 640 and 480 into `ds:0x2562`/`ds:0x2564` and `seg3:0x01D1` clears a
+/// rectangle that size; the sea is 640x480 and the surf round the island
+/// breaks as far down as row 384, so a 350-row screen would cut it off.
+pub const SCREEN_H: u16 = 480;
+
+/// The palette swaps black and magenta so that index 0 is free to be the
+/// transparency key; black ends up at index 5.
+pub const BLACK: u8 = 5;
 
 /// Palette index 0 is transparent in every sprite. The palette puts magenta
 /// there and moves black to index 5, which is what frees index 0 up.
@@ -67,8 +75,15 @@ impl Surface {
         }
     }
 
+    /// A screen-sized surface, cleared to black rather than to index 0.
+    ///
+    /// Index 0 is the transparency key, and the palette puts magenta there --
+    /// fine as a key, alarming as a colour. Anything the backdrop does not
+    /// reach (a scene loading one of the 640x350 screens, say) should be black.
     pub fn screen() -> Self {
-        Surface::new(SCREEN_W, SCREEN_H)
+        let mut s = Surface::new(SCREEN_W, SCREEN_H);
+        s.fill(BLACK);
+        s
     }
 
     pub fn fill(&mut self, index: u8) {

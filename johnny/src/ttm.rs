@@ -271,6 +271,12 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
 pub struct Stage {
     slots: Vec<Vec<Frame>>,
     background: Option<Frame>,
+    /// Bumped every time the background is replaced. The director watches it
+    /// to know whether the island it composed is still the one on show, or
+    /// whether a scene has put its own backdrop up.
+    pub background_gen: u64,
+    /// The `.SCR` the last `LoadScreen` named, if any.
+    pub last_screen: Option<String>,
     palette: [[u8; 3]; 256],
     pub surface: Surface,
     /// Current drawing colours, for the vector opcodes.
@@ -287,6 +293,8 @@ impl Default for Stage {
         Stage {
             slots: (0..16).map(|_| Vec::new()).collect(),
             background: None,
+            background_gen: 0,
+            last_screen: None,
             palette: [[0; 3]; 256],
             surface: Surface::screen(),
             fg: 0,
@@ -313,6 +321,7 @@ impl Stage {
     pub fn set_background(&mut self, frame: Frame) {
         self.surface.draw_background(&frame);
         self.background = Some(frame);
+        self.background_gen += 1;
     }
 
     /// Paint a sprite permanently into the background, the way the island is
@@ -328,6 +337,7 @@ impl Stage {
         bg.pixels = std::mem::replace(&mut self.surface.pixels, saved);
         self.surface.clip = clip;
         self.background = Some(bg);
+        self.background_gen += 1;
     }
 
     /// Repaint the background. Scenes composite over this each tick.
@@ -454,8 +464,8 @@ impl Instance {
                 Op::LoadScreen(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(f) = dgds::read_screen(body) {
-                            stage.surface.draw_background(&f);
-                            stage.background = Some(f);
+                            stage.set_background(f);
+                            stage.last_screen = Some(name);
                         }
                     }
                 }
