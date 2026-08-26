@@ -114,6 +114,13 @@ pub enum Op {
     StopScene { ttm: u16, scene: u16 },
     /// Mark a scene finished (`seg10:0x0E6E` writes state 5).
     FinishScene { ttm: u16, scene: u16 },
+    /// Move a scene in the draw order. `seg10:0x15FB` and `seg10:0x160C`
+    /// both look the scene up (`seg10:0x0BF4`), unlink it from the instance
+    /// list and put it back somewhere else -- so the two are "in front of"
+    /// and "behind". Which is which is not read out yet, and only `0x4000`
+    /// is used at all: four times, in `BUILDING.ADS`, always on the same
+    /// scene. The port leaves the order alone rather than guess.
+    Reorder { opcode: u16, ttm: u16, scene: u16 },
     /// Guards the block that follows, up to the next `Step`.
     If {
         cond: Cond,
@@ -165,6 +172,11 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             // seg10:0x1669 flags the context and clears the script pointer,
             // which ends the running sequence.
             0xF010 => Op::End,
+            0x4000 | 0x4010 => Op::Reorder {
+                opcode: w,
+                ttm: a(0),
+                scene: a(1),
+            },
             0x1510 => Op::Step,
             0x1520 => Op::StepEnd,
             0x3010 => Op::RandomBegin,
@@ -507,7 +519,7 @@ impl Sequencer {
                         return action;
                     }
                 }
-                Op::ContextOp { opcode, .. } => {
+                Op::Reorder { opcode, .. } | Op::ContextOp { opcode, .. } => {
                     *self.todo_seen.entry(opcode).or_insert(0) += 1;
                 }
                 Op::Todo { opcode, .. } => {

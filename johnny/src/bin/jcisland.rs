@@ -52,11 +52,15 @@ fn main() -> ExitCode {
     let mut logged = 0usize;
     let mut waves_max = 0usize;
     let mut waves_total = 0usize;
+    let mut clouds_max = 0usize;
+    let mut glints_max = 0usize;
 
     for _ in 0..ticks {
         let drew = d.tick(&archive);
         waves_max = waves_max.max(d.wave_count());
         waves_total += d.wave_count();
+        clouds_max = clouds_max.max(d.cloud_count());
+        glints_max = glints_max.max(d.glint_count());
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
@@ -81,7 +85,7 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\nwaves: {waves_max} at most, {:.1} on average",
+        "\nwaves: {waves_max} at most, {:.1} on average; clouds: {clouds_max}, glints: {glints_max}",
         waves_total as f32 / ticks.max(1) as f32
     );
     println!(
@@ -92,6 +96,12 @@ fn main() -> ExitCode {
         if d.is_night() { "night" } else { "day" },
         d.position
     );
+    if !d.ads_todo.is_empty() {
+        println!("ADS opcodes not implemented:");
+        for (op, n) in &d.ads_todo {
+            println!("  {op:04X}  x{n}");
+        }
+    }
     if !d.stage.todo_seen.is_empty() {
         println!("TTM opcodes not implemented:");
         for (op, n) in &d.stage.todo_seen {

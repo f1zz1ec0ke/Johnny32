@@ -108,6 +108,13 @@ pub enum Op {
     /// `seg12:0x02F6` into `seg7:0x1510` with the opcode, a rectangle and a
     /// mode. Two of them appear once each in the shipped scripts, so what
     /// each variant draws is not pinned down yet.
+    /// The region family, from the second draw table at `seg12:0x1900`.
+    ///
+    /// Only two of the eight are ever used, and only once each, in
+    /// `GJGULIVR.TTM` with the same rectangle: `A054` (`seg12:0x1747`) writes
+    /// it into the structure at `ds:0x2638`, and `A064` (`seg12:0x1801`)
+    /// walks that structure and draws it back. A save and a restore of one
+    /// piece of screen -- which is what `B606` does the short way.
     RegionOp {
         opcode: u16,
         x: i16,
@@ -118,7 +125,21 @@ pub enum Op {
     /// `B606`: six operands into `seg8:0x06CE` at `seg12:0x0EBE`, with two of
     /// them converted first. A region copy of some kind; four call sites in
     /// the whole corpus.
-    CopyRegion { args: Vec<i16> },
+    /// Copy a rectangle from one page to another: `(x, y, w, h, from, to)`.
+    ///
+    /// `seg12:0x0EB4` resolves the page ids through `seg12:0x14E0` -- 0 is the
+    /// working page, 1 the composite, 2 the island backdrop -- and hands the
+    /// rectangle to the copier at `seg8:0x06CE`. All six uses in the data are
+    /// `(.., 2, 1)`: put a piece of the island back over whatever has been
+    /// drawn on top of it, which is how a scene rubs out what it drew.
+    CopyRegion {
+        x: i16,
+        y: i16,
+        w: i16,
+        h: i16,
+        from: i16,
+        to: i16,
+    },
     /// Accepted by the original interpreter, but its handler does nothing.
     NoOp(u16),
     /// Decoded correctly, not yet implemented here. Carries everything needed
@@ -251,7 +272,14 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
                 h: a(3),
             }
         }
-        0xB606 => Op::CopyRegion { args },
+        0xB606 => Op::CopyRegion {
+            x: a(0),
+            y: a(1),
+            w: a(2),
+            h: a(3),
+            from: a(4),
+            to: a(5),
+        },
 
         other => Op::Todo {
             opcode: other,
@@ -338,6 +366,28 @@ impl Stage {
         self.surface.clip = clip;
         self.background = Some(bg);
         self.background_gen += 1;
+    }
+
+    /// Put one rectangle of the background back, rubbing out whatever has
+    /// been drawn over it. `B606`'s whole job.
+    pub fn restore_region(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let Some(bg) = self.background.take() else {
+            return;
+        };
+        let sw = self.surface.width as i32;
+        let sh = self.surface.height as i32;
+        for row in y.max(0)..(y + h).min(sh).min(bg.height as i32) {
+            let from = x.max(0);
+            let to = (x + w).min(sw).min(bg.width as i32);
+            if to <= from {
+                continue;
+            }
+            let src = row as usize * bg.width as usize;
+            let dst = row as usize * sw as usize;
+            let (a, b) = (from as usize, to as usize);
+            self.surface.pixels[dst + a..dst + b].copy_from_slice(&bg.pixels[src + a..src + b]);
+        }
+        self.background = Some(bg);
     }
 
     /// Repaint the background. Scenes composite over this each tick.
@@ -549,11 +599,39 @@ impl Instance {
                 | Op::NoOp(_) => {}
                 // Known, named, and not yet drawn. Counted rather than
                 // silently skipped so they stay visible.
+                // The record half. Nothing to do: this port repaints the
+                // whole background every tick, so what it saves is never lost.
+                Op::RegionOp { opcode: 0xA054, .. } => {}
+                // The restore half. Put that rectangle of the backdrop back,
+                // the same as `B606`.
+                Op::RegionOp {
+                    opcode: 0xA064,
+                    x,
+                    y,
+                    w,
+                    h,
+                } => stage.restore_region(x as i32, y as i32, w as i32, h as i32),
+                // The other six have no use in any shipped script. Counted, so
+                // that stays true rather than being assumed.
                 Op::RegionOp { opcode, .. } => {
                     *stage.todo_seen.entry(opcode).or_insert(0) += 1;
                 }
-                Op::CopyRegion { .. } => {
-                    *stage.todo_seen.entry(0xB606).or_insert(0) += 1;
+                Op::CopyRegion {
+                    x,
+                    y,
+                    w,
+                    h,
+                    from,
+                    to,
+                } => {
+                    if from == 2 && to == 1 {
+                        stage.restore_region(x as i32, y as i32, w as i32, h as i32);
+                    } else {
+                        // A copy between two pages the port does not keep
+                        // apart. No script does this; count it if one ever
+                        // does rather than quietly doing the wrong thing.
+                        *stage.todo_seen.entry(0xB606).or_insert(0) += 1;
+                    }
                 }
                 Op::Todo { opcode, .. } => {
                     *stage.todo_seen.entry(opcode).or_insert(0) += 1;

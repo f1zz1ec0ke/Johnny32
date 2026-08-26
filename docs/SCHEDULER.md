@@ -463,6 +463,141 @@ against the system clock and divides `100000 * iterations` by the elapsed
 time, twice by ten. On a slow 386 the decorative objects were simply skipped.
 Any machine running this port is over the line, so the port spawns them.
 
+### The sky
+
+Fifteen cloud slots (`ds:0x2E82`), filled from `BACKGRND.BMP` frames 15, 16
+and 17 — three sizes of cloud bank — with a cap on each and a weight in the
+spawn roll (`seg3:0x0AB1`):
+
+| Frame | Size | At most | Weight | Cap at |
+| --- | --- | --- | --- | --- |
+| 15 | 128x36 | 8 | 15% | `ds:0x2E7C` |
+| 16 | 192x57 | 4 | 10% | `ds:0x2E7E` |
+| 17 | 264x76 | 2 | 5% | `ds:0x2E80` |
+
+The roll runs biggest first and falls through to the next size down when that
+one is at its cap (`seg3:0x0AC9`). Clouds go anywhere across the width, in the
+top 139 rows (`seg3:0x0B0C`). Each gets its own speed — `rand() % 5 + 6`
+passes per pixel (`seg3:0x0B2B`) — and when one leaves the screen it is
+retired and its cap given back (`seg3:0x0D19`), so the sky refills behind it.
+
+**The wind is one thing.** `ds:0x0280` is +1 or -1, and `seg3:0x0A59` rolls it
+once when the sky is set up. The clouds drift with it, and so do the waves out
+on the water — they read the same variable. That is why everything on screen
+moves the same way.
+
+### Glints
+
+`seg3:0x07DE` sets the drawing colour to 15 and draws a line from x to x+1: a
+glint is two white pixels. Thirty at a time (`ds:0x2F38`), scattered across a
+band of open water below the horizon — x anywhere, y in 214..249
+(`seg3:0x053C`) — each lasting ten to thirty-nine steps of 160ms.
+
+They take 35% of the spawn roll against 5% for each wave size, so most of what
+that array holds is sparkle. One that lands on the palm is thrown away rather
+than drawn (`seg3:0x055E` tests the trunk, `seg3:0x058A` the fronds) — these
+are reflections, and the palm is not water.
+
+### The raft
+
+The one thing on the island that changes with the story. `MRAFT.BMP` is
+loaded next to `BACKGRND.BMP` at `seg3:0x0179` and kept in `ds:0x30AE`; it
+holds five frames of a raft under construction, 72x39 growing to 128x39.
+
+`seg3:0x1D7E` reads the story day out of `ds:0x2D9C`, takes one off it and
+clamps to 1..5, so there is a raft from the first day, it grows through days
+three to six, and from day six it is finished. It goes at (513, 266), or
+(530, 281) when the rock and sandbar are there (`seg3:0x1DCB`).
+
+One scene turns it off — `MARY.ADS` sequence 5, "JOHNNY LEAVES", the day-eight
+story scene where he sails away on it. The scene animates the raft itself, so
+the backdrop must not also be drawing one.
+
+### What a scene asks of the backdrop
+
+The scene table's 32-bit mask at `+0x0B` is not only a category filter. The
+chooser hands it to `seg3:0x1C41`, which reads more bits out of it:
+
+| Bit | Effect |
+| --- | --- |
+| `0x0010` | clears `ds:0x30B6` |
+| `0x0200` | `ds:0x30C2 = 0` — no rock and no sandbar |
+| `0x0800` | `ds:0x30B4 = 1` |
+| `0x1000` | sets `ds:0x30B2` |
+| `0x2000` | `ds:0x30B4 = 2` — a cutaway: `seg3:0x01C4` clears the whole 640x480 to black instead of drawing a sea, and the scene's own `.SCR` is the picture |
+| `0x4000` | sets `ds:0x30B0` — no raft |
+| `0x010000`-`0x200000` | the island placement bits below |
+
+Passing all ones resets the lot (`seg3:0x1C4B`), which is what puts the island
+back to normal between scenes.
+
+Seventeen of the eighty scenes ask for no rock; four are cutaways — Suzy's
+city, meeting Suzy, the office, and the ending — and one asks for no raft.
+
+### The island is placed at random, and the port does not do it
+
+`seg3:0x1B00` picks the island's position rather than fixing it. It hands
+`seg3:0x14BF` a rectangle — (168, 255) by 111x59 with the rock, (67, 255) by
+226x129 without — and the high bits of the scene mask (`ds:0x30C0`) narrow it
+to a quadrant or replace it outright: bit 21 puts the island at (17, 309), bit
+20 at (289, 299). Everything else in segment 3 is drawn relative to the result,
+and so is Johnny's walking: `seg4:0x02EA` adds `ds:0x30C6`/`ds:0x30C4` to each
+waypoint before blitting him.
+
+The port keeps the island at (289, 279), which is the anchor the offsets are
+all expressed against and the placement `ISLETEMP.SCR` was painted at. The
+reason not to move it is that **the scenes do not follow**: the TTM sprite
+handler at `seg12:0x025B` draws at absolute coordinates, and segment 12 does
+not reference the origin at all — only segments 3 and 4 do. Move the island
+and Johnny acts out his scenes over open water. Whether the original had the
+same problem, or whether something else pins the origin in practice, is not
+settled.
+
+### Waves on the open water
+
+There is a second wave system, and this one comes and goes. `seg3:0x04BD`
+walks an array of twelve-byte object records at `ds:0x2F42`; an empty slot may
+be filled, a live one is moved on.
+
+Three of the four kinds are waves, and each is a four-frame `BACKGRND.BMP`
+animation played as a ping-pong. The sequences live at `ds:0x0268`, `ds:0x0270`
+and `ds:0x0278`, terminated by `0xFF`:
+
+| Kind | Sequence | Frames | Size | On the water at once | Spawns in | Set up at |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `ds:0x0278` | 18-21 | 32x6 | 4 | x -10 +650, y 249 +40 | `seg3:0x05CA` |
+| 2 | `ds:0x0270` | 22-25 | 64x12 | 2 | x -40 +680, y 289 +93 | `seg3:0x0627` |
+| 3 | `ds:0x0268` | 26-29 | 104x16 | 1 | x -70 +710, y 382 +142 | `seg3:0x0682` |
+
+The three sizes are three distances: the small one high and far out, the big
+one low and close. `seg3:0x14BF` picks the spot inside the band, taking the
+sprite's own size off the span so it lands whole, and the caps come from
+`seg3:0x046E`.
+
+A slot is filled by two rolls through the weighted chooser at `seg4:0x1F1B`,
+whose arguments are percentages (it scales each by 655, a hundredth of 65536,
+and walks them against a 16-bit draw). First a flat 35% for the slot to be
+filled at all (`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it
+(`seg3:0x04EE`): 35% a glint, 5% each wave size, 50% nothing after all.
+
+A wave holds each frame for 0, 1 or 2 steps — `seg4:0x1F1B(30, 50)`, so 30%
+one, 50% two, 20% none — and a step is 160ms, from the delay slot at
+`ds:0x028A` (`seg3:0x0A19`). Seven frames later the cursor hits the `0xFF` and
+the wave retires, giving its slot back. So one lasts between about one and
+three and a half seconds.
+
+They barely travel. Each step adds `ds:0x0280` to the x, and that is +1 or -1,
+re-rolled at `seg3:0x0A59` on a straight 50/50. The effect is a crest that
+swells, shimmers and subsides where it is, not one that rolls ashore.
+
+### The speed gate
+
+Nothing in that array spawns unless `ds:0x30BE` is over 100 (`seg3:0x04E4`),
+and `ds:0x30BE` is a **speed index**: `seg2:0x1600` times a calibration loop
+against the system clock and divides `100000 * iterations` by the elapsed
+time, twice by ten. On a slow 386 the decorative objects were simply skipped.
+Any machine running this port is over the line, so the port spawns them.
+
 ### Glints, not yet ported
 
 The fourth kind (spawn at `seg3:0x0515`, update at `seg3:0x07DE`) has a budget
@@ -507,13 +642,9 @@ Two things the port had to get right that are easy to get wrong:
   against a ceiling (`seg4:0x0D76`), which makes it a price, not a duration.
 * What the engine draws in the oceans' index-0 crests, above under "The
   colour that is not there".
-* The glints, above — the page semantics of `seg13:0x007E` are the blocker.
-* Three frames of `BACKGRND.BMP` — 15, 16 and 17, which are clouds. The other
-  thirty-nine are all placed: three island, three palm and scrub, twenty-one
-  surf and twelve rolling wave. Nothing Johnny builds is in that file; the
-  raft is `MRAFT.BMP` and everything else he makes belongs to the scene that
-  makes it.
-* The fifteen-record array at `ds:0x2E82`, which is almost certainly those
-  clouds: `seg3:0x0A77` walks it right after setting the drift direction.
+* ADS `0x4000`: `seg10:0x15FB` unlinks a scene from the instance list and
+  puts it back somewhere else, so it and `0x4010` are "in front of" and
+  "behind". Which is which is not read out. Only `0x4000` is used, four times,
+  in `BUILDING.ADS`, always on the same scene.
 * Whether the island's random placement can be honoured — above, under "The
   island is placed at random".

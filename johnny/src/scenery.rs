@@ -111,6 +111,57 @@ struct Wave {
     left: u16,
 }
 
+/// The clouds, from `seg3:0x0A38`. `BACKGRND.BMP` frames 15, 16 and 17 --
+/// three sizes of cloud bank -- with a cap on how many of each may be in the
+/// sky (`ds:0x2E7C`, `ds:0x2E7E`, `ds:0x2E80`, set to 8, 4 and 2) and the
+/// weight each gets in the spawn roll (`seg3:0x0AB1`).
+const CLOUDS: [(usize, u8, u32); 3] = [
+    // frame, cap, weight
+    (15, 8, 15),
+    (16, 4, 10),
+    (17, 2, 5),
+];
+
+/// Fifteen cloud slots (`seg3:0x0A7A`), placed in the sky: x anywhere across
+/// the screen, y in the top 139 rows (`seg3:0x0B0C`).
+const CLOUD_SLOTS: usize = 15;
+const CLOUD_BAND: (i32, i32, i32, i32) = (0, 1, 640, 139);
+
+/// One cloud drifting. The engine keeps these in the same twelve-byte records
+/// as everything else, in the array at `ds:0x2E82`.
+struct Cloud {
+    kind: usize,
+    x: i32,
+    y: i32,
+    /// Passes between one-pixel moves: `rand() % 5 + 6`, so every cloud
+    /// travels at its own speed (`seg3:0x0B2B`).
+    speed: u16,
+    left: u16,
+}
+
+/// Sunlight on the water. `seg3:0x07DE` sets the drawing colour to 15 and
+/// draws a line from x to x+1: a glint is two white pixels, nothing more.
+///
+/// Thirty at a time (`ds:0x2F38`), each lasting between ten and thirty-nine
+/// steps of 160ms, scattered across a band of open water below the horizon
+/// (`seg3:0x053C` -- x anywhere, y in 214..249).
+const GLINTS: usize = 30;
+const GLINT_BAND: (i32, i32, i32, i32) = (0, 214, 640, 35);
+
+/// A glint that lands on the palm is thrown away rather than drawn -- these
+/// are reflections, and the palm is not water. `seg3:0x055E` tests the trunk,
+/// `seg3:0x058A` the fronds.
+const NOT_WATER: [(i32, i32, i32, i32); 2] = [
+    (0x1BB, 0x094, 0x16, 0x91), // the trunk
+    (0x16E, 0x07A, 0x94, 0x45), // the fronds
+];
+
+struct Glint {
+    x: i32,
+    y: i32,
+    left: u16,
+}
+
 /// Where the raft sits, without and with the rock (`seg3:0x1DCB`).
 const RAFT_AT: [(i32, i32); 2] = [(0x201, 0x10A), (0x212, 0x119)];
 
@@ -168,6 +219,9 @@ pub const NIGHT_SEA: &str = "NIGHT.SCR";
 /// the water they sit in is the one choice that cannot be wrong by much.
 const SEA_KEY_AS: u8 = 9;
 
+/// White. `seg3:0x07DE` is the only place the backdrop sets a draw colour.
+const GLINT_COLOUR: u8 = 15;
+
 /// The backdrop, and enough state to keep the surf moving.
 pub struct Scenery {
     /// Sea and island: everything that does not move, composed once.
@@ -182,7 +236,14 @@ pub struct Scenery {
     /// The waves out on the water, and the tick they next move on.
     waves: Vec<Wave>,
     wave_next: u32,
-    /// Which way the water is drifting this step: `ds:0x0280`, +1 or -1.
+    /// The clouds, and the tick they next move on.
+    clouds: Vec<Cloud>,
+    cloud_next: u32,
+    /// The glints on the water. They share the object array and the 160ms
+    /// step with the waves.
+    glints: Vec<Glint>,
+    /// The wind: `ds:0x0280`, +1 or -1, chosen once when the sky is set up
+    /// (`seg3:0x0A59`) and shared by the clouds and the waves.
     drift: i32,
     pub sea: &'static str,
     pub extras: bool,
@@ -246,12 +307,103 @@ impl Scenery {
             next: now,
             waves: Vec::new(),
             wave_next: now,
+            clouds: Vec::new(),
+            cloud_next: now,
+            glints: Vec::new(),
+            // `seg3:0x0A59` rolls the wind once, here, and everything that
+            // drifts drifts with it.
             drift: 1,
             sea,
             extras: roll / 3 % 2 == 1,
         };
         scenery.rebuild();
         Some(scenery)
+    }
+
+    /// Pick the wind and put some clouds up. `seg3:0x0A38` does both, once,
+    /// when the backdrop is set up -- which is why the waves and the clouds
+    /// always drift the same way as each other.
+    pub fn start_sky(&mut self, rng: &mut Rng) {
+        self.drift = if weighted(rng, &[50]) == 1 { -1 } else { 1 };
+        self.clouds.clear();
+        self.spawn_clouds(rng);
+    }
+
+    /// Walk the empty slots and roll for each. Sparse by design: fifteen slots
+    /// at thirty percent between them is four or five clouds, which is what
+    /// the painted sky in `ISLETEMP.SCR` has.
+    fn spawn_clouds(&mut self, rng: &mut Rng) {
+        for _ in self.clouds.len()..CLOUD_SLOTS {
+            let pick = weighted(rng, &[CLOUDS[2].2, CLOUDS[1].2, CLOUDS[0].2]);
+            if pick == 0 {
+                continue;
+            }
+            // The roll runs biggest first and falls through to the next size
+            // down when that one is at its cap (`seg3:0x0AC9`).
+            for kind in (0..=3 - pick).rev() {
+                if self.count_clouds(kind) >= CLOUDS[kind].1 as usize {
+                    continue;
+                }
+                if let Some(c) = self.spawn_cloud(kind, rng) {
+                    self.clouds.push(c);
+                }
+                break;
+            }
+        }
+    }
+
+    fn count_clouds(&self, kind: usize) -> usize {
+        self.clouds.iter().filter(|c| c.kind == kind).count()
+    }
+
+    fn spawn_cloud(&self, kind: usize, rng: &mut Rng) -> Option<Cloud> {
+        let sprite = self.pieces.get(CLOUDS[kind].0)?;
+        let (bx, by, sx, sy) = CLOUD_BAND;
+        let sx = sx - sprite.width as i32;
+        let sy = sy - sprite.height as i32;
+        if sx < 0 || sy < 0 {
+            return None;
+        }
+        let speed = (rng.next_u32() % 5) as u16 + 6;
+        Some(Cloud {
+            kind,
+            x: bx + span_roll(rng, sx),
+            y: by + span_roll(rng, sy),
+            speed,
+            left: (rng.next_u32() % speed as u32) as u16,
+        })
+    }
+
+    /// Drift the sky along. A cloud moves one pixel every `speed` passes and
+    /// is gone once it has left the screen (`seg3:0x0CF7`); the slot it frees
+    /// is filled again by the next spawn pass.
+    fn step_clouds(&mut self, now: u32, rng: &mut Rng) -> bool {
+        if now < self.cloud_next {
+            return false;
+        }
+        self.cloud_next = now + 1;
+        let drift = self.drift;
+        let mut moved = false;
+        for c in self.clouds.iter_mut() {
+            let due = c.left == 0;
+            c.left = if due { c.speed } else { c.left - 1 };
+            if due {
+                c.x += drift;
+                moved = true;
+            }
+        }
+        let widths: Vec<i32> = CLOUDS
+            .iter()
+            .map(|(f, _, _)| self.pieces.get(*f).map_or(0, |p| p.width as i32))
+            .collect();
+        let before = self.clouds.len();
+        self.clouds
+            .retain(|c| c.x + widths[c.kind] >= 0 && c.x <= SCREEN_W as i32);
+        if self.clouds.len() != before {
+            self.spawn_clouds(rng);
+            moved = true;
+        }
+        moved
     }
 
     /// Lay the island down over the sea again: the pieces, then the raft.
@@ -310,9 +462,9 @@ impl Scenery {
     /// they drive stay out of phase. From `[2, 2, 2]` it runs a nine-step
     /// cycle -- 576ms for the shoreline to come back round.
     pub fn tick(&mut self, now: u32, rng: &mut Rng) -> bool {
-        let waves = self.step_waves(now, rng);
+        let moved = self.step_waves(now, rng) | self.step_clouds(now, rng);
         if now < self.next {
-            return waves;
+            return moved;
         }
         self.next = now + SURF_TICKS;
         let [c0, c1, c2] = self.counters;
@@ -336,6 +488,16 @@ impl Scenery {
         self.waves.len()
     }
 
+    /// How many clouds are in the sky.
+    pub fn cloud_count(&self) -> usize {
+        self.clouds.len()
+    }
+
+    /// How many glints are on the water.
+    pub fn glint_count(&self) -> usize {
+        self.glints.len()
+    }
+
     /// Try to put another wave on the water, then move the ones already there.
     ///
     /// `seg3:0x04BD` walks the object array once per pass. An empty slot gets
@@ -351,18 +513,27 @@ impl Scenery {
         // and divides -- so on a 386 the extra objects were simply skipped.
         // Any machine running this port is over the line.
         if weighted(rng, &[35]) == 1 {
-            // Weights from `seg3:0x04EE`. Choice 1 is the glint, which the
-            // port does not draw; 2, 3 and 4 are the wave sizes.
-            let pick = weighted(rng, &[35, 5, 5, 5]);
-            if (2..=4).contains(&pick) {
-                let kind = pick - 2;
-                let live = self.waves.iter().filter(|w| w.kind == kind).count();
-                if live < KINDS[kind].budget as usize {
-                    if let Some(w) = self.spawn(kind, rng) {
-                        self.waves.push(w);
-                        moved = true;
+            // Weights from `seg3:0x04EE`: a glint, then the three wave sizes.
+            match weighted(rng, &[35, 5, 5, 5]) {
+                1 => {
+                    if self.glints.len() < GLINTS {
+                        if let Some(g) = self.spawn_glint(rng) {
+                            self.glints.push(g);
+                            moved = true;
+                        }
                     }
                 }
+                pick @ 2..=4 => {
+                    let kind = pick - 2;
+                    let live = self.waves.iter().filter(|w| w.kind == kind).count();
+                    if live < KINDS[kind].budget as usize {
+                        if let Some(w) = self.spawn(kind, rng) {
+                            self.waves.push(w);
+                            moved = true;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -370,10 +541,6 @@ impl Scenery {
             return moved;
         }
         self.wave_next = now + WAVE_TICKS;
-        // `ds:0x0280`, which the engine re-rolls every pass: the water drifts
-        // one pixel one way or the other rather than travelling.
-        self.drift = if weighted(rng, &[50]) == 1 { -1 } else { 1 };
-
         let drift = self.drift;
         for w in self.waves.iter_mut() {
             w.x += drift;
@@ -387,7 +554,32 @@ impl Scenery {
         let before = self.waves.len();
         self.waves
             .retain(|w| w.cursor < KINDS[w.kind].sequence.len());
-        moved || self.waves.len() != before
+        let glints_before = self.glints.len();
+        for g in self.glints.iter_mut() {
+            g.left = g.left.saturating_sub(1);
+        }
+        self.glints.retain(|g| g.left > 0);
+        moved || self.waves.len() != before || self.glints.len() != glints_before
+    }
+
+    /// Put a glint somewhere on the water, unless it lands on the palm.
+    fn spawn_glint(&self, rng: &mut Rng) -> Option<Glint> {
+        let (bx, by, sx, sy) = GLINT_BAND;
+        let x = bx + span_roll(rng, sx);
+        let y = by + span_roll(rng, sy);
+        // Two pixels wide, so the test is the point against each rectangle.
+        if NOT_WATER
+            .iter()
+            .any(|&(rx, ry, rw, rh)| x + 1 >= rx && x < rx + rw && y >= ry && y < ry + rh)
+        {
+            return None;
+        }
+        Some(Glint {
+            x,
+            y,
+            // `seg3:0x0524`: ten to thirty-nine steps.
+            left: (rng.next_u32() % 30) as u16 + 10,
+        })
     }
 
     /// Place a new wave inside its band. `seg3:0x14BF` picks the spot, and
@@ -419,6 +611,12 @@ impl Scenery {
     pub fn compose(&self) -> Frame {
         let mut surface = Surface::new(self.base.width, self.base.height);
         surface.draw_background(&self.base);
+        // Clouds first: they are up in the sky, behind everything.
+        for c in self.clouds.iter() {
+            if let Some(f) = self.pieces.get(CLOUDS[c.kind].0) {
+                surface.draw_sprite(f, c.x, c.y, Mirror::default());
+            }
+        }
         for &(x, y, first, counter) in SURF.iter() {
             let frame = first + self.counters[counter] as usize;
             if let Some(f) = self.pieces.get(frame) {
@@ -430,6 +628,9 @@ impl Scenery {
             if let Some(f) = self.pieces.get(frame) {
                 surface.draw_sprite(f, w.x, w.y, Mirror::default());
             }
+        }
+        for g in self.glints.iter() {
+            surface.draw_line(g.x, g.y, g.x + 1, g.y, GLINT_COLOUR);
         }
         Frame {
             width: self.base.width,

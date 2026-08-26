@@ -293,6 +293,9 @@ pub struct Director {
     /// moves on and the surf leaves it alone.
     scenery_gen: u64,
     tick: u32,
+    /// ADS opcodes the sequencer met and does not implement, kept across
+    /// scenes so a long run can say whether any are ever reached.
+    pub ads_todo: std::collections::BTreeMap<u16, usize>,
     pub log: Vec<String>,
 }
 
@@ -314,6 +317,7 @@ impl Director {
             scenery_night: false,
             scenery_gen: 0,
             tick: 0,
+            ads_todo: Default::default(),
             log: Vec::new(),
         }
     }
@@ -568,6 +572,8 @@ impl Director {
                     s.sea,
                     if s.extras { " + rock and sandbar" } else { "" }
                 ));
+                let mut s = s;
+                s.start_sky(&mut self.rng);
                 self.stage.set_background(s.compose());
                 self.scenery_gen = self.stage.background_gen;
                 self.scenery = Some(s);
@@ -685,6 +691,9 @@ impl Director {
                     if ends_at.0 != 0 {
                         self.position = ends_at;
                     }
+                    for (op, n) in seq.todo_seen.iter() {
+                        *self.ads_todo.entry(*op).or_insert(0) += n;
+                    }
                     self.set_backdrop(archive, Backdrop::default());
                     self.restore_island();
                     self.note(format!("scene over, Johnny at {:?}", self.position));
@@ -785,6 +794,16 @@ impl Director {
     /// How many waves are on the open water right now.
     pub fn wave_count(&self) -> usize {
         self.scenery.as_ref().map_or(0, |s| s.wave_count())
+    }
+
+    /// How many clouds are in the sky right now.
+    pub fn cloud_count(&self) -> usize {
+        self.scenery.as_ref().map_or(0, |s| s.cloud_count())
+    }
+
+    /// How many glints are on the water right now.
+    pub fn glint_count(&self) -> usize {
+        self.scenery.as_ref().map_or(0, |s| s.glint_count())
     }
 
     /// Ticks since the director started; one tick is `MS_PER_TICK`.

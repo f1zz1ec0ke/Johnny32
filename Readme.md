@@ -111,6 +111,13 @@ spots in three bands of distance, up to seven at a time. And the raft grows:
 five stages of `MRAFT.BMP` keyed to the story day, hidden on the one scene
 that sails away in it. `JC_DAY=n` on `jcisland` starts on a given day, which
 is the quick way to watch it get built.
+
+Overhead, clouds drift across the sky at their own speeds and are replaced as
+they leave; on the water, thirty two-pixel glints come and go. Everything that
+drifts drifts the same way, because the wind is one variable rolled once when
+the sky is set up. In twenty-one minutes of simulated island — 75,000 frames —
+the only opcode reached that the port does not implement is one ADS draw-order
+op used four times in a single script.
 `docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and

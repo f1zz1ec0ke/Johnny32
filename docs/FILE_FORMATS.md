@@ -186,6 +186,23 @@ a compile error rather than a silent no-op. The ones worth knowing here:
 | `0x1201` | 1 | jump to a scene, taken at the next frame boundary |
 | `0xF02F` | string | load a sprite sheet into the current slot |
 | `0xA5x4` | 4 | draw sprite (x, y, frame, slot); `x` is the mirror mode |
+| `0xB606` | 6 | copy a rectangle between pages: (x, y, w, h, from, to) |
+| `0xA054` / `0xA064` | 4 | save and restore one rectangle of screen |
+
+`0xB606` is worth spelling out, because it is the only one that reaches
+outside the scene. `seg12:0x0EB4` resolves its last two operands through
+`seg12:0x14E0` — page 0 is the working page, 1 the composite, 2 the island
+backdrop segment 3 paints — and hands the rectangle to the copier at
+`seg8:0x06CE`. All six uses in the data are `(.., 2, 1)`: put a piece of the
+island back over whatever has been drawn on it. That is how a scene rubs out
+what it drew, and it is why a port that repaints the whole background every
+frame gets it for free.
+
+`0xA054` and `0xA064` are the same idea the long way round, through the second
+draw table at `seg12:0x1900`. `A054` writes the rectangle into the structure
+at `ds:0x2638`; `A064` walks it and draws it back. Six of that table's eight
+opcodes are never used at all, and these two are used once each, in
+`GJGULIVR.TTM`, with the same rectangle.
 
 Three opcodes that look like they should do something do not, in this build:
 `0xC051` is `PLAY_SOUND` (535 call sites, and the screensaver ships no audio),
@@ -213,6 +230,7 @@ the `If` in front of it.
 | `0x1420` / `0x1430` | chain the previous condition with OR |
 | `0x3010` ... `0x30FF` | weighted random choice of one enclosed entry |
 | `0x2010` / `0x2015` | stop a scene (state 0) / finish it (state 5) |
+| `0x4000` / `0x4010` | move a scene in the draw order (`seg10:0x15FB`) |
 | `0xF010`, `0xFFFF` | end of sequence |
 
 The conditions all read one field — the scene's run state at +0x2F of its
