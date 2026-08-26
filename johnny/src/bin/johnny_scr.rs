@@ -47,6 +47,7 @@ mod win {
     pub const WM_DESTROY: u32 = 0x0002;
     pub const WM_CLOSE: u32 = 0x0010;
     pub const WM_ERASEBKGND: u32 = 0x0014;
+    pub const WM_PAINT: u32 = 0x000F;
     pub const WM_KEYDOWN: u32 = 0x0100;
     pub const WM_SYSKEYDOWN: u32 = 0x0104;
     pub const WM_MOUSEMOVE: u32 = 0x0200;
@@ -62,6 +63,7 @@ mod win {
 
     pub const DIB_RGB_COLORS: u32 = 0;
     pub const SRCCOPY: u32 = 0x00CC_0020;
+    pub const BLACKNESS: u32 = 0x0000_0042;
     pub const COLORONCOLOR: i32 = 3;
 
     /// `MAKEINTRESOURCE(32512)`.
@@ -87,6 +89,7 @@ mod win {
     }
 
     #[repr(C)]
+    #[derive(Copy, Clone)]
     pub struct RECT {
         pub left: i32,
         pub top: i32,
@@ -164,7 +167,17 @@ mod win {
         pub fn SetForegroundWindow(hwnd: HWND) -> i32;
         pub fn SetFocus(hwnd: HWND) -> HWND;
         pub fn IsWindow(hwnd: HWND) -> i32;
+        pub fn EnumDisplayMonitors(
+            dc: HDC,
+            clip: *const RECT,
+            proc: MonitorEnumProc,
+            data: isize,
+        ) -> i32;
     }
+
+    pub type HMONITOR = *mut core::ffi::c_void;
+    pub type MonitorEnumProc =
+        unsafe extern "system" fn(HMONITOR, HDC, *mut RECT, isize) -> i32;
 
     #[link(name = "gdi32")]
     extern "system" {
@@ -184,6 +197,7 @@ mod win {
             rop: u32,
         ) -> i32;
         pub fn SetStretchBltMode(dc: HDC, mode: i32) -> i32;
+        pub fn PatBlt(dc: HDC, x: i32, y: i32, w: i32, h: i32, rop: u32) -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -204,6 +218,40 @@ fn windows_main() {
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use win::*;
 
+    /// Collect one monitor's rectangle. `EnumDisplayMonitors` hands the callback
+    /// an `LPARAM` of our choosing, which is where the `Vec` comes from.
+    unsafe extern "system" fn collect_monitor(
+        _monitor: HMONITOR,
+        _dc: HDC,
+        rect: *mut RECT,
+        data: isize,
+    ) -> i32 {
+        if !rect.is_null() && data != 0 {
+            let out = &mut *(data as *mut Vec<RECT>);
+            out.push(*rect);
+        }
+        1
+    }
+
+    /// The largest `sw` x `sh` rectangle that fits inside `dst`, centred, with the
+    /// proportions kept. Three monitors then get three islands rather than one
+    /// island smeared across all three.
+    fn fit(dst: RECT, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
+        let (w, h) = (dst.right - dst.left, dst.bottom - dst.top);
+        if w <= 0 || h <= 0 || sw <= 0 || sh <= 0 {
+            return (dst.left, dst.top, w.max(0), h.max(0));
+        }
+        // Widest first: if the full width is too tall to fit, go by height.
+        let by_width = w as i64 * sh as i64 / sw as i64;
+        if by_width <= h as i64 {
+            let fh = by_width as i32;
+            (dst.left, dst.top + (h - fh) / 2, w, fh)
+        } else {
+            let fw = (h as i64 * sw as i64 / sh as i64) as i32;
+            (dst.left + (w - fw) / 2, dst.top, fw, h)
+        }
+    }
+
     /// Set by the window procedure when the user wants out.
     static QUIT: AtomicBool = AtomicBool::new(false);
     /// Where the cursor was when we started, so that the spurious
@@ -212,10 +260,20 @@ fn windows_main() {
     static START_X: AtomicI32 = AtomicI32::new(0);
     static START_Y: AtomicI32 = AtomicI32::new(0);
     static IS_PREVIEW: AtomicBool = AtomicBool::new(false);
+    /// The letterbox around each island needs painting. Only when something
+    /// has damaged it: painting it every frame would flicker, since the blit
+    /// that follows covers the island but not the bars.
+    static LETTERBOX: AtomicBool = AtomicBool::new(true);
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         match msg {
             WM_ERASEBKGND => 1, // we paint every frame; do not flicker
+            WM_PAINT => {
+                // Something uncovered us. The next frame repaints the island
+                // anyway; the bars around it have to be asked for.
+                LETTERBOX.store(true, Ordering::Relaxed);
+                DefWindowProcW(hwnd, msg, w, l)
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 0
@@ -429,6 +487,46 @@ fn windows_main() {
             SetFocus(hwnd);
         }
 
+        // Where to draw. The window spans the whole virtual desktop, so
+        // stretching one surface across it distorts the island and splits it
+        // over the bezels. Draw one copy per monitor instead, in that
+        // monitor's own client-relative rectangle.
+        let mut panes: Vec<RECT> = Vec::new();
+        if !preview {
+            let origin = (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+            );
+            let mut screens: Vec<RECT> = Vec::new();
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                collect_monitor,
+                &mut screens as *mut _ as isize,
+            );
+            panes = screens
+                .into_iter()
+                .map(|m| RECT {
+                    left: m.left - origin.0,
+                    top: m.top - origin.1,
+                    right: m.right - origin.0,
+                    bottom: m.bottom - origin.1,
+                })
+                .collect();
+            // Black it out now rather than on the first drawn frame, so the
+            // desktop does not show through the moment the window appears.
+            let dc = GetDC(hwnd);
+            PatBlt(
+                dc,
+                0,
+                0,
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                BLACKNESS,
+            );
+            ReleaseDC(hwnd, dc);
+        }
+
         // ---- engine ------------------------------------------------------
         let seed = GetTickCount() as u64;
         let mut director = Director::new(seed);
@@ -500,29 +598,53 @@ fn windows_main() {
             }
 
             let dc = GetDC(hwnd);
-            let mut r = RECT {
+            let mut client = RECT {
                 left: 0,
                 top: 0,
                 right: 0,
                 bottom: 0,
             };
-            GetClientRect(hwnd, &mut r);
+            GetClientRect(hwnd, &mut client);
+            if LETTERBOX.swap(false, Ordering::Relaxed) {
+                PatBlt(
+                    dc,
+                    0,
+                    0,
+                    client.right - client.left,
+                    client.bottom - client.top,
+                    BLACKNESS,
+                );
+            }
             SetStretchBltMode(dc, COLORONCOLOR);
-            StretchDIBits(
-                dc,
-                0,
-                0,
-                r.right - r.left,
-                r.bottom - r.top,
-                0,
-                0,
+            let (sw, sh) = (
                 johnny::render::SCREEN_W as i32,
                 johnny::render::SCREEN_H as i32,
-                director.stage.surface.pixels.as_ptr() as *const _,
-                &info,
-                DIB_RGB_COLORS,
-                SRCCOPY,
             );
+            // No monitors enumerated (or a preview pane): fall back to the
+            // client area, still keeping the proportions.
+            let targets: &[RECT] = if panes.is_empty() {
+                std::slice::from_ref(&client)
+            } else {
+                &panes
+            };
+            for pane in targets {
+                let (x, y, w, h) = fit(*pane, sw, sh);
+                StretchDIBits(
+                    dc,
+                    x,
+                    y,
+                    w,
+                    h,
+                    0,
+                    0,
+                    sw,
+                    sh,
+                    director.stage.surface.pixels.as_ptr() as *const _,
+                    &info,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
+            }
             ReleaseDC(hwnd, dc);
         }
 

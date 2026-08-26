@@ -111,16 +111,30 @@ cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
 `JC_NOWRITE=1` skips the PNG output. `JC_FAITHFUL=1` restores the 1992
 walk-router bug, for comparing against the original's behaviour.
 
-Timing is settled: the engine registers one 4-unit software timer
-(`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, which is Win16's
-`GetCurrentTime` and returns milliseconds. **One tick is 4 ms**, so a TTM
-`SET_DELAY n` waits 4n ms.
+Timing is settled, and it is not what it first looks like. The engine's
+software clock has a 4 ms unit — `seg2:0x1516` sets it to `1000 / (13 * 18)` —
+but the single timer it registers asks for four of those, so the callback at
+`seg2:0x16CE` runs every **16 ms**, and that callback is the whole clock: it
+bumps the tick counter at `ds:0x2E72` and counts down the five delay slots.
+Every delay in the data is in those 16 ms ticks. The authors thought in 60ths
+of a second — the `SET_DELAY` values are 60, 120, 180, 240, 360 — and at
+62.5 Hz a 60 is 0.96 seconds, close enough that nobody would have noticed.
+
+How long a scene lasts comes out of the ADS run-state machine rather than any
+duration field; `docs/SCHEDULER.md` has the write-up. The short version is
+that reaching the end of a program does not stop a scene, and a scene played
+with a `flags` of zero runs its program through twice — which is exactly what
+makes `IF_RUNNING` on the scene you just started ever come true.
 
 ## Building the screensaver
 
-`johnny_scr` is the Windows shell — `/s` full screen across the whole virtual
-desktop, `/p <HWND>` for the settings-dialog preview, `/c` for the config box.
-It talks to Win32 directly, so the crate still has no dependencies.
+`johnny_scr` is the Windows shell — `/s` full screen, `/p <HWND>` for the
+settings-dialog preview, `/c` for the config box. It talks to Win32 directly,
+so the crate still has no dependencies.
+
+On more than one monitor it covers the whole virtual desktop with a single
+window but draws **one island per screen**, each centred and in proportion,
+rather than stretching a single 640x350 surface across the lot.
 
 On Windows:
 
@@ -135,14 +149,23 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu --bin johnny_scr
 ```
 
+Type-checking the Windows-only code needs no linker at all, which is worth
+knowing when you are developing on Linux — this catches everything short of
+actually running it:
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+cargo check --manifest-path johnny/Cargo.toml --target x86_64-pc-windows-msvc
+```
+
 Rename the result to `Johnny.scr` and put it in `C:\Windows\System32`, with
 `RESOURCE.001` and `RESOURCE.MAP` from your own copy of the original beside it
 — or point `JC_DATA` at the folder holding them.
 
-**This has not been run.** It is written from the disassembly and type-checks
-for `x86_64-pc-windows-gnu`, but the machine it was developed on is a headless
-Linux container with no Windows linker and no display, so nobody has yet seen
-it come up on a real desktop.
+It has been run, on a three-monitor Windows desktop: it comes up, draws the
+island, plays scenes and exits on input. Development happens on a headless
+Linux container, so anything that only shows up on screen is found by running
+it there and reporting back.
 
 ## Layout
 
