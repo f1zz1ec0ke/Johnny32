@@ -147,17 +147,27 @@ python3 tools/oracle.py
   weighted    256 answers, all identical
   phase      2304 answers, all identical
   choose      256 answers, all identical
+  choose2     256 answers, all identical
+  choose4     256 answers, all identical
   queue        16 answers, all identical
+  queue6       16 answers, all identical
   place      1536 answers, all identical
+  adslen     2688 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
-the time-of-day arithmetic exhaustively, the scene chooser, the entire queue
-builder, and where the island gets dropped. A disagreement there is a bug in
-the port with no interpretation involved — which is how the first run found
-that the island's placement rectangle was being narrowed in the one case
-`seg3:0x1B7F` skips the narrowing entirely, pinning the island to a quarter of
-the water it should have had all of.
+the time-of-day arithmetic exhaustively, the scene chooser at three
+categories, the entire queue builder at two times of day, where the island
+gets dropped, and — driving `seg10:0x0303`, the engine's own
+instruction-length function, along every shipped script — where all 2,688 ADS
+instructions begin and end. That last one matters more than its size suggests:
+the whole sequencer is built on a hand-written length table, and a table that
+happens to consume each file exactly is not the same as a correct one.
+
+A disagreement here is a bug in the port with no interpretation involved —
+which is how the first run found that the island's placement rectangle was
+being narrowed in the one case `seg3:0x1B7F` skips the narrowing entirely,
+pinning the island to a quarter of the water it should have had all of.
 
 Porting the engine's own generator is what made this possible. It is a
 fifty-six entry additive lagged Fibonacci with a constant table in the data

@@ -37,6 +37,8 @@ STORY_FLAG = 0x30EE
 LAYOUT = 0x30C2          # the rock-and-sandbar coin
 ISLAND_X = 0x30C6        # where seg3:0x1B00 leaves the island
 ISLAND_Y = 0x30C4
+SCRATCH = 0x8000         # free space in the data segment for a script
+CTX = 0x7000             # a scratch context; only its end pointer is read
 
 
 def port(*args):
@@ -150,6 +152,58 @@ def q_place(n=64):
     return out
 
 
+def q_adslen():
+    """seg10:0x0303, walked over every shipped script.
+
+    The engine's own instruction-length function, driven along each script
+    from the top. If the port and the binary agree on where every instruction
+    begins, the whole ADS decoder rests on something checked rather than on a
+    hand-written table that happens to consume each file exactly.
+
+    The function bounds-checks against the context's end pointer, so a scratch
+    context is put up with that one field filled in.
+    """
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    order = ['ACTIVITY.ADS', 'BUILDING.ADS', 'FISHING.ADS', 'JOHNNY.ADS',
+             'MARY.ADS', 'MISCGAG.ADS', 'STAND.ADS', 'SUZY.ADS',
+             'VISITOR.ADS', 'WALKSTUF.ADS']
+    bodies = dict((n, b) for n, b, _ in recs)
+    out = []
+    for name in order:
+        body = bodies.get(name)
+        if body is None:
+            continue
+        code = None
+        for ch in dgds.parse_chunks(body):
+            if ch[0] != 'ADS:':
+                continue
+            for c2 in dgds.parse_chunks(ch[1]):
+                if c2[0] == 'SCR:':
+                    try:
+                        code = dgds.decompress(c2[1])
+                    except Exception:
+                        code = c2[1]
+        if not code:
+            continue
+        m = fresh()
+        base = m._lin(m.ds, SCRATCH)
+        m.mem[base:base + len(code)] = code
+        m.write16(m.ds, CTX + 8, SCRATCH + len(code))
+        m.write16(m.ds, 0x2608, 0)
+        m.write16(m.ds, 0x460E, CTX)
+        m.write16(m.ds, 0x4610, m.ds)
+        p = SCRATCH
+        while p < SCRATCH + len(code):
+            op = m.read16(m.ds, p)
+            nxt = m.call(10, 0x0303, [p, m.ds])
+            if not nxt:
+                break
+            out.append('adslen %s %d %04X %d' % (name, p - SCRATCH, op, nxt - p))
+            p = nxt
+    return out
+
+
 QUERIES = {
     'rand': (q_rand, lambda: port('rand', 256)),
     'weighted': (q_weighted, lambda: port('weighted', '10,20,30,20,10,10', 256)),
@@ -160,6 +214,7 @@ QUERIES = {
     'queue': (q_queue, lambda: port('queue', 0, 16)),
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
+    'adslen': (q_adslen, lambda: port('adslen')),
 }
 
 

@@ -95,6 +95,30 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Where every instruction of every shipped script begins and ends,
+        // which is the foundation the rest of the ADS work stands on.
+        "adslen" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            for (_, name) in tables::ADS_FILES {
+                let Some(body) = archive.get(name) else { continue };
+                let Some(scr) = johnny::dgds::leaf(body, b"SCR:") else { continue };
+                let Ok(code) = johnny::dgds::decompress(scr.payload) else { continue };
+                let (ops, _) = johnny::ads::decode(&code);
+                for (off, _) in &ops {
+                    let raw = u16::from_le_bytes([code[*off], code[*off + 1]]);
+                    println!("adslen {name} {off} {raw:04X} {}", johnny::ads::length(raw));
+                }
+            }
+        }
         _ => {
             eprintln!("usage: jcoracle rand|weighted|phase|choose ...");
             return ExitCode::FAILURE;
