@@ -181,6 +181,18 @@ struct Glint {
 /// Where the raft sits, without and with the rock (`seg3:0x1DCB`).
 const RAFT_AT: [(i32, i32); 2] = [(0x201, 0x10A), (0x212, 0x119)];
 
+/// `HOLIDAY.BMP` over the island: which frame, and where, for each of the four
+/// calendar specials. `seg3:0x1E87` indexes a jump table at `cs:0x1F67` by
+/// `holiday - 1` and each arm picks its own frame out of `ds:0x30AA`, so the
+/// frames are not in holiday order. The sizes in the code are the rectangle
+/// the redraw test uses and run a few pixels past the sprite.
+pub const HOLIDAY_AT: [(usize, i32, i32); 4] = [
+    (0, 0x19B, 0x12A), // Halloween, 40x34
+    (2, 0x195, 0x10B), // Christmas, 56x65
+    (3, 0x16A, 0x09B), // New Year, 152x47
+    (1, 0x14E, 0x11E), // St Patrick's, 120x47
+];
+
 /// The two places a scene can nail the island to, rather than let it roam:
 /// hard left and low (`seg3:0x1B41`), or the middle at the front
 /// (`seg3:0x1B24`). Indexed by the state bit that asks for them, 1 then 2.
@@ -353,6 +365,9 @@ pub struct Scenery {
     /// The sea and nothing else, so the island can be laid down again when the
     /// story changes without decoding the screen a second time.
     sea_only: Frame,
+    /// `HOLIDAY.BMP`, and which of its four decorations is up.
+    decoration: Vec<Frame>,
+    holiday: Option<usize>,
     /// How far the island has wandered from its nominal anchor, in pixels.
     /// `ds:0x30C6`/`ds:0x30C4`, after `seg3:0x0236` has taken the anchor off
     /// them. Everything that belongs to the island moves with it.
@@ -393,6 +408,12 @@ impl Scenery {
             .unwrap_or_default();
         // The raft is its own file, loaded next to the island at
         // `seg3:0x0179` and kept in `ds:0x30AE`.
+        // `seg3:0x0179` loads this next to the island artwork and keeps it in
+        // `ds:0x30AA`.
+        let decoration = archive
+            .get("HOLIDAY.BMP")
+            .and_then(|b| dgds::read_bitmap(b).ok())
+            .unwrap_or_default();
         let raft = archive
             .get("MRAFT.BMP")
             .and_then(|b| dgds::read_bitmap(b).ok())
@@ -402,6 +423,8 @@ impl Scenery {
             base: sea_only.clone(),
             sea_only,
             pieces,
+            decoration,
+            holiday: None,
             raft,
             day,
             backdrop: Backdrop::default(),
@@ -611,6 +634,16 @@ impl Scenery {
                     surface.draw_sprite(f, x, y, Mirror::default());
                 }
             }
+            // `seg3:0x1E50` puts the day's decoration on last, unless a scene
+            // asked for a clean island.
+            if let Some(h) = self.holiday.filter(|_| !self.backdrop.no_holiday) {
+                if let Some(&(frame, x, y)) = HOLIDAY_AT.get(h) {
+                    if let Some(f) = self.decoration.get(frame) {
+                        let (x, y) = self.at(x, y);
+                        surface.draw_sprite(f, x, y, Mirror::default());
+                    }
+                }
+            }
         } else {
             // `seg3:0x01C4` clears the whole 640x480 to colour 5 rather than
             // drawing a sea at all.
@@ -621,10 +654,17 @@ impl Scenery {
 
     /// The story moved on, or a scene wants the island a particular way.
     /// Returns whether anything actually changed.
-    pub fn set_story(&mut self, archive: &Archive, day: u8, backdrop: Backdrop) -> bool {
-        if self.day == day && self.backdrop == backdrop {
+    pub fn set_story(
+        &mut self,
+        archive: &Archive,
+        day: u8,
+        backdrop: Backdrop,
+        holiday: Option<usize>,
+    ) -> bool {
+        if self.day == day && self.backdrop == backdrop && self.holiday == holiday {
             return false;
         }
+        self.holiday = holiday;
         if raft_frame(day) != raft_frame(self.day) {
             self.raft = archive
                 .get("MRAFT.BMP")

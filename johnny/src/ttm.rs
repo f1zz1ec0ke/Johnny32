@@ -289,6 +289,24 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
     }
 }
 
+/// Why a frame's instructions are being run.
+///
+/// The engine leaves what a frame drew on the screen until something paints
+/// over it, so it only ever runs a frame once. This port repaints the backdrop
+/// every tick and so has to paint the frames on top again -- but *only* the
+/// painting. All 263 of the `LOAD_BITMAP`s in the shipped scripts are inside
+/// scenes rather than in a header, along with 190 `FREE_SHAPES`, and running
+/// those on every repaint means decoding artwork sixty times a second and
+/// throwing it away -- plus five `LOAD_SCREEN`s that would replace the whole
+/// backdrop under everything else.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Pass {
+    /// The frame's turn has come: run all of it.
+    Step,
+    /// Put the same frame back on a freshly repainted backdrop.
+    Repaint,
+}
+
 /// The resources a set of concurrently running scenes share: the loaded
 /// bitmap slots, the palette, the background and the surface they paint on.
 ///
@@ -512,12 +530,8 @@ impl Instance {
     /// not a step.
     pub fn repaint(&mut self, stage: &mut Stage, archive: &Archive) {
         let (pc, delay, ended, goto) = (self.pc, self.delay, self.ended, self.pending_goto);
-        // A repaint is not a step, so it does not make a noise either: the
-        // frame's `PlaySound` already fired on the pass that ran it.
-        let quiet = stage.sounds.len();
         self.pc = self.frame_start;
-        let _ = self.run_ops(stage, archive);
-        stage.sounds.truncate(quiet);
+        let _ = self.run_ops(stage, archive, Pass::Repaint);
         self.pc = pc;
         self.delay = delay;
         self.ended = ended;
@@ -541,10 +555,10 @@ impl Instance {
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
         self.frame_start = self.pc;
-        self.run_ops(stage, archive)
+        self.run_ops(stage, archive, Pass::Step)
     }
 
-    fn run_ops(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
+    fn run_ops(&mut self, stage: &mut Stage, archive: &Archive, pass: Pass) -> Step {
         // Both of these are per-frame in the engine too: `seg10:0x1CAE` clears
         // the end flag and `seg12:0x0452` resets the goto target before the
         // frame runs.
@@ -569,6 +583,16 @@ impl Instance {
                     }
                     return Step::Frame(self.delay);
                 }
+                // These happen once, when the frame is stepped. A repaint
+                // puts the same picture up again; it must not reload the
+                // artwork under it, and certainly must not put a whole new
+                // backdrop up or make the noise a second time.
+                Op::LoadScreen(_)
+                | Op::LoadBitmap(_)
+                | Op::LoadPalette(_)
+                | Op::FreeShapes
+                | Op::PlaySound(_)
+                    if pass == Pass::Repaint => {}
                 Op::LoadScreen(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(f) = dgds::read_screen(body) {

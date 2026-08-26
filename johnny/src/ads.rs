@@ -589,22 +589,30 @@ impl Sequencer {
     /// steal its terminator. `BUILDING.ADS` builds its fire out of exactly
     /// that shape, and a skipper that stops at the first `Step` it sees leaves
     /// the sequence stuck for good.
-    fn skip_block(&mut self) {
+    /// Returns true if it stopped on the end of the sequence rather than on a
+    /// `Step`. The caller has to know: the end is left under the cursor for
+    /// the main loop to act on, and a nested skip that hits it must hand that
+    /// straight back up rather than let the level above re-read the condition
+    /// it came from and start again.
+    fn skip_block(&mut self) -> bool {
         while let Some((_, op)) = self.ops.get(self.pc).cloned() {
             self.pc += 1;
             match op {
-                Op::Step | Op::StepEnd => return,
+                Op::Step | Op::StepEnd => return false,
                 Op::End | Op::Sequence(_) => {
                     self.pc -= 1;
-                    return;
+                    return true;
                 }
                 Op::If { .. } => {
                     self.skip_chain();
-                    self.skip_block();
+                    if self.skip_block() {
+                        return true;
+                    }
                 }
                 _ => {}
             }
         }
+        true
     }
 
     /// Step over the `And`/`Or` links after a condition, and the predicates

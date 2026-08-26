@@ -119,6 +119,17 @@ const UNPRICED: i32 = 0x3E7;
 const IDLE_SPAN: u32 = 0xF0;
 const IDLE_LEAST: u32 = 0xB4;
 
+/// How long the title card stays up.
+///
+/// `seg2:0x14F0` puts `INTRO.SCR` on the screen and then gets on with the
+/// loading -- `seg3:0x0136` for the backdrop, `seg4:0x0000` for the walk
+/// sprites, `seg10:0x0000`, `seg5:0x0000` for the sounds -- and the island
+/// replaces it whenever that finishes. On a 386 decoding a hundred-odd LZW
+/// bitmaps that was a few seconds; here it is a few milliseconds, so the card
+/// needs a length of its own or nobody would ever see it. `JC_INTRO` is that
+/// length in ticks, and 0 skips it.
+pub const INTRO_TICKS: u32 = 2 * 62;
+
 /// The dawn the config dialog starts at (`ds:0x00BE`), as HHMM. Segment 2
 /// writes this from the spinner in Screen Antics' settings.
 pub const DEFAULT_DAWN: u16 = 900;
@@ -163,6 +174,17 @@ pub enum Holiday {
 }
 
 impl Holiday {
+    /// Its place in `scenery::HOLIDAY_AT`, which is the order `ds:0x30BC`
+    /// numbers them in.
+    pub fn index(self) -> usize {
+        match self {
+            Holiday::Halloween => 0,
+            Holiday::Christmas => 1,
+            Holiday::NewYear => 2,
+            Holiday::StPatricks => 3,
+        }
+    }
+
     pub fn for_date(month: u8, day: u8) -> Option<Holiday> {
         match (month, day) {
             (10, 29..=31) => Some(Holiday::Halloween),
@@ -177,6 +199,8 @@ impl Holiday {
 /// What Johnny is doing right now.
 enum Activity {
     Idle,
+    /// The title card, up while the island is got ready.
+    Intro { until: u32 },
     /// Standing about, for one of the table's script-less entries.
     Idling { until: u32 },
     /// Following one walk path towards `target`.
@@ -241,6 +265,27 @@ impl Active {
             },
             looping: false,
         }
+    }
+
+    /// Play this scene again while it is already on screen.
+    ///
+    /// `seg10:0x0DB6` looks for an instance of this scene first
+    /// (`seg10:0x0BF4` walks the list), and when it finds one it writes only
+    /// the run state and the repeat count -- the program pointer is left
+    /// exactly where it was. So a second `PlayScene` on a scene that is
+    /// already going re-arms it; it does not rewind it.
+    ///
+    /// Rewinding instead is quietly awful: a rule that fires on several
+    /// passes running restarts the animation every 16ms, so it plays its
+    /// first frame over and over, never reaches its end, and never lets the
+    /// scene that is waiting on it start.
+    pub fn rearm(&mut self, repeat: Repeat, now: u32) {
+        self.state = repeat.state();
+        self.count = repeat.count();
+        self.until = match repeat {
+            Repeat::ForTicks(n) => now + n,
+            _ => 0,
+        };
     }
 
     /// Does the runner advance this instance at all?
@@ -375,6 +420,34 @@ pub fn today() -> u32 {
     (since_epoch() / 86_400) as u32
 }
 
+/// A calendar date to days since the epoch, so a test can ask for a holiday.
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> u32 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as u32
+}
+
+/// Days since the epoch back to a calendar month and day, which is what the
+/// holiday check wants (`seg4:0x0560` reads them out of the C runtime's
+/// `getdate`). The usual civil-from-days arithmetic, shifted to a March-based
+/// year so the leap day falls at the end.
+pub fn month_and_day(days: u32) -> (u8, u8) {
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let _ = era;
+    (month, day)
+}
+
 /// Two table rows are the same row. The engine compares the pointers it
 /// stored in `ds:0x30E8` and `ds:0x30EA`; so does this.
 fn same(a: Option<&'static Scene>, b: &'static Scene) -> bool {
@@ -470,7 +543,12 @@ impl Director {
             faithful_router: false,
             rng: Rng::new(seed),
             stage: Stage::new(),
-            activity: Activity::Idle,
+            activity: Activity::Intro {
+                until: std::env::var("JC_INTRO")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(INTRO_TICKS),
+            },
             programs: HashMap::new(),
             walk_frames: None,
             standing: None,
@@ -807,6 +885,9 @@ impl Director {
     /// (`seg4:0x0540`).
     fn next_queue(&mut self, archive: &Archive) {
         self.advance_phase();
+        // `seg4:0x05B5` checks the calendar every time it builds a queue.
+        let (month, day) = month_and_day(self.date);
+        self.holiday = Holiday::for_date(month, day);
         // `seg3:0x1C41(-1, -1)`: the island forgets what the last queue
         // wanted before the next one starts asking.
         self.island_state = scenery::ANYWHERE;
@@ -1052,7 +1133,7 @@ impl Director {
         match Scenery::build(archive, self.scenery_night, roll, self.tick, self.day) {
             Some(s) => {
                 let mut s = s;
-                s.set_story(archive, self.day, self.backdrop);
+                s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
                 s.start_sky(&mut self.rng);
                 // `seg3:0x0233`: the island is dropped where this queue's
                 // scenes are willing to have it, and everything drawn against
@@ -1112,6 +1193,37 @@ impl Director {
                     }
                 }
                 false
+            }
+            Activity::Intro { until } => {
+                if self.tick > until {
+                    return surf;
+                }
+                self.activity = Activity::Intro { until };
+                // Put it up once; the surf is not running yet, so it stays.
+                if self.tick > 1 {
+                    return false;
+                }
+                match archive
+                    .get("INTRO.SCR")
+                    .and_then(|b| dgds::read_screen(b).ok())
+                {
+                    Some(f) => {
+                        if let Some(p) = archive
+                            .get("JOHNCAST.PAL")
+                            .and_then(|b| dgds::read_palette(b).ok())
+                        {
+                            self.stage.set_palette(p);
+                        }
+                        self.stage.set_background(f);
+                        self.stage.restore_background();
+                        self.note("title card".into());
+                        true
+                    }
+                    None => {
+                        self.activity = Activity::Idle;
+                        false
+                    }
+                }
             }
             Activity::Idling { until } => {
                 if self.tick < until {
@@ -1220,7 +1332,10 @@ impl Director {
         };
         // Between scenes Johnny is a single walk frame standing still, and
         // the backdrop under him has just been repainted.
-        if !matches!(self.activity, Activity::Scene { .. }) {
+        if !matches!(
+            self.activity,
+            Activity::Scene { .. } | Activity::Intro { .. }
+        ) {
             self.redraw_standing(archive);
         }
         surf | acted
@@ -1313,14 +1428,17 @@ impl Director {
                     if std::env::var_os("JC_TRACE").is_some() {
                         self.note(format!("  play {file} scene {scene} {repeat:?}"));
                     }
+                    // Already on screen: re-arm it where it stands.
+                    if let Some(a) = active
+                        .iter_mut()
+                        .find(|a| (a.ttm, a.scene) == (ttm_id, scene))
+                    {
+                        a.rearm(repeat, self.tick);
+                        continue;
+                    }
                     if let Some(program) = self.program(archive, &file) {
                         let mut inst = Instance::new(program);
                         if inst.seek_scene(scene) {
-                            // Playing a scene that is already going restarts
-                            // it, the way `seg10:0x0BF4` hands back the
-                            // instance it already has rather than making a
-                            // second one.
-                            active.retain(|a| (a.ttm, a.scene) != (ttm_id, scene));
                             active.push(Active::start(ttm_id, scene, inst, repeat, self.tick));
                         }
                     }
@@ -1401,6 +1519,21 @@ impl Director {
         }
         self.story_state = 0;
         self.queue_spent = false;
+    }
+
+    /// Forget which calendar day the story last moved on, so a test that
+    /// jumps the date does not look like it has been running since then.
+    pub fn story_date_reset(&mut self) {
+        self.story_date = None;
+    }
+
+    /// How many TTM scenes are on screen at once. A scene that keeps its
+    /// instances alive for ever is the shape of a stall, so the tools watch it.
+    pub fn active_count(&self) -> usize {
+        match &self.activity {
+            Activity::Scene { active, .. } => active.len(),
+            _ => 0,
+        }
     }
 
     /// Sound ids the last tick asked for, taken off the stage.

@@ -841,6 +841,32 @@ easy to read wrongly: the rule-set model, `1350` meaning "has just ended",
 `1420` and `1430` being AND and OR, how blocks nest, and how random blocks are
 weighed.
 
+## The decorations, and the title card
+
+`seg3:0x1E50` draws `HOLIDAY.BMP` over the island when `ds:0x30BC` is not zero,
+unless the queue asked for a clean island (`ds:0x30B6`) or the scene is a
+cutaway. `seg3:0x1E87` indexes a jump table at `cs:0x1F67` by `holiday - 1`,
+and each arm picks its own frame — they are not in holiday order:
+
+| Holiday | `HOLIDAY.BMP` frame | Where | Size |
+| --- | --- | --- | --- |
+| Halloween | 0 | (0x19B, 0x12A) | 40x34 |
+| Christmas | 2 | (0x195, 0x10B) | 56x65 |
+| New Year | 3 | (0x16A, 0x09B) | 152x47 |
+| St Patrick's | 1 | (0x14E, 0x11E) | 120x47 |
+
+Like everything else on the island they move with it, and the sizes in the code
+run a few pixels past the sprite because they are the rectangle the redraw test
+uses rather than the artwork.
+
+`seg2:0x14F0` puts `INTRO.SCR` — the "Screen Antics! Johnny Castaway" title
+card — on the screen and then gets on with loading: the backdrop at
+`seg3:0x0136`, the walk sprites at `seg4:0x0000`, the sounds at `seg5:0x0000`.
+The island replaces it whenever that finishes, so on a 386 decoding a
+hundred-odd LZW bitmaps the card was up for a few seconds. Here that work takes
+milliseconds, so the port gives the card a length of its own — two seconds,
+`JC_INTRO` in ticks, 0 to skip it.
+
 ## The sound
 
 `RESOURCE.001` has no audio in it. The twenty-three effects are Windows
@@ -873,11 +899,6 @@ even run.
   puts it back somewhere else, so it and `0x4010` are "in front of" and
   "behind". Which is which is not read out. Only `0x4000` is used, four times,
   in `BUILDING.ADS`, always on the same scene.
-* The holiday decoration. `seg3:0x1E50` draws `HOLIDAY.BMP` over the island at
-  a per-holiday spot, gated on `ds:0x30B6`; the port carries the switch and
-  does not draw anything yet.
-* `INTRO.SCR`, which `seg2:0x14F0` loads at startup. The port goes straight to
-  the island.
 * The settings. `SCRANTIC.INI` keeps `Background`, `Clouds`, `Waves`, `Sounds`,
   `Password` and `StartTime`, and the first four are switches the drawing code
   already reads (`ds:0x00B6`-`ds:0x00BC`). The port has environment variables

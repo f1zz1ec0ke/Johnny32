@@ -144,6 +144,12 @@ scene, because `seg12:0x05B9` shifts a drawing opcode's operands before the
 handler ever sees them. That is what `ISLETEMP.SCR` is — the island
 *template*, at the anchor everything is expressed against.
 
+It opens on the title card, and it knows what day it is: `HOLIDAY.BMP` puts a
+pumpkin on the beach at the end of October, a decorated tree at Christmas, a
+"HAPPY NEW YEAR" banner across the palm, and a shamrock in March. `JC_DATE`
+pins the calendar if you do not want to wait, `JC_INTRO` sets how long the card
+stays up.
+
 **And it makes a noise now.** There is no audio in `RESOURCE.001` at all — the
 twenty-three sound effects are Windows resources inside `SCRANTIC.EXE`, type
 `WAVE`, named `WAVESFX1` upwards, 8-bit mono at 11025Hz. Put that file next to

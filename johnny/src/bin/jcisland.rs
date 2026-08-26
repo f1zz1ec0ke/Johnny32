@@ -7,7 +7,8 @@
 //! PNG output; `JC_FAITHFUL=1` restores the 1992 walk-router bug; `JC_DAY=n`
 //! starts on story day `n`, which is what decides how far the raft has got;
 //! `JC_HHMM=hhmm` pins the wall clock instead of stepping a phase per queue;
-//! `JC_FROM`/`JC_TO` bound which ticks get written as PNGs.
+//! `JC_FROM`/`JC_TO` bound which ticks get written as PNGs;
+//! `JC_DATE=YYYY-MM-DD` pins the calendar, for the holiday decorations.
 
 use johnny::{dgds::Archive, director::Director, png};
 use std::process::ExitCode;
@@ -54,6 +55,15 @@ fn main() -> ExitCode {
         d.day = day;
         d.date = 0;
     }
+    // `JC_DATE=YYYY-MM-DD` pins the calendar, which is how you get a holiday
+    // decoration without waiting for October.
+    if let Some(date) = std::env::var("JC_DATE").ok() {
+        let parts: Vec<i64> = date.split('-').filter_map(|p| p.parse().ok()).collect();
+        if let [y, m, dd] = parts[..] {
+            d.date = johnny::director::days_from_civil(y, m as u32, dd as u32);
+            d.story_date_reset();
+        }
+    }
     // The shipped clock is the wall clock: half hours since the dawn the user
     // set. A test run is minutes long, so step the phase per queue instead and
     // let a long one walk through a whole day.
@@ -82,6 +92,7 @@ fn main() -> ExitCode {
     let mut waves_total = 0usize;
     let mut clouds_max = 0usize;
     let mut glints_max = 0usize;
+    let mut active_max = 0usize;
 
     for _ in 0..ticks {
         let drew = d.tick(&archive);
@@ -92,6 +103,7 @@ fn main() -> ExitCode {
         waves_total += d.wave_count();
         clouds_max = clouds_max.max(d.cloud_count());
         glints_max = glints_max.max(d.glint_count());
+        active_max = active_max.max(d.active_count());
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
@@ -116,7 +128,7 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\nwaves: {waves_max} at most, {:.1} on average; clouds: {clouds_max}, glints: {glints_max}",
+        "\nwaves: {waves_max} at most, {:.1} on average; clouds: {clouds_max}, glints: {glints_max}, scenes at once: {active_max}",
         waves_total as f32 / ticks.max(1) as f32
     );
     let played: usize = heard.values().sum();
