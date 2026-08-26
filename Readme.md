@@ -131,8 +131,9 @@ cargo run --release --manifest-path johnny/Cargo.toml --bin jcisland -- 600
 walk-router bug and draws the shells segment 3 puts on the beach that the
 game's own picture of the island does not have — the two places where the
 port and the binary disagree, both kept switchable. `JC_SPEED` is
-a percentage against the rate the data was authored at — 100 is faithful, 70
-runs it at seven tenths — and it works on the screensaver too.
+a percentage against the rate the data was authored at — **the default is 60**,
+which is where it looks like the thing people remember, and 100 runs the data
+exactly as written. It works on the screensaver too.
 
 That knob exists because the faithful rate is faster than most people
 remember, and the binary says why. A 386 could not hold 62.5 passes a second;

@@ -411,8 +411,17 @@ table at `ds:0x30AC`:
 | 13 | 24x145 | (443, 148) | `seg3:0x0307` | the palm trunk |
 | 12 | 152x69 | (366, 122) | `seg3:0x0324` | the fronds |
 
-The two optional pieces come and go on a coin flip that is rolled once and
-kept in `ds:0x30C2` (`seg3:0x0226`).
+Those last two are not trimmings. `seg3:0x0226` flips a coin into `ds:0x30C2`
+once a session and it picks between **two islands**: with the flip up, the
+sandbar carries the beach forward and the rock sits offshore, four more
+patches of surf come with them, the placement rectangle is different
+(`seg3:0x1B56`) and so is where the raft ties up (`seg3:0x1DCB`).
+
+The four extra patches of surf are the giveaway. They have beach baked into
+them and they sit exactly along the sandbar's edge and around the rock, and
+`ISLETEMP.SCR` — which is the layout *without* the sandbar — contains no
+trace of any of them while matching the other three at 54-75%. Drawn without
+the sandbar they are strips of sand floating in open water.
 
 **The surf.** Seven patches of breaking water round the shore, three frames
 each:
@@ -422,10 +431,10 @@ each:
 | (271, 306) | 3-5 | 72x29 | 0 | `seg3:0x13A0` |
 | (365, 319) | 6-8 | 160x25 | 1 | `seg3:0x13C9` |
 | (519, 303) | 9-11 | 72x32 | 2 | `seg3:0x13F2` |
-| (234, 323) | 30-32 | 120x48 | 0 | `seg3:0x141B` |
-| (368, 356) | 33-35 | 176x28 | 1 | `seg3:0x1444` |
-| (559, 323) | 36-38 | 88x48 | 2 | `seg3:0x146D` |
-| (130, 340) | 39-41 | 104x29 | 0 | `seg3:0x1496` |
+| (234, 323) | 30-32 | 120x48 | 0 | `seg3:0x141B` — sandbar only |
+| (368, 356) | 33-35 | 176x28 | 1 | `seg3:0x1444` — sandbar only |
+| (559, 323) | 36-38 | 88x48 | 2 | `seg3:0x146D` — sandbar only |
+| (130, 340) | 39-41 | 104x29 | 0 | `seg3:0x1496` — the rock's ripple |
 
 Three counters (`ds:0x0282`, `ds:0x0284`, `ds:0x0286`) say which frame each
 patch is showing. They step every 4 ticks — 64ms, from the delay slot at

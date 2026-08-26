@@ -58,12 +58,16 @@ pub const MS_PER_TICK: u32 = 16;
 /// exactly that reason, and skipped passes push each frame's deadline later --
 /// so the screensaver most people remember ran slower than its own data.
 ///
-/// `JC_SPEED` is a percentage: 100 is faithful, 70 runs it at seven tenths.
+/// `JC_SPEED` is a percentage of the authored rate. The default is 60, which
+/// is where it looks like the thing people remember; `JC_SPEED=100` runs the
+/// data exactly as written.
+pub const DEFAULT_SPEED: u32 = 60;
+
 pub fn ms_per_tick() -> u32 {
     let pct = std::env::var("JC_SPEED")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(100)
+        .unwrap_or(DEFAULT_SPEED)
         .clamp(10, 400);
     (MS_PER_TICK * 100 / pct).max(1)
 }

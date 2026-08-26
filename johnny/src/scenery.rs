@@ -28,8 +28,12 @@ pub const SURF_TICKS: u32 = 4;
 /// through the handle table at `ds:0x30AC`, and the addresses are where each
 /// is set up in segment 3.
 ///
-/// The two optional pieces are the rock and the sandbar; `seg3:0x027E` draws
-/// them only when the coin flip came up 1.
+/// `seg3:0x0226` flips a coin into `ds:0x30C2` once a session, and that picks
+/// between **two islands**, not between an island and some trimmings. With
+/// the flip up, the sandbar carries the beach forward and the rock sits
+/// offshore, and four more patches of surf come with them; the placement
+/// rectangle is different (`seg3:0x1B56`) and so is where the raft ties up
+/// (`seg3:0x1DCB`). `ISLETEMP.SCR` is the other layout, and has none of it.
 const ISLAND: [(usize, i32, i32, bool); 6] = [
     // frame,  x,   y,   always
     (0, 0x121, 0x117, true),  // seg3:0x0270 -- the island itself, 280x52
@@ -40,17 +44,24 @@ const ISLAND: [(usize, i32, i32, bool); 6] = [
     (12, 0x16E, 0x07A, true), // seg3:0x0324 -- the fronds, 152x69
 ];
 
-/// The surf, as `(x, y, first frame, counter)`. Each patch has three frames;
-/// which one is showing comes from one of the three counters at `ds:0x0282`,
-/// `ds:0x0284` and `ds:0x0286`.
-const SURF: [(i32, i32, usize, usize); 7] = [
-    (0x10F, 0x132, 3, 0),  // seg3:0x13A0
-    (0x16D, 0x13F, 6, 1),  // seg3:0x13C9
-    (0x207, 0x12F, 9, 2),  // seg3:0x13F2
-    (0x0EA, 0x143, 30, 0), // seg3:0x141B
-    (0x170, 0x164, 33, 1), // seg3:0x1444
-    (0x22F, 0x143, 36, 2), // seg3:0x146D
-    (0x082, 0x154, 39, 0), // seg3:0x1496
+/// The surf, as `(x, y, first frame, counter, sandbar only)`. Each patch has
+/// three frames; which one is showing comes from one of the three counters at
+/// `ds:0x0282`, `ds:0x0284` and `ds:0x0286`.
+///
+/// The last four belong to the sandbar, not to the island. They have beach
+/// baked into them, they sit exactly along the sandbar's edge and around the
+/// rock, and `ISLETEMP.SCR` -- which is the layout without the sandbar --
+/// contains no trace of any of them, while it matches the first three at
+/// 54-75%. Drawn without the sandbar they are strips of sand floating in open
+/// water, which is what they looked like.
+const SURF: [(i32, i32, usize, usize, bool); 7] = [
+    (0x10F, 0x132, 3, 0, false),  // seg3:0x13A0
+    (0x16D, 0x13F, 6, 1, false),  // seg3:0x13C9
+    (0x207, 0x12F, 9, 2, false),  // seg3:0x13F2
+    (0x0EA, 0x143, 30, 0, true),  // seg3:0x141B -- the sandbar's left end
+    (0x170, 0x164, 33, 1, true),  // seg3:0x1444 -- along its front
+    (0x22F, 0x143, 36, 2, true),  // seg3:0x146D -- its right end
+    (0x082, 0x154, 39, 0, true),  // seg3:0x1496 -- around the rock
 ];
 
 /// Ticks between wave steps. `seg3:0x0A19` writes 10 into the delay slot at
@@ -648,7 +659,11 @@ impl Scenery {
                 surface.draw_sprite(f, c.x, c.y, Mirror::default());
             }
         }
-        for &(x, y, first, counter) in SURF.iter() {
+        let sandbar = self.extras && !self.backdrop.no_rock;
+        for &(x, y, first, counter, sandbar_only) in SURF.iter() {
+            if sandbar_only && !sandbar {
+                continue;
+            }
             let frame = first + self.counters[counter] as usize;
             if let Some(f) = self.pieces.get(frame) {
                 surface.draw_sprite(f, x + ORIGIN.0, y + ORIGIN.1, Mirror::default());
