@@ -282,6 +282,226 @@ def q_turn(n=8):
     return out
 
 
+# A fabricated ADS context, and where its pieces live.
+ADS_CTX = 0x7000
+ADS_SCRIPT = 0x8000
+ADS_INSTS = 0xB000
+ADS_CTXPTR = 0x460E      # ds:0x460E[i*4] / 0x4610[i*4] -> context i
+ADS_CURCTX = 0x2608
+ADS_CURSEQ = 0x2606
+
+# Each action handler near-calls a leaf, and every one of those call sites is
+# `push cs; call near` -- so at the hook the segment sits on top of the
+# operands and the first one is two bytes further in.
+ADS_ACTIONS = {
+    0x0DB6: ('play', 3),      # 2005, and what 2000's handler itself calls
+    0x0E9B: ('stop', 2),      # 2010
+    0x0E6E: ('finish', 2),    # 2015
+    0x0EC8: ('reset', 2),     # 2020
+    0x0F8C: ('front', 2),     # 4000
+    0x0EF2: ('back', 2),      # 4010
+    0x19E7: ('setseq', 1),    # F000 / F200 / F210
+}
+
+
+def ads_scripts():
+    """Every shipped `.ADS`, decompressed, with its sequence entry points."""
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    out = []
+    for name, body, _ in recs:
+        if not name.endswith('.ADS'):
+            continue
+        code = None
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'SCR:':
+                try:
+                    code = dgds.decompress(payload)
+                except Exception:               # noqa: BLE001 - stored raw
+                    code = payload
+        if code:
+            out.append((name, code))
+    return sorted(out)
+
+
+def ads_walk(code):
+    """(offset, opcode, operands) for every instruction, using the port's
+    length rule -- which `adslen` has already checked against the binary."""
+    p = 0
+    while p + 2 <= len(code):
+        op = int.from_bytes(code[p:p + 2], 'little')
+        n = _ads_len(op)
+        yield p, op, [int.from_bytes(code[p + 2 + k * 2:p + 4 + k * 2], 'little')
+                      for k in range((n - 2) // 2)]
+        p += n
+
+
+def _ads_len(op):
+    if op in (0x2000, 0x2005): return 10
+    if op in (0x2010, 0x2015, 0x2020, 0x4000, 0x4010): return 8
+    if (0x1010 <= op <= 0x1070 or 0x1310 <= op <= 0x1370) and op & 0xF == 0: return 6
+    if op in (0xF010, 0xF200, 0xF210, 0x1080, 0x1380, 0x1390, 0x3020): return 4
+    if op in (0x13A0, 0x13A1, 0x13B0, 0x13B1, 0x13C0, 0x13C1): return 4
+    return 2
+
+
+def ads_layout(code):
+    """Sequence id -> (body offset, the (ttm, scene) pairs it mentions)."""
+    seqs, current, pairs = {}, None, {}
+    for off, op, a in ads_walk(code):
+        if 0 < op <= 0xFF:
+            current = op
+            seqs[op] = off + 2
+            pairs[op] = []
+        elif current is not None and len(a) >= 2 and (
+                0x1010 <= op <= 0x1080 or 0x1310 <= op <= 0x1370
+                or op in (0x2000, 0x2005, 0x2010, 0x2015, 0x2020, 0x4000, 0x4010)):
+            if (a[0], a[1]) not in pairs[current]:
+                pairs[current].append((a[0], a[1]))
+    return {k: (seqs[k], pairs[k]) for k in seqs}
+
+
+def ads_pass(machine, code, seqs, seq, states, pairs, extra=None):
+    """One pass of one sequence inside the original interpreter.
+
+    Every scene the script mentions gets an instance record up front, so the
+    handlers find one and take their "already there" path -- which is nothing
+    but state writes. Nothing below the sequencer is stubbed: the real
+    `seg10:0x0DB6` decides what a `PlayScene` does to a scene's state, and the
+    predicates on the next instruction read what it actually wrote.
+    """
+    m = machine
+    base = m._lin(m.ds, ADS_SCRIPT)
+    m.mem[base:base + len(code)] = code
+    m.write16(m.ds, ADS_CURCTX, 0)
+    m.write16(m.ds, ADS_CTXPTR, ADS_CTX)
+    m.write16(m.ds, ADS_CTXPTR + 2, m.ds)
+    m.write16(m.ds, ADS_CTX + 0x02, max(seqs) + 1)
+    m.write16(m.ds, ADS_CTX + 0x08, ADS_SCRIPT + len(code))
+    for sid, (off, _) in seqs.items():
+        m.write16(m.ds, ADS_CTX + 0x152 + sid * 4, ADS_SCRIPT + off)
+        m.write16(m.ds, ADS_CTX + 0x154 + sid * 4, m.ds)
+        m.write16(m.ds, ADS_CTX + 0x12 + sid * 2, 1 if sid == seq else 0)
+        m.write16(m.ds, ADS_CTX + 0x292 + sid * 4, 0)
+        m.write16(m.ds, ADS_CTX + 0x294 + sid * 4, 0)
+        m.write16(m.ds, ADS_CTX + 0x0B2 + sid * 2, 0)
+    head, at_of = 0, {}
+    for n, (ttm, scene) in enumerate(pairs):
+        at = ADS_INSTS + n * 0x40
+        for k in range(0, 0x40, 2):
+            m.write16(m.ds, at + k, 0)
+        played, state = states.get((ttm, scene), (0, 0))
+        m.write16(m.ds, at + 0x00, ttm)
+        m.write16(m.ds, at + 0x02, scene)
+        m.write16(m.ds, at + 0x2D, played)
+        m.write16(m.ds, at + 0x2F, state)
+        m.write16(m.ds, at + 0x3B, head)
+        head = at
+        at_of[(ttm, scene)] = at
+    m.write16(m.ds, ADS_CTX + 0x10, head)
+    m.write16(m.ds, ADS_CURSEQ, seq)
+
+    log = []
+
+    def record(label, argc):
+        def watcher(mm):
+            args = [mm.read16(mm.ss, mm.sp + 2 + k * 2) for k in range(argc)]
+            log.append('%s %s' % (label, ' '.join(str(a) for a in args)))
+        return watcher
+
+    m.watches.clear()
+    for off, (label, argc) in ADS_ACTIONS.items():
+        m.watch(10, off, record(label, argc))
+    # For digging: `extra` sees every instruction the dispatcher is handed.
+    if extra is not None:
+        m.watch(10, 0x1519, extra)
+    m.call(10, 0x1925, [ADS_SCRIPT + seqs[seq][0], m.ds])
+
+    # What the pass left behind: the sequence states, and each scene's.
+    tail = ['seq%d=%d' % (sid, m.read16(m.ds, ADS_CTX + 0x12 + sid * 2))
+            for sid in sorted(seqs)]
+    tail += ['%d/%d=%d' % (t, s, m.read16(m.ds, at_of[(t, s)] + 0x2F))
+             for (t, s) in pairs]
+    return log + ['|'] + tail
+
+
+def q_blocks():
+    """seg10:0x106B, asked where the block starting at every instruction ends.
+
+    This is the scanner a refused guard uses to swallow its block. If the port
+    stops short of where the engine stops, everything between the two runs as
+    though it were the next rule -- several scenes starting that the guard had
+    just said no to. Asking it at *every* instruction rather than only at the
+    guards makes the answer a property of the script rather than of the walk
+    that reached it.
+    """
+    out = []
+    for name, code in ads_scripts():
+        m = fresh()
+        base = m._lin(m.ds, ADS_SCRIPT)
+        m.mem[base:base + len(code)] = code
+        m.write16(m.ds, ADS_CTX + 8, ADS_SCRIPT + len(code))
+        m.write16(m.ds, 0x2608, 0)
+        m.write16(m.ds, 0x460E, ADS_CTX)
+        m.write16(m.ds, 0x4610, m.ds)
+        for off, _op, _a in ads_walk(code):
+            end = m.call(10, 0x106B, [ADS_SCRIPT + off, m.ds, 0])
+            out.append('blocks %s %d %d'
+                       % (name, off, -1 if end == 0 else end - ADS_SCRIPT))
+    return out
+
+
+def _seqpass_cases():
+    """Every (script, sequence, case) the comparison walks, and its states.
+
+    One list, used by both sides, so the only thing being compared is what
+    each does with the same starting position.
+    """
+    for name, code in ads_scripts():
+        layout = ads_layout(code)
+        for seq in sorted(layout):
+            _, pairs = layout[seq]
+            cases = [{}]
+            for pair in pairs[:6]:
+                for state in (4, 1, 5):
+                    cases.append({pair: (1, state)})
+            for n, states in enumerate(cases):
+                yield name, code, layout, seq, n, states
+
+
+def q_seqpass():
+    """One pass of every shipped sequence, in every state that matters.
+
+    This is the sequencer's whole contract: given what is on screen, which
+    scenes does a pass start, stop, finish or reorder, and in what order. It
+    runs inside `seg10:0x1925` -- the engine's own interpreter loop, with its
+    own dispatch, its own predicates and its own block scanners -- against a
+    context put up by hand, with the action handlers hooked so that nothing
+    below the sequencer has to exist.
+
+    For each sequence: nothing playing, then each scene it mentions in turn as
+    just-ended, playing, and finished. That exercises the predicate the
+    scripts are built on (`1350`, five hundred of the six hundred and
+    sixty-odd) from both sides.
+    """
+    out = []
+    for name, code, layout, seq, n, states in _seqpass_cases():
+        got = ads_pass(fresh(), code, layout, seq, states, layout[seq][1])
+        out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(got)))
+    return out
+
+
+def p_seqpass():
+    out = []
+    for name, _code, layout, seq, n, states in _seqpass_cases():
+        arg = ','.join('%d:%d:%d:%d' % (t, s, p, st)
+                       for (t, s), (p, st) in sorted(states.items())) or '-'
+        pairs = ','.join('%d:%d' % pair for pair in layout[seq][1]) or '-'
+        mine = port('seqpass', name, seq, arg, 0, pairs)
+        out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(mine)))
+    return out
+
+
 QUERIES = {
     'rand': (q_rand, lambda: port('rand', 256)),
     'weighted': (q_weighted, lambda: port('weighted', '10,20,30,20,10,10', 256)),
@@ -295,6 +515,8 @@ QUERIES = {
     'adslen': (q_adslen, lambda: port('adslen')),
     'route': (q_route, lambda: port('route', 32)),
     'turn': (q_turn, lambda: port('turn', 8)),
+    'blocks': (q_blocks, lambda: port('blocks')),
+    'seqpass': (q_seqpass, p_seqpass),
 }
 
 

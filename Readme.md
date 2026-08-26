@@ -155,6 +155,8 @@ python3 tools/oracle.py
   adslen     2688 answers, all identical
   route      4736 answers, all identical
   turn        512 answers, all identical
+  blocks     2688 answers, all identical
+  seqpass    1143 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
@@ -171,7 +173,23 @@ which is how the first run found that the island's placement rectangle was
 being narrowed in the one case `seg3:0x1B7F` skips the narrowing entirely,
 pinning the island to a quarter of the water it should have had all of.
 
-The last two need more of the interpreter than a function call. The walk
+The last two are the whole ADS sequencer. `seqpass` runs one pass of every
+shipped sequence inside `seg10:0x1925` — the engine's own interpreter loop,
+with its own dispatch, its own predicates and its own block scanners — against
+a context built by hand, and compares which scenes the pass starts, stops and
+finishes, in what order, and what state everything is left in. `blocks` asks
+`seg10:0x106B` where the block starting at each of the 2,688 instructions
+ends.
+
+That pair found what a fortnight of watching the screensaver had not: `1510`
+and `1520` are different instructions, `10x0` and `13x0` guards are different
+instructions, and the block scanner treats both `1520` and `10x0` as ordinary
+instructions rather than as anything special. Reading `1520` as a block
+terminator makes a refused guard stop swallowing its block halfway, and the
+rest of it then runs as though it were the next rule — several animations
+starting at the moment one ends.
+
+Two of these need more of the interpreter than a function call. The walk
 driver picks a route and then goes on to pivot Johnny and animate him, so
 `tools/x86.py` grew the ability to **answer a call to one of the program's own
 functions** — hook the step-to-path lookup and the route choice falls out;

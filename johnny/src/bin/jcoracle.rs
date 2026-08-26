@@ -131,6 +131,94 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // One pass of one ADS sequence, with the scene states handed in, so
+        // the same pass can be run inside the original interpreter and the
+        // two action lists compared. This is the sequencer's whole contract.
+        "seqpass" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let record = args.get(1).cloned().unwrap_or_default();
+            let seq: u16 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1);
+            let Some(mut s) = johnny::ads::Sequencer::from_record(&archive, &record) else {
+                eprintln!("no ADS record {record}");
+                return ExitCode::FAILURE;
+            };
+            // `ttm:scene:played:state,...`
+            for entry in args.get(3).map(String::as_str).unwrap_or("").split(',') {
+                let f: Vec<u16> = entry.split(':').filter_map(|v| v.parse().ok()).collect();
+                if f.len() == 4 {
+                    s.preload(f[0], f[1], f[2] as u32, f[3]);
+                }
+            }
+            let seed: u64 = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(0);
+            s.tracing = true;
+            if !s.start(seq) {
+                eprintln!("{record} has no sequence {seq}");
+                return ExitCode::FAILURE;
+            }
+            let mut rng = Rng::new(seed);
+            s.begin_pass();
+            for _ in 0..johnny::ads::PASS_BUDGET {
+                if matches!(s.next_action(&mut rng), johnny::ads::Action::PassOver) {
+                    break;
+                }
+            }
+            for line in &s.trace {
+                println!("{line}");
+            }
+            // What the pass left behind, in the same order the oracle reads
+            // it out of the interpreter's context: the sequence states, then
+            // each scene the script mentions.
+            println!("|");
+            for (id, state) in s.sequence_states() {
+                println!("seq{id}={state}");
+            }
+            for entry in args.get(5).map(String::as_str).unwrap_or("").split(',') {
+                let f: Vec<u16> = entry.split(':').filter_map(|v| v.parse().ok()).collect();
+                if f.len() == 2 {
+                    println!("{}/{}={}", f[0], f[1], s.raw_state(f[0], f[1]));
+                }
+            }
+        }
+        // Where each guarded block ends. `seg10:0x106B` answers this in the
+        // engine, and it is the thing that decides which instructions a
+        // refused guard swallows -- stopping short leaves the tail of the
+        // block to run as if it were the next rule.
+        "blocks" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            for (_, name) in tables::ADS_FILES {
+                let Some(body) = archive.get(name) else { continue };
+                let Some(scr) = johnny::dgds::leaf(body, b"SCR:") else { continue };
+                let Ok(code) = johnny::dgds::decompress(scr.payload) else { continue };
+                let Some(mut s) = johnny::ads::Sequencer::from_record(&archive, name) else {
+                    continue;
+                };
+                let (ops, _) = johnny::ads::decode(&code);
+                for (i, (off, _)) in ops.iter().enumerate() {
+                    println!(
+                        "blocks {name} {off} {}",
+                        s.block_end(i).map_or(-1, |e| e as i64)
+                    );
+                }
+            }
+        }
         // Where every instruction of every shipped script begins and ends,
         // which is the foundation the rest of the ADS work stands on.
         "adslen" => {

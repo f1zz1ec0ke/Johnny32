@@ -95,6 +95,7 @@ class Machine:
         self.stubs = {}
         self.hooks = {}
         self.hooked = {}
+        self.watches = {}
         self.steps = 0
         self.limit = 5_000_000
 
@@ -348,7 +349,20 @@ class Machine:
         """
         self.hooks[(seg, off)] = fn or (lambda m: m.regs.__setitem__('ax', 0))
 
+    def watch(self, seg, off, fn):
+        """Look at a call without standing in for it.
+
+        A hook that replaces a function also suppresses everything it would
+        have done -- which, for something like the scene-start handler, means
+        the state it writes never happens and every predicate downstream of it
+        answers the wrong question. A watch records and then lets the real
+        thing run.
+        """
+        self.watches.setdefault((seg, off), []).append(fn)
+
     def call_far(self, seg, off):
+        for fn in self.watches.get((seg, off), ()):
+            fn(self)
         hooked = self.hooks.get((seg, off))
         if hooked is not None:
             self.hooked[(seg, off)] = self.hooked.get((seg, off), 0) + 1
@@ -444,7 +458,8 @@ class Machine:
         elif op in (0x00, 0x01, 0x02, 0x03, 0x28, 0x29, 0x2A, 0x2B,
                     0x30, 0x31, 0x32, 0x33, 0x20, 0x21, 0x22, 0x23,
                     0x08, 0x09, 0x0A, 0x0B, 0x38, 0x39, 0x3A, 0x3B,
-                    0x84, 0x85, 0x10, 0x11, 0x12, 0x13, 0x18, 0x19):
+                    0x84, 0x85, 0x10, 0x11, 0x12, 0x13, 0x18, 0x19,
+                    0x1A, 0x1B):
             w = 16 if op & 1 else 8
             _, reg, rm = self.modrm(seg_override)
             a = self.load(rm, w)
@@ -459,7 +474,13 @@ class Machine:
                 carry = self.flags['cf'] if kind == 0x10 else 0
                 res = self.add_flags(a, b + carry, w)
             elif kind in (0x28, 0x38, 0x18):
-                res = self.sub_flags(a, b, w)
+                # `sbb` takes the borrow with it. Leaving it out is invisible
+                # until something does 32-bit arithmetic as `sub` then `sbb`,
+                # and then it is off by one in the high word about half the
+                # time -- which is how the tick counter and every timing
+                # comparison built on it would quietly drift.
+                borrow = self.flags['cf'] if kind == 0x18 else 0
+                res = self.sub_flags(a, b + borrow, w)
             elif kind == 0x30:
                 res = a ^ b
                 self.set_flags(res, w, cf=0, of=0)
@@ -489,6 +510,10 @@ class Machine:
                 b = self.fetch8()
             if kind == 0:
                 res = self.add_flags(a, b, w)
+            elif kind == 2:                                  # adc
+                res = self.add_flags(a, b + self.flags['cf'], w)
+            elif kind == 3:                                  # sbb
+                res = self.sub_flags(a, b + self.flags['cf'], w)
             elif kind == 5 or kind == 7:
                 res = self.sub_flags(a, b, w)
             elif kind == 1:
@@ -671,8 +696,21 @@ class Machine:
         # --- control flow -------------------------------------------------
         elif op == 0xE8:                                     # call near
             rel = _s16(self.fetch16())
-            self.push(self.ip)
-            self.ip = (self.ip + rel) & 0xFFFF
+            target = (self.ip + rel) & 0xFFFF
+            # A hook stands in for a near call too. The interesting leaves --
+            # the handlers that actually start and stop scenes -- are all
+            # near-called from inside their own segment, so hooking only far
+            # calls would miss every one of them.
+            key = (self.sregs['cs'], target)
+            for fn in self.watches.get(key, ()):
+                fn(self)
+            hooked = self.hooks.get(key)
+            if hooked is not None:
+                self.hooked[key] = self.hooked.get(key, 0) + 1
+                hooked(self)
+            else:
+                self.push(self.ip)
+                self.ip = target
         elif op == 0xE9:
             rel = _s16(self.fetch16())
             self.ip = (self.ip + rel) & 0xFFFF

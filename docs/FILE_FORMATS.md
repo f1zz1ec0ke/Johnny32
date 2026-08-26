@@ -285,10 +285,24 @@ interpreter, and `seg10:0x194A` swallows the yield that block ends on — so a
 Only a `Step` at the top level ends the pass. A script that fires four rules in
 one pass is normal; one that fires at most one per pass stalls.
 
-The skipper has to agree. `seg10:0x106B` scans past a block that is not going
-to run and stops at that block's own `Step`, but a condition it meets on the
-way is consumed **whole** — its chain, its block, and the `Step` that ends it,
-by recursion. `BUILDING.ADS` builds Johnny's fire out of exactly that shape:
+The skipper has to agree, and its own dispatch table says exactly how.
+`seg10:0x106B` looks each instruction up in eighteen entries at `cs:0x1142`:
+
+| In the table | What the scanner does |
+| --- | --- |
+| `1510`, `1500` | stop — the block ends here |
+| `FFFF` | return null — the script ended first |
+| the fifteen `13x0` guards | recurse: a nested rule's block belongs to it |
+| **everything else** | advance one instruction and carry on |
+
+That last row is the one to get right. `1520` is not in the table, and neither
+are the `10x0` guards, so both are skipped like any other instruction. A
+skipper that treats `1520` as a terminator stops in the middle of a block it
+was told to swallow, and **the rest of that block then runs as though it were
+the next rule** — a guard that just said no still starts the scenes
+underneath it. Several animations begin at once, at the moment one ends.
+
+`BUILDING.ADS` builds Johnny's fire out of exactly that shape:
 
 ```
 IF RUNNING[3,142] {
@@ -303,6 +317,40 @@ IF RUNNING[3,40] { ... }           <- top level, reached every pass
 A skipper that stops at the first `Step` it sees leaves the pointer inside the
 outer rule and the sequence never reaches the rule after it. The fire is built
 and then nothing happens, for ever.
+
+### `10x0` and `13x0` are not two spellings of the same guard
+
+They share their predicates exactly — the table at `cs:0x14BD` sends `1010`
+and `1310` to one handler, `1050` and `1350` to another, all the way down. But
+`seg10:0x1519` sends them to two entirely different *instructions*.
+
+A `13x0` (`seg10:0x1758`) is the rule described above: true runs the block and
+the pass carries on to the next rule.
+
+A `10x0` (`seg10:0x17A0`) waits. True parks a resume pointer at the guard
+itself (`ctx+0x292+seq*4`), counts the hit (`ctx+0xB2+seq*2`, which is what
+`1080` tests), runs the block, and then returns null — which ends the
+sequence's pass however deeply nested it was. The next pass restarts **at the
+guard**, not at the top of the sequence. So it is a "stay here while this
+holds" loop. False clears both, and hands the block to a scanner of its own:
+`seg10:0x118A` looks for a `1520` rather than a `1510`, and the sequence
+resumes just past it.
+
+One `10x0` in the whole shipped corpus — a `1070` in `ACTIVITY.ADS`, guarding
+the one `1520` — and between them they are how "MUNDANE JOHN READ" waits for
+Johnny to finish reading before the seagull arrives.
+
+### The three stop opcodes
+
+| | |
+| --- | --- |
+| `1510` | ends the block it is in; at the top level, ends the sequence's pass. 584 uses |
+| `1520` | returns null, which climbs out through every enclosing guard and ends the pass whatever the nesting. 1 use |
+| `1500` | scan a block, then stop (`seg10:0x1567`). No shipped script uses it |
+
+`seg10:0x1925` is the interpreter loop and `ds:0x460C` is its stop flag; the
+difference between `1510` and `1520` is only whether the pointer that comes
+back is live or null (`seg10:0x1588` against `seg10:0x158A`).
 
 ### Random blocks hold instructions, not just scenes
 

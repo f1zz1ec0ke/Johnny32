@@ -108,8 +108,26 @@ pub enum Op {
         weight: u16,
     },
     /// Wait here until the scene that was started finishes.
+    /// `1510`: the end of a guarded block. Inside one it closes the block
+    /// and the pass carries on with the next rule; at the top level it ends
+    /// the sequence's pass.
+    ///
+    /// `seg10:0x1588` sets the stop flag at `ds:0x460C`, and the interpreter
+    /// loop at `seg10:0x1943` returns as soon as it sees it -- but the loop
+    /// that returns is the *inner* one a true `13x0` guard recursed into
+    /// (`seg10:0x1771`), and `seg10:0x194A` clears the flag on the way out.
+    /// So the outer loop never sees it.
     Step,
+    /// `1520`: the same, except it returns a null pointer rather than a live
+    /// one (`seg10:0x158A` jumps to the null exit). That null travels all the
+    /// way out through every enclosing guard, so it ends the whole sequence's
+    /// pass however deeply nested it is. One instruction in the shipped data,
+    /// in `ACTIVITY.ADS`.
     StepEnd,
+    /// `1500`: scan a block (`seg10:0x106B`) and then stop, at
+    /// `seg10:0x1567`. No shipped script uses it; decoded so that stays a
+    /// fact rather than an assumption.
+    SkipStep,
     /// Weighted random choice of one enclosed entry, up to `RandomEnd`.
     RandomBegin,
     RandomEnd,
@@ -141,8 +159,27 @@ pub enum Op {
         /// True for `0x4000`.
         to_front: bool,
     },
-    /// Guards the block that follows, up to the next `Step`.
+    /// `13x0`: guards the block that follows, up to the next `Step`.
+    ///
+    /// `seg10:0x1758`. True recurses into the interpreter to run the block
+    /// and then returns to the rule after it, so the whole script is a list
+    /// of rules re-tested every pass.
     If {
+        cond: Cond,
+        ttm: u16,
+        scene: u16,
+    },
+    /// `10x0`: the same predicate, an entirely different instruction.
+    ///
+    /// `seg10:0x17A0` parks a resume pointer at *this* guard
+    /// (`ctx+0x292+seq*4`), runs the block, and then returns null -- ending
+    /// the sequence's pass. The next pass restarts at the guard rather than
+    /// at the top of the sequence, so it is a "stay here while this holds"
+    /// loop rather than a rule. When it goes false it clears the park and the
+    /// consecutive-hit counter at `ctx+0xB2+seq*2` and carries on.
+    ///
+    /// One instruction in the shipped data -- a `1070` in `ACTIVITY.ADS`.
+    Wait {
         cond: Cond,
         ttm: u16,
         scene: u16,
@@ -205,6 +242,7 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
                 scene: a(1),
                 to_front: w == 0x4000,
             },
+            0x1500 => Op::SkipStep,
             0x1510 => Op::Step,
             0x1520 => Op::StepEnd,
             0x3010 => Op::RandomBegin,
@@ -222,7 +260,15 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
             0x1430 => Op::Or,
             0xFFFF => Op::End,
             other => match Cond::from_opcode(other) {
-                Some(cond) => Op::If {
+                // The two families share their predicates exactly -- the
+                // table at `cs:0x14BD` sends `1010` and `1310` to the same
+                // handler, and so on down -- but not their instructions.
+                Some(cond) if other & 0x0F00 == 0x0300 => Op::If {
+                    cond,
+                    ttm: a(0),
+                    scene: a(1),
+                },
+                Some(cond) => Op::Wait {
                     cond,
                     ttm: a(0),
                     scene: a(1),
@@ -397,6 +443,20 @@ pub struct Sequencer {
     /// `PlayScene` (`seg10:0x0E25`). It is never cleared, which is what makes
     /// `1330` mean "never played" rather than "not playing".
     plays: BTreeMap<(u16, u16), u32>,
+    /// Record every action a pass takes, for `tools/oracle.py` to diff
+    /// against the same pass run inside the original interpreter. Off in the
+    /// screensaver; `jcoracle seqpass` turns it on.
+    pub tracing: bool,
+    pub trace: Vec<String>,
+    /// Where a `10x0` guard parked each sequence (`ctx+0x292+seq*4`). A
+    /// sequence with one resumes there instead of at its top.
+    resume: BTreeMap<u16, usize>,
+    /// How many passes running a `10x0` guard has held (`ctx+0xB2+seq*2`),
+    /// which is what `1080` tests.
+    hits: BTreeMap<u16, u32>,
+    /// The nesting depth a `Wait` was entered at, so its block's `Step` can
+    /// end the sequence's pass rather than merely close the block.
+    wait_at: Option<u16>,
     pub todo_seen: BTreeMap<u16, usize>,
 }
 
@@ -437,6 +497,8 @@ fn opcode_of(op: &Op) -> u16 {
         Op::Run { opcode, .. } => *opcode,
         Op::Step => 0x1510,
         Op::StepEnd => 0x1520,
+        Op::SkipStep => 0x1500,
+        Op::Wait { .. } => 0x1070,
         Op::RandomBegin => 0x3010,
         Op::RandomEnd => 0x30FF,
         Op::RandomSkip { .. } => 0x3020,
@@ -470,6 +532,11 @@ impl Sequencer {
             current: 0,
             depth: 0,
             plays: BTreeMap::new(),
+            tracing: false,
+            trace: Vec::new(),
+            resume: BTreeMap::new(),
+            hits: BTreeMap::new(),
+            wait_at: None,
             todo_seen: BTreeMap::new(),
         })
     }
@@ -523,7 +590,11 @@ impl Sequencer {
             .find(|(id, state)| **state == 1 && **id > self.current)
             .map(|(id, _)| *id);
         self.depth = 0;
-        match next.and_then(|id| self.body_of(id).map(|pc| (id, pc))) {
+        self.wait_at = None;
+        let start = |me: &Self, id: u16| {
+            me.resume.get(&id).copied().or_else(|| me.body_of(id))
+        };
+        match next.and_then(|id| start(self, id).map(|pc| (id, pc))) {
             Some((id, pc)) => {
                 self.current = id;
                 self.pc = pc;
@@ -576,6 +647,8 @@ impl Sequencer {
             Cond::Queued => known && queued,
             // The counter and story-variable predicates. No shipped script
             // uses them, so there is nothing here to be faithful to yet.
+            // `seg10:0x132F`: how many passes running the `10x0` guard on
+            // this sequence has held.
             Cond::CountAtMost
             | Cond::CountAtLeast
             | Cond::VarAtMost
@@ -638,12 +711,27 @@ impl Sequencer {
     /// the main loop to act on, and a nested skip that hits it must hand that
     /// straight back up rather than let the level above re-read the condition
     /// it came from and start again.
+    /// Swallow a block, the way `seg10:0x106B` does.
+    ///
+    /// Its eighteen-entry table at `cs:0x1142` is the whole specification.
+    /// `1510` and `1500` end the block; `FFFF` ends the script; the fifteen
+    /// `13x0` guards recurse, because a nested rule's own block belongs to
+    /// it. **Everything else is skipped one instruction at a time** --
+    /// including `1520`, and including the `10x0` guards, neither of which is
+    /// in the table at all.
+    ///
+    /// Stopping early is the expensive mistake: whatever is left of the block
+    /// then runs as though it were the next rule, so a guard that just said
+    /// no still starts the scenes underneath it. That is several animations
+    /// beginning at once, at the moment one ends.
+    ///
+    /// Returns true if it ran off the end without finding a terminator.
     fn skip_block(&mut self) -> bool {
         while let Some((_, op)) = self.ops.get(self.pc).cloned() {
             self.pc += 1;
             match op {
-                Op::Step | Op::StepEnd => return false,
-                Op::End | Op::Sequence(_) => {
+                Op::Step | Op::SkipStep => return false,
+                Op::End => {
                     self.pc -= 1;
                     return true;
                 }
@@ -657,6 +745,40 @@ impl Sequencer {
             }
         }
         true
+    }
+
+    /// A `10x0` guard that has gone false hands its block to a scanner of
+    /// its own (`seg10:0x118A`), and that one is looking for a `1520` --
+    /// not for the `1510` that ends an ordinary block. It resumes just past
+    /// it, so whatever follows the `1520` is what the sequence does once the
+    /// wait is over. Running off the end instead ends the pass.
+    fn skip_to_stepend(&mut self) -> bool {
+        while let Some((_, op)) = self.ops.get(self.pc).cloned() {
+            match op {
+                Op::End => return true,
+                Op::StepEnd => {
+                    self.pc += 1;
+                    return false;
+                }
+                _ => self.pc += 1,
+            }
+        }
+        true
+    }
+
+    /// Where a block starting at `from` ends, for the oracle: the same
+    /// question `seg10:0x106B` is asked, answered by the same walk the
+    /// sequencer uses to skip one.
+    pub fn block_end(&mut self, from: usize) -> Option<usize> {
+        self.pc = from;
+        let overran = self.skip_block();
+        if overran {
+            None
+        } else {
+            // `seg10:0x106B` stops *on* the instruction that closes the
+            // block; its caller is what steps past it.
+            self.ops.get(self.pc - 1).map(|(off, _)| *off)
+        }
     }
 
     /// Step over the `And`/`Or` links after a condition, and the predicates
@@ -744,6 +866,10 @@ impl Sequencer {
                     } else {
                         sequence
                     };
+                    // Not traced: `seg10:0x1669` writes the state itself
+                    // rather than calling a handler, so there is nothing for
+                    // the oracle to watch. The sequence states it compares
+                    // afterwards cover this instruction instead.
                     self.seqs.insert(target, 2);
                     if target == self.current {
                         if self.next_sequence() {
@@ -756,11 +882,31 @@ impl Sequencer {
                 // inside a guarded block, so a `Step` ends the block it is in
                 // and the pass carries on to the next rule. Reaching one at
                 // the top level ends the pass.
-                Op::Step | Op::StepEnd => {
+                // A `Step` inside a guarded block closes the block, and the
+                // pass carries on with the next rule.
+                Op::Step | Op::SkipStep => {
                     if self.depth > 0 {
                         self.depth -= 1;
+                        // The block a `10x0` guard opened. Its pass ends here.
+                        if self.wait_at == Some(self.depth) {
+                            self.wait_at = None;
+                            if self.next_sequence() {
+                                continue;
+                            }
+                            return Action::PassOver;
+                        }
                         continue;
                     }
+                    if self.next_sequence() {
+                        continue;
+                    }
+                    return Action::PassOver;
+                }
+                // `1520` does not. Its null return climbs out through every
+                // enclosing guard, so the sequence is done for this pass
+                // however deep it was.
+                Op::StepEnd => {
+                    self.depth = 0;
                     if self.next_sequence() {
                         continue;
                     }
@@ -775,6 +921,26 @@ impl Sequencer {
                         continue;
                     }
                     self.skip_block();
+                }
+                // `seg10:0x17A0`. True: park here, count the hit, run the
+                // block, and the sequence is done for this pass. False: clear
+                // both and carry on with the instruction after the block.
+                Op::Wait { cond, ttm, scene } => {
+                    let at = self.pc - 1;
+                    if self.eval_chain(cond, ttm, scene) {
+                        let id = self.current;
+                        self.resume.insert(id, at);
+                        *self.hits.entry(id).or_insert(0) += 1;
+                        self.wait_at = Some(self.depth);
+                        self.depth += 1;
+                        continue;
+                    }
+                    let id = self.current;
+                    self.resume.remove(&id);
+                    self.hits.remove(&id);
+                    if self.skip_to_stepend() && self.next_sequence() {
+                        continue;
+                    }
                 }
                 Op::And | Op::Or => {}
                 Op::RandomBegin => {
@@ -804,9 +970,11 @@ impl Sequencer {
                 }
                 Op::RandomEnd | Op::RandomSkip { .. } => {}
                 Op::StopScene { ttm, scene, .. } => {
+                    self.note(format!("stop {ttm} {scene}"));
                     self.states.insert((ttm, scene), SceneState::Idle);
                 }
                 Op::FinishScene { ttm, scene, .. } => {
+                    self.note(format!("finish {ttm} {scene}"));
                     self.states.insert((ttm, scene), SceneState::Finished);
                 }
                 Op::PlayScene {
@@ -821,15 +989,20 @@ impl Sequencer {
                     scene,
                     to_front,
                 } => {
+                    self.note(format!(
+                        "{} {ttm} {scene}",
+                        if to_front { "front" } else { "back" }
+                    ));
                     return Action::Reorder {
                         ttm,
                         scene,
                         to_front,
-                    }
+                    };
                 }
                 // `seg10:0x16C2`: mark that sequence state 4, so the next
                 // pass runs it alongside this one.
                 Op::Run { opcode, sequence } => {
+                    self.note(format!("setseq {sequence}"));
                     if self.body_of(sequence).is_some() {
                         self.seqs.insert(sequence, 4);
                     } else {
@@ -843,7 +1016,15 @@ impl Sequencer {
         }
     }
 
+    /// Record one action, when the oracle is watching.
+    fn note(&mut self, line: String) {
+        if self.tracing {
+            self.trace.push(line);
+        }
+    }
+
     fn begin(&mut self, ttm: u16, scene: u16, flags: u16) -> Option<Action> {
+        self.note(format!("play {ttm} {scene} {flags}"));
         let file = self.files.get(&ttm)?.clone();
         *self.plays.entry((ttm, scene)).or_insert(0) += 1;
         let repeat = Repeat::from_flags(flags);
@@ -853,6 +1034,49 @@ impl Sequencer {
             scene,
             repeat,
         })
+    }
+
+    /// Put a scene into a known state before a pass, for the oracle: the
+    /// instance record's play count at +0x2D and run state at +0x2F.
+    pub fn preload(&mut self, ttm: u16, scene: u16, played: u32, state: u16) {
+        self.plays.insert((ttm, scene), played);
+        self.states.insert(
+            (ttm, scene),
+            match state {
+                1 | 2 | 3 => SceneState::Queued(state as u8),
+                4 => SceneState::Over,
+                5 => SceneState::Finished,
+                _ => SceneState::Idle,
+            },
+        );
+    }
+
+    /// Every sequence the script defines and the state it is in, in id
+    /// order. A sequence nothing has touched is state 0, the same as the
+    /// engine's freshly zeroed context.
+    pub fn sequence_states(&self) -> Vec<(u16, u8)> {
+        let mut out: Vec<(u16, u8)> = self
+            .ops
+            .iter()
+            .filter_map(|(_, op)| match op {
+                Op::Sequence(n) => Some(*n),
+                _ => None,
+            })
+            .map(|id| (id, self.seqs.get(&id).copied().unwrap_or(0)))
+            .collect();
+        out.sort();
+        out.dedup_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// A scene's run state as the number the instance record holds at +0x2F.
+    pub fn raw_state(&self, ttm: u16, scene: u16) -> u16 {
+        match self.state(ttm, scene) {
+            SceneState::Idle => 0,
+            SceneState::Queued(n) => n as u16,
+            SceneState::Over => 4,
+            SceneState::Finished => 5,
+        }
     }
 
     /// The runner owns a scene's run state once it has started it; this is
