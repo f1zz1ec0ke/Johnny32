@@ -74,10 +74,39 @@ pub struct Clip {
 pub struct Surface {
     pub width: u16,
     pub height: u16,
+    /// The picture as the engine draws it: one palette index per pixel.
+    ///
+    /// Everything in `RESOURCE.001` is sixteen colours -- all 2,392 sprite
+    /// frames and all ten backdrops use indices 0 to 15 and nothing else --
+    /// so this is the whole of the original's visual budget, and it stays
+    /// authoritative: the repaint check, the PNG dumps and the digests all
+    /// compare it.
     pub pixels: Vec<u8>,
+    /// The same picture in colour, as `0x00RRGGBB`.
+    ///
+    /// Kept in step with `pixels` write for write. An indexed draw resolves
+    /// through the palette; artwork that has its own colours -- which is the
+    /// point of the whole buffer -- writes here and leaves its nearest
+    /// palette index behind in `pixels`. Byte order in memory is B, G, R, 0,
+    /// which is what a 32bpp `BI_RGB` DIB wants.
+    pub colour: Vec<u32>,
     /// Set by TTM opcode `4004`, which stores the x pair and the y pair
     /// separately (`seg12:0x0F40`).
     pub clip: Option<Clip>,
+    /// The palette every indexed write resolves through.
+    lut: [u32; 256],
+    /// Whether anything on this surface came from artwork with colours of its
+    /// own. While nothing has, the colour buffer is just the palette applied
+    /// to `pixels` and can be thrown away and rebuilt -- which is what keeps
+    /// a palette change recolouring the island, the way the original's DIB
+    /// does. Once something has, the colours have to be carried.
+    pub tinted: bool,
+}
+
+/// Pack a palette entry the way the colour buffer holds it.
+#[inline]
+pub fn pack(rgb: [u8; 3]) -> u32 {
+    ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32
 }
 
 impl Surface {
@@ -86,7 +115,24 @@ impl Surface {
             width,
             height,
             pixels: vec![0; width as usize * height as usize],
+            colour: vec![0; width as usize * height as usize],
             clip: None,
+            lut: [0; 256],
+            tinted: false,
+        }
+    }
+
+    /// Take a new palette on, and recolour what is already drawn.
+    ///
+    /// The original hands its 8bpp DIB a palette, so changing it recolours
+    /// the whole screen at once. Forty-one `F05F` loads in the scripts, and
+    /// this is what makes them behave the same way here.
+    pub fn set_palette(&mut self, palette: &[[u8; 3]; 256]) {
+        for (slot, rgb) in self.lut.iter_mut().zip(palette.iter()) {
+            *slot = pack(*rgb);
+        }
+        for (c, i) in self.colour.iter_mut().zip(self.pixels.iter()) {
+            *c = self.lut[*i as usize];
         }
     }
 
@@ -103,6 +149,7 @@ impl Surface {
 
     pub fn fill(&mut self, index: u8) {
         self.pixels.fill(index);
+        self.colour.fill(self.lut[index as usize]);
     }
 
     /// Copy a full-screen background in, ignoring transparency.
@@ -113,6 +160,17 @@ impl Surface {
             let src = y * bg.width as usize;
             let dst = y * self.width as usize;
             self.pixels[dst..dst + w].copy_from_slice(&bg.pixels[src..src + w]);
+            match &bg.colour {
+                Some(c) => {
+                    self.tinted = true;
+                    self.colour[dst..dst + w].copy_from_slice(&c[src..src + w]);
+                }
+                None => {
+                    for k in 0..w {
+                        self.colour[dst + k] = self.lut[bg.pixels[src + k] as usize];
+                    }
+                }
+            }
         }
     }
 
@@ -131,7 +189,21 @@ impl Surface {
     #[inline]
     fn put(&mut self, x: i32, y: i32, index: u8) {
         if self.visible(x, y) {
-            self.pixels[y as usize * self.width as usize + x as usize] = index;
+            let at = y as usize * self.width as usize + x as usize;
+            self.pixels[at] = index;
+            self.colour[at] = self.lut[index as usize];
+        }
+    }
+
+    /// Put down a colour that did not come from the palette, keeping the
+    /// nearest index for the indexed buffer so everything built on that --
+    /// the repaint check, the frame dumps -- still sees a picture.
+    fn put_colour(&mut self, x: i32, y: i32, rgb: u32, index: u8) {
+        self.tinted = true;
+        if self.visible(x, y) {
+            let at = y as usize * self.width as usize + x as usize;
+            self.pixels[at] = index;
+            self.colour[at] = rgb;
         }
     }
 
@@ -216,15 +288,27 @@ impl Surface {
             for col in 0..fw {
                 let dx = x + col;
                 let src_col = if mirror.x { fw - 1 - col } else { col } as usize;
-                let value = frame.pixels[src_row * frame.width as usize + src_col];
-                if value != TRANSPARENT {
-                    self.put(dx, dy, value);
+                let at = src_row * frame.width as usize + src_col;
+                let value = frame.pixels[at];
+                match &frame.colour {
+                    // Artwork with colours of its own. Its alpha decides what
+                    // shows rather than index 0 -- redrawn art has no reason
+                    // to keep magenta as a key.
+                    Some(c) => {
+                        let argb = c[at];
+                        if argb >> 24 != 0 {
+                            self.put_colour(dx, dy, argb & 0x00FF_FFFF, value);
+                        }
+                    }
+                    None if value != TRANSPARENT => self.put(dx, dy, value),
+                    None => {}
                 }
             }
         }
     }
 
-    /// Expand to RGBA using a palette. This is the only place colour enters.
+    /// Expand to RGBA using a palette, for the PNG writer, which works from
+    /// the indexed buffer so its output is comparable run to run.
     pub fn to_rgba(&self, palette: &[[u8; 3]; 256]) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.pixels.len() * 4);
         for &i in &self.pixels {

@@ -443,7 +443,7 @@ fn windows_main() {
         }
     };
     let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
-    let Ok(archive) = Archive::load(&data, map.as_deref()) else {
+    let Ok(mut archive) = Archive::load(&data, map.as_deref()) else {
         return;
     };
 
@@ -453,6 +453,15 @@ fn windows_main() {
     //
     // `seg5:0x000F` checks the `Sounds` setting before the loader runs at
     // all, so off means the WAVs are never even looked for.
+    // Artwork with colours of its own, if there is any. `art/` beside the
+    // screensaver; anything it does not replace comes out of the archive.
+    let pack = std::rc::Rc::new(johnny::artpack::ArtPack::load(std::path::Path::new(
+        &format!("{dir}/art"),
+    )));
+    if !pack.is_empty() {
+        archive.with_art(std::rc::Rc::clone(&pack));
+    }
+
     let sounds = settings
         .sounds
         .then(|| {
@@ -593,7 +602,7 @@ fn windows_main() {
         let seed = GetTickCount() as u64;
         let mut director = Director::new(seed);
         director.configure(settings.clone());
-        let mut info = BITMAPINFO256 {
+        let info = BITMAPINFO256 {
             header: BITMAPINFOHEADER {
                 biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 // DIB rows are DWORD-aligned. At 8bpp that needs the width to
@@ -603,7 +612,10 @@ fn windows_main() {
                 // Negative height: the surface is top-down.
                 biHeight: -(johnny::render::SCREEN_H as i32),
                 biPlanes: 1,
-                biBitCount: 8,
+                // 32bpp, so artwork that has more than sixteen colours can
+                // reach the screen. `Surface::colour` holds `0x00RRGGBB`,
+                // which is B, G, R, 0 in memory -- what BI_RGB wants.
+                biBitCount: 32,
                 biCompression: 0,
                 biSizeImage: 0,
                 biXPelsPerMeter: 0,
@@ -669,12 +681,6 @@ fn windows_main() {
                 continue;
             }
 
-            for (i, c) in director.stage.palette().iter().enumerate() {
-                // RGBQUAD is blue, green, red, reserved.
-                info.colors[i] =
-                    (c[2] as u32) | ((c[1] as u32) << 8) | ((c[0] as u32) << 16);
-            }
-
             let dc = GetDC(hwnd);
             let mut client = RECT {
                 left: 0,
@@ -717,7 +723,7 @@ fn windows_main() {
                     0,
                     sw,
                     sh,
-                    director.stage.surface.pixels.as_ptr() as *const _,
+                    director.stage.surface.colour.as_ptr() as *const _,
                     &info,
                     DIB_RGB_COLORS,
                     SRCCOPY,

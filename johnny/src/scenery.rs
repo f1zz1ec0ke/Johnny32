@@ -16,7 +16,7 @@
 //!    whole shoreline does not move in lockstep.
 
 use crate::ads::Rng;
-use crate::dgds::{self, Archive, Frame};
+use crate::dgds::{Archive, Frame};
 use crate::render::{Mirror, Surface, SCREEN_H, SCREEN_W};
 
 /// Ticks between surf steps. `seg3:0x0E96` writes 4 into the delay slot at
@@ -397,6 +397,10 @@ const GLINT_COLOUR: u8 = 15;
 
 /// The backdrop, and enough state to keep the surf moving.
 pub struct Scenery {
+    /// The palette every indexed pixel here resolves through, so the colour
+    /// buffer these surfaces build is right. Without it the island composes
+    /// as a silhouette the moment anything else brings colours of its own.
+    palette: [[u8; 3]; 256],
     /// Sea and island: everything that does not move, composed once.
     base: Frame,
     /// `BACKGRND.BMP`, for the surf frames.
@@ -441,6 +445,19 @@ impl Scenery {
     /// Compose the backdrop. `night` picks `NIGHT.SCR` over the oceans,
     /// `roll` supplies the two random choices: which sea, and whether the
     /// optional pieces are there.
+    /// The palette the composed island resolves against. Set before
+    /// anything is composed.
+    pub fn set_palette(&mut self, palette: [[u8; 3]; 256]) {
+        self.palette = palette;
+    }
+
+    /// A surface to compose on, already knowing its colours.
+    fn surface(&self, w: u16, h: u16) -> Surface {
+        let mut s = Surface::new(w, h);
+        s.set_palette(&self.palette);
+        s
+    }
+
     pub fn build(
         archive: &Archive,
         sea: &'static str,
@@ -448,7 +465,7 @@ impl Scenery {
         now: u32,
         day: u8,
     ) -> Option<Scenery> {
-        let mut sea_only = dgds::read_screen(archive.get(sea)?).ok()?;
+        let mut sea_only = archive.screen(sea)?;
         // `NIGHT.SCR` and the oceans are 640x480, the size of the screen. If
         // one ever is not, pad rather than leave the surface ragged.
         if sea_only.width != SCREEN_W || sea_only.height != SCREEN_H {
@@ -460,24 +477,18 @@ impl Scenery {
             }
         }
 
-        let pieces = archive
-            .get("BACKGRND.BMP")
-            .and_then(|b| dgds::read_bitmap(b).ok())
-            .unwrap_or_default();
+        let pieces = archive.bitmap("BACKGRND.BMP").unwrap_or_default();
         // The raft is its own file, loaded next to the island at
         // `seg3:0x0179` and kept in `ds:0x30AE`.
         // `seg3:0x0179` loads this next to the island artwork and keeps it in
         // `ds:0x30AA`.
-        let decoration = archive
-            .get("HOLIDAY.BMP")
-            .and_then(|b| dgds::read_bitmap(b).ok())
-            .unwrap_or_default();
+        let decoration = archive.bitmap("HOLIDAY.BMP").unwrap_or_default();
         let raft = archive
-            .get("MRAFT.BMP")
-            .and_then(|b| dgds::read_bitmap(b).ok())
+            .bitmap("MRAFT.BMP")
             .and_then(|frames| frames.into_iter().nth(raft_frame(day)));
 
         let mut scenery = Scenery {
+            palette: [[0; 3]; 256],
             base: sea_only.clone(),
             sea_only,
             pieces,
@@ -645,7 +656,7 @@ impl Scenery {
     /// `seg3:0x0262` draws the island, the two optional pieces, the scrub and
     /// the palm; `seg3:0x1D69` puts the raft on afterwards.
     fn rebuild(&mut self) {
-        let mut surface = Surface::new(self.sea_only.width, self.sea_only.height);
+        let mut surface = self.surface(self.sea_only.width, self.sea_only.height);
         surface.draw_background(&self.sea_only);
         if !self.backdrop.cutaway {
             let rock = self.sandbar();
@@ -684,6 +695,10 @@ impl Scenery {
             surface.fill(crate::render::BLACK);
         }
         self.base.pixels = surface.pixels;
+        // Only carry colours when something in the sea actually had its own.
+        // Otherwise the island stays palette art, and a scene's `F05F` load
+        // recolours it exactly as it recolours everything else.
+        self.base.colour = surface.tinted.then_some(surface.colour);
     }
 
     /// The story moved on, or a scene wants the island a particular way.
@@ -701,8 +716,7 @@ impl Scenery {
         self.holiday = holiday;
         if raft_frame(day) != raft_frame(self.day) {
             self.raft = archive
-                .get("MRAFT.BMP")
-                .and_then(|b| dgds::read_bitmap(b).ok())
+                .bitmap("MRAFT.BMP")
                 .and_then(|frames| frames.into_iter().nth(raft_frame(day)));
         }
         self.day = day;
@@ -865,7 +879,7 @@ impl Scenery {
 
     /// The backdrop as it stands: island, then this step's surf.
     pub fn compose(&self) -> Frame {
-        let mut surface = Surface::new(self.base.width, self.base.height);
+        let mut surface = self.surface(self.base.width, self.base.height);
         surface.draw_background(&self.base);
         // Clouds first: they are up in the sky, behind everything.
         for c in self.clouds.iter() {
@@ -897,6 +911,7 @@ impl Scenery {
             width: self.base.width,
             height: self.base.height,
             pixels: surface.pixels,
+            colour: surface.tinted.then_some(surface.colour),
         }
     }
 }
@@ -910,6 +925,7 @@ fn fit_to_screen(src: &Frame) -> Frame {
         width: SCREEN_W,
         height: SCREEN_H,
         pixels: surface.pixels,
+        colour: surface.tinted.then_some(surface.colour),
     }
 }
 

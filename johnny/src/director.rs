@@ -1332,6 +1332,7 @@ impl Director {
         match Scenery::build(archive, sea, extras, self.tick, self.day) {
             Some(s) => {
                 let mut s = s;
+                s.set_palette(*self.stage.palette());
                 s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
                 s.start_sky(&mut self.rng);
                 // `seg3:0x0233`: the island is dropped where this queue's
@@ -1352,7 +1353,7 @@ impl Director {
             None => {
                 // No sea in the archive. Fall back to the backdrop the scenes
                 // load themselves, so the island still appears.
-                if let Some(f) = archive.get("ISLETEMP.SCR").and_then(|b| dgds::read_screen(b).ok())
+                if let Some(f) = archive.screen("ISLETEMP.SCR")
                 {
                     self.stage.set_background(f);
                 }
@@ -1402,10 +1403,7 @@ impl Director {
                 if self.tick > 1 {
                     return false;
                 }
-                match archive
-                    .get("INTRO.SCR")
-                    .and_then(|b| dgds::read_screen(b).ok())
-                {
+                match archive.screen("INTRO.SCR") {
                     Some(f) => {
                         if let Some(p) = archive
                             .get("JOHNCAST.PAL")
@@ -1624,10 +1622,7 @@ impl Director {
     fn draw_walk_frame(&mut self, archive: &Archive, frame: u16, x: u16, y: u16, mirror: Mirror) {
         // The walk sprites live in JOHNWALK.BMP, which FILES.VIN preloads.
         if self.walk_frames.is_none() {
-            let frames = archive
-                .get("JOHNWALK.BMP")
-                .and_then(|body| dgds::read_bitmap(body).ok())
-                .unwrap_or_default();
+            let frames = archive.bitmap("JOHNWALK.BMP").unwrap_or_default();
             self.walk_frames = Some(Rc::new(frames));
         }
         let Some(frames) = self.walk_frames.clone() else {

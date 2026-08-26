@@ -302,3 +302,40 @@ fn a_pinned_island_does_not_move() {
     let b = scenery::place_island(1, false, &mut r);
     assert_eq!(a, b);
 }
+
+// ---- the PNG round trip --------------------------------------------------
+
+#[test]
+fn png_reads_what_it_writes() {
+    // The writer uses stored deflate blocks, so this exercises that path.
+    let mut palette = [[0u8; 3]; 256];
+    for (i, slot) in palette.iter_mut().enumerate() {
+        *slot = [i as u8, (255 - i) as u8, (i * 7) as u8];
+    }
+    let (w, h) = (37u16, 11u16);
+    let pixels: Vec<u8> = (0..w as usize * h as usize).map(|i| (i * 13 % 256) as u8).collect();
+    let dir = std::env::temp_dir().join("johnny-png-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("round.png");
+    png::write_indexed(&path, w, h, &pixels, &palette, Some(0)).expect("write");
+    let img = png::read(&std::fs::read(&path).expect("read")).expect("decode");
+    assert_eq!((img.width, img.height), (w, h));
+    for (n, (&i, &got)) in pixels.iter().zip(img.pixels.iter()).enumerate() {
+        let c = palette[i as usize];
+        // Index 0 comes back clear; its colour under the alpha is whatever
+        // the palette said and nothing looks at it.
+        assert_eq!(got >> 24 != 0, i != 0, "pixel {n} (index {i}) alpha");
+        assert_eq!(
+            got & 0x00FF_FFFF,
+            ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32,
+            "pixel {n} (index {i}) colour"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn png_rejects_what_it_cannot_read() {
+    assert!(png::read(b"not a png at all").is_err());
+    assert!(png::read(&[]).is_err());
+}

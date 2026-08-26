@@ -38,3 +38,7 @@ path = "src/bin/jcrender.rs"
 [profile.release]
 lto = true
 opt-level = 3
+
+[[bin]]
+name = "jcart"
+path = "src/bin/jcart.rs"

@@ -357,7 +357,13 @@ pub fn decompress(payload: &[u8]) -> Result<Vec<u8>> {
 pub struct Frame {
     pub width: u16,
     pub height: u16,
+    /// Palette indices. Everything in the archive is 0..15; index 0 is the
+    /// transparency key.
     pub pixels: Vec<u8>,
+    /// Colours of its own, as `0xAARRGGBB`, for artwork that did not come out
+    /// of the archive. `None` for everything that did, which is then drawn
+    /// through the live palette exactly as before.
+    pub colour: Option<Vec<u32>>,
 }
 
 /// 4bpp, two pixels per byte, high nibble first, rows padded to a byte.
@@ -399,7 +405,8 @@ pub fn read_bitmap(body: &[u8]) -> Result<Vec<Frame>> {
             width: w,
             height: h,
             pixels: unpack4(slice, w, h),
-        });
+                     colour: None,
+                 });
         off += len;
     }
     Ok(out)
@@ -416,7 +423,8 @@ pub fn read_screen(body: &[u8]) -> Result<Frame> {
         width: w,
         height: h,
         pixels: unpack4(&raw, w, h),
-    })
+           colour: None,
+       })
 }
 
 /// `JOHNCAST.PAL`: 256 RGB triples of 6-bit VGA values.
@@ -442,9 +450,35 @@ pub fn read_palette(body: &[u8]) -> Result<[[u8; 3]; 256]> {
 pub struct Archive {
     records: HashMap<String, Vec<u8>>,
     order: Vec<String>,
+    /// Artwork that stands in for what is in here. See `crate::artpack`.
+    pack: Option<std::rc::Rc<crate::artpack::ArtPack>>,
 }
 
 impl Archive {
+    /// Lay an art pack over this archive. Every `bitmap` and `screen` from
+    /// here on hands back the replacement where there is one.
+    pub fn with_art(&mut self, pack: std::rc::Rc<crate::artpack::ArtPack>) {
+        self.pack = Some(pack);
+    }
+
+    /// A record's sprite frames, with any replacements applied.
+    pub fn bitmap(&self, name: &str) -> Option<Vec<Frame>> {
+        let mut frames = read_bitmap(self.get(name)?).ok()?;
+        if let Some(pack) = &self.pack {
+            pack.apply(name, &mut frames);
+        }
+        Some(frames)
+    }
+
+    /// A record's full-screen image, with any replacement applied.
+    pub fn screen(&self, name: &str) -> Option<Frame> {
+        let mut frame = read_screen(self.get(name)?).ok()?;
+        if let Some(pack) = &self.pack {
+            pack.apply_one(name, &mut frame);
+        }
+        Some(frame)
+    }
+
     /// Parse `RESOURCE.001`. Pass `RESOURCE.MAP` too and its offsets are
     /// checked against the linear walk.
     pub fn load(resource: &[u8], map: Option<&[u8]>) -> Result<Self> {
@@ -468,6 +502,7 @@ impl Archive {
         Ok(Archive {
             records: map_out,
             order,
+            pack: None,
         })
     }
 

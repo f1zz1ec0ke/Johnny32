@@ -7,6 +7,7 @@
 //! engine reads `RESOURCE.MAP`, `RESOURCE.001` and `SCRANTIC.EXE` from a copy
 //! you supply.
 
+pub mod artpack;
 pub mod ads;
 pub mod dgds;
 pub mod director;

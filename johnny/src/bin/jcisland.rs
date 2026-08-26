@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         }
     };
     let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
-    let archive = match Archive::load(&data, map.as_deref()) {
+    let mut archive = match Archive::load(&data, map.as_deref()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("archive: {e}");
@@ -54,6 +54,18 @@ fn main() -> ExitCode {
             eprintln!("frames/: {e}");
             return ExitCode::FAILURE;
         }
+    }
+
+    // Artwork with colours of its own, if a pack is there. `JC_ART` points
+    // somewhere else; `art/` beside the data is the default.
+    let art = std::env::var("JC_ART").unwrap_or_else(|_| format!("{dir}/art"));
+    let pack = std::rc::Rc::new(johnny::artpack::ArtPack::load(std::path::Path::new(&art)));
+    if !pack.is_empty() {
+        println!("art: {} frames from {}", pack.loaded, art);
+        for line in pack.rejected.iter().take(10) {
+            println!("  rejected {line}");
+        }
+        archive.with_art(std::rc::Rc::clone(&pack));
     }
 
     let mut d = Director::new(seed);
@@ -123,14 +135,26 @@ fn main() -> ExitCode {
         }
         if drew && write_frames && (from..=to).contains(&d.ticks()) {
             let path = out.join(format!("island_{frame:04}.png"));
-            let _ = png::write_indexed(
-                &path,
-                d.stage.surface.width,
-                d.stage.surface.height,
-                &d.stage.surface.pixels,
-                d.stage.palette(),
-                None,
-            );
+            // Once artwork with its own colours is on screen the indexed
+            // buffer is only an approximation of it, so dump what the screen
+            // actually shows.
+            let _ = if pack.is_empty() {
+                png::write_indexed(
+                    &path,
+                    d.stage.surface.width,
+                    d.stage.surface.height,
+                    &d.stage.surface.pixels,
+                    d.stage.palette(),
+                    None,
+                )
+            } else {
+                png::write_rgb(
+                    &path,
+                    d.stage.surface.width,
+                    d.stage.surface.height,
+                    &d.stage.surface.colour,
+                )
+            };
         }
         if drew {
             frame += 1;

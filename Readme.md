@@ -198,6 +198,45 @@ near it. Both found real bugs: the weighted pickers were taking the option
 after the one a boundary draw belongs to, and the pivot was tossing its coin
 even for a turn of nothing.
 
+## Sixteen colours, and how to have more
+
+Everything in `RESOURCE.001` is four-bit. All 2,392 sprite frames and all ten
+640x480 backdrops use palette indices 0 to 15 and nothing else — that is the
+whole visual budget of a 1992 VGA screensaver, and it is where the banding
+comes from.
+
+The surface now keeps two buffers: the indexed one the engine draws into,
+unchanged and still authoritative for every check in this repository, and a
+colour one beside it that each write resolves through the live palette. A
+palette load recolours both, the way handing a new palette to an 8bpp DIB
+recolours the screen. The screensaver presents the colour buffer through a
+32bpp DIB.
+
+That leaves room for artwork that has colours of its own. An **art pack** is a
+directory of PNGs named after what they stand in for:
+
+```text
+art/
+  JOHNWALK.BMP/000.png      art/OCEAN00.SCR.png
+  JOHNWALK.BMP/001.png      art/ISLETEMP.SCR.png
+```
+
+`tools/export_assets.py` writes the originals out in exactly that shape, so
+redrawing one is opening it and painting over it. Anything not replaced comes
+out of the archive, so a pack can arrive a frame at a time. A replacement has
+to be the size the original was — the scripts place every sprite by hand, in
+the original's coordinates — and `jcart` says which are not:
+
+```
+$ cargo run --release --bin jcart -- art
+art: 37 frames read
+  wrong size  JOHNWALK.BMP/000: 99x99 where the original is 40x76
+37 of 2402 images redrawn (1.5%)
+```
+
+`tools/art_manifest.py` says which are worth redrawing first: the busiest
+twenty bitmaps are 634 frames and three fifths of every draw in the data.
+
 ## Settings, and the story that survives being switched off
 
 Settings live in `johnny.ini` beside the screensaver, in the section and under

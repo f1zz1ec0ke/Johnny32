@@ -444,6 +444,9 @@ impl Stage {
 
     pub fn set_palette(&mut self, palette: [[u8; 3]; 256]) {
         self.palette = palette;
+        // The original hands its DIB a palette, so a change recolours
+        // everything already on screen. The colour buffer has to follow.
+        self.surface.set_palette(&palette);
     }
 
     pub fn set_background(&mut self, frame: Frame) {
@@ -458,11 +461,31 @@ impl Stage {
         let Some(mut bg) = self.background.take() else {
             return;
         };
+        // Borrow the surface to draw into the background, colours and all.
+        // The background only grows a colour buffer if the sprite or the
+        // background itself already had one; while neither does, it stays
+        // palette art and a later `F05F` still recolours it.
+        let tinted = self.surface.tinted;
         let saved = std::mem::replace(&mut self.surface.pixels, bg.pixels);
+        let had = bg.colour.take();
+        let saved_colour = std::mem::replace(
+            &mut self.surface.colour,
+            had.clone().unwrap_or_else(|| {
+                self.surface
+                    .pixels
+                    .iter()
+                    .map(|i| crate::render::pack(self.palette[*i as usize]))
+                    .collect()
+            }),
+        );
+        self.surface.tinted = had.is_some();
         let clip = self.surface.clip.take();
         self.surface
             .draw_sprite(sprite, x, y, crate::render::Mirror::none());
         bg.pixels = std::mem::replace(&mut self.surface.pixels, saved);
+        let now = std::mem::replace(&mut self.surface.colour, saved_colour);
+        bg.colour = self.surface.tinted.then_some(now);
+        self.surface.tinted = tinted;
         self.surface.clip = clip;
         self.background = Some(bg);
         self.background_gen += 1;
@@ -486,6 +509,17 @@ impl Stage {
             let dst = row as usize * sw as usize;
             let (a, b) = (from as usize, to as usize);
             self.surface.pixels[dst + a..dst + b].copy_from_slice(&bg.pixels[src + a..src + b]);
+            match &bg.colour {
+                Some(c) => {
+                    self.surface.colour[dst + a..dst + b].copy_from_slice(&c[src + a..src + b])
+                }
+                None => {
+                    for k in a..b {
+                        self.surface.colour[dst + k] =
+                            crate::render::pack(self.palette[bg.pixels[src + k] as usize]);
+                    }
+                }
+            }
         }
         self.background = Some(bg);
     }
@@ -761,22 +795,18 @@ impl Instance {
                 }
                 Op::LoadScreen(name) => {
                     stage.loads += 1;
-                    if let Some(body) = archive.get(&name) {
-                        if let Ok(f) = dgds::read_screen(body) {
-                            stage.set_background(f);
-                            stage.last_screen = Some(name);
-                        }
+                    if let Some(f) = archive.screen(&name) {
+                        stage.set_background(f);
+                        stage.last_screen = Some(name);
                     }
                 }
                 Op::LoadBitmap(name) => {
                     stage.loads += 1;
-                    if let Some(body) = archive.get(&name) {
-                        if let Ok(frames) = dgds::read_bitmap(body) {
-                            // Shared, so a frame that drew from this slot
-                            // keeps its artwork when the slot is loaded over.
-                            stage.slots[self.bitmap_slot] =
-                                frames.into_iter().map(Rc::new).collect();
-                        }
+                    if let Some(frames) = archive.bitmap(&name) {
+                        // Shared, so a frame that drew from this slot keeps
+                        // its artwork when the slot is loaded over.
+                        stage.slots[self.bitmap_slot] =
+                            frames.into_iter().map(Rc::new).collect();
                     }
                 }
                 Op::LoadPalette(name) => {
@@ -928,6 +958,7 @@ impl Clone for Frame {
             width: self.width,
             height: self.height,
             pixels: self.pixels.clone(),
+            colour: self.colour.clone(),
         }
     }
 }
