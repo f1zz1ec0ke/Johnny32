@@ -1,28 +1,43 @@
-//! Run an ADS sequence, letting it drive the TTM scenes, and dump frames.
+//! Run an ADS sequence with its scenes animating concurrently, and dump frames.
 //!
-//!     cargo run --release --bin jcplay -- MISCGAG.ADS 1 40
+//!     cargo run --release --bin jcplay -- MISCGAG.ADS 1 60
 //!
 //! Arguments: the `.ADS` record, the sequence number, an optional frame cap
-//! and an optional RNG seed. This is the sequencer and interpreter working
-//! together — what the screensaver actually does between scheduler decisions.
+//! and an optional RNG seed.
+//!
+//! This is the engine's actual shape. `PlayScene` does not replace whatever is
+//! on screen — it adds an instance to a list that the runner advances every
+//! tick (`seg10:0x0BF4` looks instances up by the `(ttm, scene)` pair, and
+//! `+0x3B` chains them). Several scenes composite into one frame, which is how
+//! the fire, a seagull and Johnny share the island.
 
 use johnny::{
     ads::{self, Action},
     dgds::Archive,
     png, ttm,
 };
+use std::collections::HashMap;
 use std::process::ExitCode;
+use std::rc::Rc;
 
 /// One tick is 4ms. The engine registers a single 4-unit software timer
-/// (`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, which is
-/// `GetCurrentTime` — milliseconds. `SetDelay n` therefore waits 4n ms.
+/// (`seg2:0x1522` into `seg9:0x07E6`) against `USER.15`, Win16's
+/// `GetCurrentTime`, which returns milliseconds.
 const MS_PER_TICK: u32 = 4;
+
+struct Active {
+    ttm: u16,
+    scene: u16,
+    inst: ttm::Instance,
+    /// Tick at which this instance may advance again.
+    wake: u32,
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let record = args.next().unwrap_or_else(|| "MISCGAG.ADS".into());
     let sequence: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-    let cap: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let cap: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(60);
     let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0x5EED);
 
     let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
@@ -62,93 +77,130 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Set JC_NOWRITE=1 to run the engine without dumping PNGs, which is what
+    // the smoke test over every sequence wants.
+    let write_frames = std::env::var("JC_NOWRITE").is_err();
     let out = std::path::Path::new("frames");
-    if let Err(e) = std::fs::create_dir_all(out) {
-        eprintln!("frames/: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    let mut rng = ads::Rng::new(seed);
-    let mut machine: Option<ttm::Machine> = None;
-    let mut loaded: Option<String> = None;
-    let mut playing: Option<(u16, u16)> = None;
-    let mut frame = 0usize;
-    let mut elapsed_ms = 0u32;
-
-    while frame < cap {
-        match seq.next_action(&mut rng) {
-            Action::Done => {
-                println!("sequence finished");
-                break;
-            }
-            Action::Play { file, scene } => {
-                let ttm_id = seq
-                    .files
-                    .iter()
-                    .find(|(_, f)| **f == file)
-                    .map(|(id, _)| *id)
-                    .unwrap_or(0);
-                println!("play {file} scene {scene}");
-                // Keep the machine across scenes of the same file so its
-                // loaded slots, palette and background survive; a different
-                // file needs its own program and its header run first.
-                let reuse = matches!(&loaded, Some(f) if *f == file);
-                if !reuse {
-                    let Some(mut m) = ttm::Machine::from_record(&archive, &file) else {
-                        eprintln!("no TTM record {file}");
-                        return ExitCode::FAILURE;
-                    };
-                    // The header before the first scene marker does the
-                    // background, palette and bitmap loads.
-                    let _ = m.run_frame(&archive);
-                    machine = Some(m);
-                    loaded = Some(file.clone());
-                }
-                if let Some(m) = machine.as_mut() {
-                    if !m.seek_scene(scene) {
-                        println!("   (no scene {scene} in {file})");
-                    }
-                }
-                playing = Some((ttm_id, scene));
-            }
-            Action::Wait => {
-                // Step ends the block and yields. The runner advances the
-                // active scene by one frame, which is also what promotes a
-                // queued scene to running -- the next block's IF_RUNNING
-                // depends on that having happened during this yield.
-                if let Some((ttm_id, scene)) = playing {
-                    seq.scene_running(ttm_id, scene);
-                }
-                let Some(m) = machine.as_mut() else { continue };
-                match m.run_frame(&archive) {
-                    ttm::Step::Finished => {
-                        if let Some((ttm_id, scene)) = playing {
-                            seq.scene_finished(ttm_id, scene);
-                        }
-                    }
-                    ttm::Step::Frame(delay) => {
-                        let path = out.join(format!("play_{frame:03}.png"));
-                        let _ = png::write_indexed(
-                            &path,
-                            m.surface.width,
-                            m.surface.height,
-                            &m.surface.pixels,
-                            m.palette(),
-                            None,
-                        );
-                        elapsed_ms += delay as u32 * MS_PER_TICK;
-                        frame += 1;
-                        m.restore_background();
-                    }
-                }
-            }
+    if write_frames {
+        if let Err(e) = std::fs::create_dir_all(out) {
+            eprintln!("frames/: {e}");
+            return ExitCode::FAILURE;
         }
     }
 
+    let mut rng = ads::Rng::new(seed);
+    let mut stage = ttm::Stage::new();
+    let mut programs: HashMap<String, Rc<ttm::Program>> = HashMap::new();
+    let mut active: Vec<Active> = Vec::new();
+    let mut frame = 0usize;
+    let mut tick = 0u32;
+    let mut sequence_done = false;
+
+    // Bound the tick count too. A sequence whose scenes never load a
+    // background produces no frames, and without this the loop spins.
+    let tick_limit = (cap as u32).saturating_mul(50).max(1000);
+    while frame < cap && tick < tick_limit {
+        // One sequencer step per tick. A block runs to its Step and yields;
+        // a Play adds an instance and lets the sequencer continue immediately.
+        if !sequence_done {
+            match seq.next_action(&mut rng) {
+                Action::Done => {
+                    sequence_done = true;
+                    if active.is_empty() {
+                        println!("sequence finished");
+                        break;
+                    }
+                }
+                Action::Wait => {}
+                Action::Play { file, scene } => {
+                    let ttm_id = seq
+                        .files
+                        .iter()
+                        .find(|(_, f)| **f == file)
+                        .map(|(id, _)| *id)
+                        .unwrap_or(0);
+                    let program = match programs.get(&file) {
+                        Some(p) => Rc::clone(p),
+                        None => {
+                            let Some(p) = ttm::Program::load(&archive, &file) else {
+                                eprintln!("no TTM record {file}");
+                                return ExitCode::FAILURE;
+                            };
+                            let p = Rc::new(p);
+                            programs.insert(file.clone(), Rc::clone(&p));
+                            // The header before the first scene marker holds
+                            // the background, palette and bitmap loads. Run it
+                            // once per file, into the shared stage.
+                            let mut header = ttm::Instance::new(Rc::clone(&p));
+                            let _ = header.run_frame(&mut stage, &archive);
+                            p
+                        }
+                    };
+                    let mut inst = ttm::Instance::new(program);
+                    if !inst.seek_scene(scene) {
+                        println!("   (no scene {scene} in {file})");
+                        continue;
+                    }
+                    println!("[tick {tick:5}] play {file} scene {scene}");
+                    active.push(Active {
+                        ttm: ttm_id,
+                        scene,
+                        inst,
+                        wake: tick,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        // One tick: repaint the background, advance every scene that is due,
+        // and present whatever they composited.
+        stage.restore_background();
+        let mut finished: Vec<(u16, u16)> = Vec::new();
+        for a in active.iter_mut() {
+            if a.wake > tick {
+                continue;
+            }
+            // Advancing a queued scene is what promotes it to running.
+            seq.scene_running(a.ttm, a.scene);
+            match a.inst.run_frame(&mut stage, &archive) {
+                ttm::Step::Finished => finished.push((a.ttm, a.scene)),
+                ttm::Step::Frame(delay) => a.wake = tick + delay.max(1) as u32,
+            }
+        }
+        for (t, s) in &finished {
+            seq.scene_finished(*t, *s);
+            println!("[tick {tick:5}] scene {s} finished");
+        }
+        active.retain(|a| !finished.contains(&(a.ttm, a.scene)));
+
+        if stage.has_background() {
+            if write_frames {
+                let path = out.join(format!("play_{frame:03}.png"));
+                let _ = png::write_indexed(
+                    &path,
+                    stage.surface.width,
+                    stage.surface.height,
+                    &stage.surface.pixels,
+                    stage.palette(),
+                    None,
+                );
+            }
+            frame += 1;
+        }
+        tick += 1;
+    }
+
     println!(
-        "\n{frame} frames, {:.1}s of animation at {MS_PER_TICK}ms/tick",
-        elapsed_ms as f64 / 1000.0
+        "\n{frame} frames over {tick} ticks, {:.1}s at {MS_PER_TICK}ms/tick",
+        (tick * MS_PER_TICK) as f64 / 1000.0
     );
+    if !stage.todo_seen.is_empty() {
+        println!("TTM opcodes not implemented:");
+        for (op, n) in &stage.todo_seen {
+            println!("  {op:04X}  x{n}");
+        }
+    }
     if !seq.todo_seen.is_empty() {
         println!("ADS opcodes not implemented:");
         for (op, n) in &seq.todo_seen {

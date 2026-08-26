@@ -11,7 +11,8 @@
 //! ignored but never silently disappear.
 
 use crate::dgds::{self, Archive, Frame};
-use crate::render::{Mirror, Surface};
+use std::rc::Rc;
+use crate::render::{Clip, Mirror, Surface};
 
 /// Every opcode the original interpreter dispatches, from the three tables in
 /// segment 12 (`0x12BD`, `0x03BC` + `0x1900`, `0x00FC`).
@@ -72,6 +73,20 @@ pub enum Op {
         slot: u16,
         mirror: Mirror,
     },
+    /// Set the clip rectangle. `seg12:0x0F40` stores the two x values
+    /// together and the two y values together, so the operands are
+    /// (x1, y1, x2, y2) and it also raises the clip-enabled flag.
+    SetClip { x1: i16, y1: i16, x2: i16, y2: i16 },
+    /// Draw a line between two points.
+    DrawLine { x1: i16, y1: i16, x2: i16, y2: i16 },
+    /// Draw a rectangle at (x, y) of the given size, filled or outlined.
+    DrawRect { x: i16, y: i16, w: i16, h: i16, filled: bool },
+    /// Draw an ellipse in the given bounding box, filled or outlined.
+    DrawEllipse { x: i16, y: i16, w: i16, h: i16, filled: bool },
+    /// Set the drawing colours: foreground then background. `seg12:0x06A9`
+    /// stores them on the scene instance and mirrors them into the globals
+    /// the vector-drawing opcodes read.
+    SetColors { fg: u8, bg: u8 },
     /// Trigger sound effect `n`. `seg12:0x0063` hands it to `seg5:0x00BA`,
     /// which indexes a 25-entry table of loaded sounds and is gated on the
     /// `Sounds` setting in `SCRANTIC.INI`. This release ships no audio at all,
@@ -153,13 +168,44 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         },
         0xA5A7 => Op::NoOp(opcode),
 
+        0x4004 => Op::SetClip {
+            x1: a(0),
+            y1: a(1),
+            x2: a(2),
+            y2: a(3),
+        },
+        0xA0A4 => Op::DrawLine {
+            x1: a(0),
+            y1: a(1),
+            x2: a(2),
+            y2: a(3),
+        },
+        0xA104 | 0xA114 => Op::DrawRect {
+            x: a(0),
+            y: a(1),
+            w: a(2),
+            h: a(3),
+            filled: opcode == 0xA104,
+        },
+        0xA404 | 0xA424 => Op::DrawEllipse {
+            x: a(0),
+            y: a(1),
+            w: a(2),
+            h: a(3),
+            filled: opcode == 0xA404,
+        },
+        0x2002 => Op::SetColors {
+            fg: a(0) as u8,
+            bg: a(1) as u8,
+        },
         0xC051 => Op::PlaySound(a(0) as u16),
 
         // Handlers that reach their "done" label down every path. 0x4214 is
-        // the surprising one: 60 call sites carry rectangle-shaped operands,
-        // so it was probably clipping once, but seg12:0x0860 jumps to "done"
-        // whichever way the guard goes.
-        0xA601 | 0x4214 | 0x5005 => Op::NoOp(opcode),
+        // the disabled predecessor of 0x4004: 60 call sites carry a rectangle,
+        // but seg12:0x0860 jumps to "done" whichever way the guard goes.
+        // 0x2012 sets a flag and calls seg12:0x197C, which is an empty
+        // function -- prologue, epilogue, nothing between.
+        0xA601 | 0x4214 | 0x5005 | 0x2012 => Op::NoOp(opcode),
 
         other => Op::Todo {
             opcode: other,
@@ -169,79 +215,130 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
     }
 }
 
-/// A loaded bitmap slot.
-#[derive(Default)]
-struct Slot {
-    frames: Vec<Frame>,
-}
-
-/// What one step of the interpreter produced.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Step {
-    /// A frame is ready; hold it for this many delay units.
-    Frame(u16),
-    /// The program ran off the end.
-    Finished,
-}
-
-pub struct Machine {
-    ops: Vec<Op>,
-    pc: usize,
-    bitmap_slot: usize,
-    palette_slot: usize,
-    slots: Vec<Slot>,
+/// The resources a set of concurrently running scenes share: the loaded
+/// bitmap slots, the palette, the background and the surface they paint on.
+///
+/// The original keeps these per ADS context rather than per scene — the
+/// instance record carries only a cursor and some render state, and the
+/// slots are common. That is why one `.TTM` file can have several of its
+/// scenes live at once without reloading anything.
+pub struct Stage {
+    slots: Vec<Vec<Frame>>,
     background: Option<Frame>,
     palette: [[u8; 3]; 256],
-    delay: u16,
-    /// Opcodes decoded but not implemented, tallied so they are visible.
-    pub todo_seen: std::collections::BTreeMap<u16, usize>,
     pub surface: Surface,
+    /// Current drawing colours, for the vector opcodes.
+    pub fg: u8,
+    pub bg: u8,
+    /// Opcodes decoded but not implemented, tallied so they stay visible.
+    pub todo_seen: std::collections::BTreeMap<u16, usize>,
 }
 
-impl Machine {
-    pub fn new(ops: Vec<Op>) -> Self {
-        Machine {
-            ops,
-            pc: 0,
-            bitmap_slot: 0,
-            palette_slot: 0,
-            slots: (0..16).map(|_| Slot::default()).collect(),
+impl Default for Stage {
+    fn default() -> Self {
+        Stage {
+            slots: (0..16).map(|_| Vec::new()).collect(),
             background: None,
             palette: [[0; 3]; 256],
-            delay: 1,
-            todo_seen: Default::default(),
             surface: Surface::screen(),
+            fg: 0,
+            bg: 0,
+            todo_seen: Default::default(),
         }
     }
+}
 
-    /// Decode a `.TTM` record from the archive and prepare it to run.
-    pub fn from_record(archive: &Archive, name: &str) -> Option<Self> {
-        let body = archive.get(name)?;
-        let tt3 = dgds::leaf(body, b"TT3:")?;
-        let code = dgds::decompress(tt3.payload).ok()?;
-        let (ops, _) = decode(&code);
-        Some(Machine::new(ops))
+impl Stage {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn palette(&self) -> &[[u8; 3]; 256] {
         &self.palette
     }
 
-    /// Jump to the instruction after a given scene marker.
-    pub fn seek_scene(&mut self, scene: u16) -> bool {
-        for (i, op) in self.ops.iter().enumerate() {
-            if matches!(op, Op::SceneMarker(n) if *n == scene) {
-                self.pc = i + 1;
-                return true;
-            }
+    /// Repaint the background. Scenes composite over this each tick.
+    pub fn restore_background(&mut self) {
+        if let Some(bg) = self.background.take() {
+            self.surface.draw_background(&bg);
+            self.background = Some(bg);
         }
-        false
     }
 
-    /// Run until the next `EndFrame`, painting into `self.surface`.
-    pub fn run_frame(&mut self, archive: &Archive) -> Step {
+    pub fn has_background(&self) -> bool {
+        self.background.is_some()
+    }
+}
+
+/// A decoded `.TTM` program. Shared by every instance of the same file.
+pub struct Program {
+    pub ops: Vec<Op>,
+}
+
+impl Program {
+    pub fn load(archive: &Archive, name: &str) -> Option<Program> {
+        let body = archive.get(name)?;
+        let tt3 = dgds::leaf(body, b"TT3:")?;
+        let code = dgds::decompress(tt3.payload).ok()?;
+        let (ops, _) = decode(&code);
+        Some(Program { ops })
+    }
+
+    /// The instruction index just after a scene marker.
+    pub fn scene_start(&self, scene: u16) -> Option<usize> {
+        self.ops
+            .iter()
+            .position(|op| matches!(op, Op::SceneMarker(n) if *n == scene))
+            .map(|i| i + 1)
+    }
+}
+
+/// What one step of an instance produced.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
+    /// A frame is ready; hold it for this many ticks.
+    Frame(u16),
+    /// The program ran off the end.
+    Finished,
+}
+
+/// One running scene: a cursor into a program, plus its own frame delay.
+///
+/// Several of these can be live at once and are advanced together, which is
+/// how the fire, a seagull and Johnny end up in the same frame.
+pub struct Instance {
+    pub program: Rc<Program>,
+    pub pc: usize,
+    pub delay: u16,
+    bitmap_slot: usize,
+    palette_slot: usize,
+}
+
+impl Instance {
+    pub fn new(program: Rc<Program>) -> Self {
+        Instance {
+            program,
+            pc: 0,
+            delay: 1,
+            bitmap_slot: 0,
+            palette_slot: 0,
+        }
+    }
+
+    pub fn seek_scene(&mut self, scene: u16) -> bool {
+        match self.program.scene_start(scene) {
+            Some(i) => {
+                self.pc = i;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Run until the next `EndFrame`, painting into the stage.
+    pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
         loop {
-            let Some(op) = self.ops.get(self.pc).cloned() else {
+            let Some(op) = self.program.ops.get(self.pc).cloned() else {
                 return Step::Finished;
             };
             self.pc += 1;
@@ -250,29 +347,59 @@ impl Machine {
                 Op::LoadScreen(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(f) = dgds::read_screen(body) {
-                            self.surface.draw_background(&f);
-                            self.background = Some(f);
+                            stage.surface.draw_background(&f);
+                            stage.background = Some(f);
                         }
                     }
                 }
                 Op::LoadBitmap(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(frames) = dgds::read_bitmap(body) {
-                            self.slots[self.bitmap_slot].frames = frames;
+                            stage.slots[self.bitmap_slot] = frames;
                         }
                     }
                 }
                 Op::LoadPalette(name) => {
                     if let Some(body) = archive.get(&name) {
                         if let Ok(p) = dgds::read_palette(body) {
-                            self.palette = p;
+                            stage.palette = p;
                         }
                     }
                 }
                 Op::SelectBitmapSlot(n) => self.bitmap_slot = (n as usize).min(15),
                 Op::SelectPaletteSlot(n) => self.palette_slot = (n as usize).min(15),
                 Op::SetDelay(n) => self.delay = n,
-                Op::FreeShapes => self.slots[self.bitmap_slot].frames.clear(),
+                Op::SetColors { fg, bg } => {
+                    stage.fg = fg;
+                    stage.bg = bg;
+                }
+                Op::SetClip { x1, y1, x2, y2 } => {
+                    stage.surface.clip = Some(Clip {
+                        x1: x1 as i32,
+                        y1: y1 as i32,
+                        x2: x2 as i32,
+                        y2: y2 as i32,
+                    });
+                }
+                Op::DrawLine { x1, y1, x2, y2 } => {
+                    let fg = stage.fg;
+                    stage
+                        .surface
+                        .draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, fg);
+                }
+                Op::DrawRect { x, y, w, h, filled } => {
+                    let fg = stage.fg;
+                    stage
+                        .surface
+                        .draw_rect(x as i32, y as i32, w as i32, h as i32, fg, filled);
+                }
+                Op::DrawEllipse { x, y, w, h, filled } => {
+                    let fg = stage.fg;
+                    stage
+                        .surface
+                        .draw_ellipse(x as i32, y as i32, w as i32, h as i32, fg, filled);
+                }
+                Op::FreeShapes => stage.slots[self.bitmap_slot].clear(),
                 Op::DrawSprite {
                     x,
                     y,
@@ -281,12 +408,11 @@ impl Machine {
                     mirror,
                 } => {
                     let slot = (slot as usize).min(15);
-                    if let Some(f) = self.slots[slot].frames.get(frame as usize) {
-                        self.surface.draw_sprite(f, x as i32, y as i32, mirror);
+                    if let Some(f) = stage.slots[slot].get(frame as usize) {
+                        stage.surface.draw_sprite(f, x as i32, y as i32, mirror);
                     }
                 }
                 Op::GotoFrame(n) => {
-                    // Restart the scene rather than run off the end.
                     if !self.seek_scene(n) {
                         return Step::Finished;
                     }
@@ -298,17 +424,9 @@ impl Machine {
                 | Op::PlaySound(_)
                 | Op::NoOp(_) => {}
                 Op::Todo { opcode, .. } => {
-                    *self.todo_seen.entry(opcode).or_insert(0) += 1;
+                    *stage.todo_seen.entry(opcode).or_insert(0) += 1;
                 }
             }
-        }
-    }
-
-    /// Repaint the background, which is what most scenes do between frames.
-    pub fn restore_background(&mut self) {
-        if let Some(bg) = &self.background {
-            let bg = bg.clone();
-            self.surface.draw_background(&bg);
         }
     }
 }

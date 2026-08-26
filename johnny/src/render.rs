@@ -37,12 +37,24 @@ impl Mirror {
     }
 }
 
+/// An inclusive clip rectangle in screen coordinates.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Clip {
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+}
+
 /// An indexed surface.
 #[derive(Clone)]
 pub struct Surface {
     pub width: u16,
     pub height: u16,
     pub pixels: Vec<u8>,
+    /// Set by TTM opcode `4004`, which stores the x pair and the y pair
+    /// separately (`seg12:0x0F40`).
+    pub clip: Option<Clip>,
 }
 
 impl Surface {
@@ -51,6 +63,7 @@ impl Surface {
             width,
             height,
             pixels: vec![0; width as usize * height as usize],
+            clip: None,
         }
     }
 
@@ -73,24 +86,109 @@ impl Surface {
         }
     }
 
+    /// Is this pixel inside the surface and the current clip rectangle?
+    #[inline]
+    fn visible(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return false;
+        }
+        match self.clip {
+            Some(c) => x >= c.x1 && x <= c.x2 && y >= c.y1 && y <= c.y2,
+            None => true,
+        }
+    }
+
+    #[inline]
+    fn put(&mut self, x: i32, y: i32, index: u8) {
+        if self.visible(x, y) {
+            self.pixels[y as usize * self.width as usize + x as usize] = index;
+        }
+    }
+
+    /// Draw a line. TTM `A0A4` passes the two endpoints.
+    pub fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, index: u8) {
+        let (dx, dy) = ((x2 - x1).abs(), -(y2 - y1).abs());
+        let (sx, sy) = (if x1 < x2 { 1 } else { -1 }, if y1 < y2 { 1 } else { -1 });
+        let (mut x, mut y) = (x1, y1);
+        let mut err = dx + dy;
+        loop {
+            self.put(x, y, index);
+            if x == x2 && y == y2 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Draw a rectangle. TTM `A104` fills it, `A114` outlines it.
+    pub fn draw_rect(&mut self, x: i32, y: i32, w: i32, h: i32, index: u8, filled: bool) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let (x2, y2) = (x + w - 1, y + h - 1);
+        if filled {
+            for row in y..=y2 {
+                for col in x..=x2 {
+                    self.put(col, row, index);
+                }
+            }
+        } else {
+            self.draw_line(x, y, x2, y, index);
+            self.draw_line(x, y2, x2, y2, index);
+            self.draw_line(x, y, x, y2, index);
+            self.draw_line(x2, y, x2, y2, index);
+        }
+    }
+
+    /// Draw an ellipse in a bounding box. TTM `A404` fills, `A424` outlines.
+    pub fn draw_ellipse(&mut self, x: i32, y: i32, w: i32, h: i32, index: u8, filled: bool) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let (rx, ry) = (w / 2, h / 2);
+        let (cx, cy) = (x + rx, y + ry);
+        if rx == 0 || ry == 0 {
+            self.draw_line(x, y, x + w - 1, y + h - 1, index);
+            return;
+        }
+        for dy in -ry..=ry {
+            // Half-width of the ellipse at this row.
+            let t = 1.0 - (dy as f64 / ry as f64).powi(2);
+            if t < 0.0 {
+                continue;
+            }
+            let dx = (rx as f64 * t.sqrt()).round() as i32;
+            if filled {
+                for px in (cx - dx)..=(cx + dx) {
+                    self.put(px, cy + dy, index);
+                }
+            } else {
+                self.put(cx - dx, cy + dy, index);
+                self.put(cx + dx, cy + dy, index);
+            }
+        }
+    }
+
     /// Draw a sprite with index 0 masked out, clipped to the surface.
     pub fn draw_sprite(&mut self, frame: &Frame, x: i32, y: i32, mirror: Mirror) {
         let (fw, fh) = (frame.width as i32, frame.height as i32);
         for row in 0..fh {
             let dy = y + row;
-            if dy < 0 || dy >= self.height as i32 {
-                continue;
-            }
             let src_row = if mirror.y { fh - 1 - row } else { row } as usize;
             for col in 0..fw {
                 let dx = x + col;
-                if dx < 0 || dx >= self.width as i32 {
-                    continue;
-                }
                 let src_col = if mirror.x { fw - 1 - col } else { col } as usize;
                 let value = frame.pixels[src_row * frame.width as usize + src_col];
                 if value != TRANSPARENT {
-                    self.pixels[dy as usize * self.width as usize + dx as usize] = value;
+                    self.put(dx, dy, value);
                 }
             }
         }
