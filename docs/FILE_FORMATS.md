@@ -60,10 +60,15 @@ Chunks seen in this build:
 | `RES:` | .ADS | resource-number to `.TTM` filename table |
 | `intr` | .VIN | newline-separated preload list |
 
-**Only `BIN:`, `SCR:` and `VGA:`-inside-a-`.BMP` carry a compression header.**
-Everything else is raw, including the `VGA:` in `JOHNCAST.PAL`, whose 768 bytes
-are the palette directly. That makes 139 compressed chunks in all: 127 `BIN:`,
-10 `SCR:` and 2 `VGA:`.
+**`BIN:`, `SCR:`, `TT3:` and `VGA:`-inside-a-`.BMP` carry a compression
+header.** Everything else is raw, including the `VGA:` in `JOHNCAST.PAL`, whose
+768 bytes are the palette directly. That makes 180 compressed chunks: 127
+`BIN:`, 10 `SCR:`, 41 `TT3:` and 2 `VGA:`.
+
+`TT3:` is easy to miss. It is RLE-compressed, and because RLE stores long
+literal runs verbatim, a raw `TT3:` still shows its strings in the clear and
+still disassembles for the first few dozen instructions. The giveaway is a
+stray byte every ~128 bytes -- the literal-run markers.
 
 Exactly two records, `JOHNWALK.BMP` and `MJTELE.BMP`, carry a `VGA:` chunk
 alongside their `BIN:`. It decompresses to the same byte count as the `BIN:`
@@ -83,9 +88,11 @@ uint8   data[]
 
 ### RLE (method 1)
 
-Per run: `uint8 n`. If bit 7 is set, the low 7 bits are a literal count
-followed by that many bytes. Otherwise `n` is a repeat count followed by one
-byte to repeat.
+Per run: `uint8 n`. **If bit 7 is set**, repeat the following single byte
+`n & 0x7F` times. **If bit 7 is clear**, copy the next `n` bytes verbatim.
+
+The inverted reading is the natural guess and it is wrong. It still decodes
+short streams nearly correctly, so it fails quietly.
 
 ### LZW (method 2)
 

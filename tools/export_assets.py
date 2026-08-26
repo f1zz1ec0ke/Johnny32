@@ -91,19 +91,33 @@ def dump_script(path, name, body):
         lines.append('scene labels:')
         for k, v in sorted(tags.items()):
             lines.append('  %3d  %s' % (k, v))
-    code = chunks.get('TT3:') or chunks.get('SCR:')
+    if 'TT3:' in chunks:
+        code = dgds.decompress(chunks['TT3:'])
+        valid = dgds.TTM_OPCODES
+        note = ''
+    elif 'SCR:' in chunks:
+        code = dgds.decompress(chunks['SCR:'])
+        valid = set(dgds.ADS_OPCODES)
+        note = '  (ADS operand counts are only partly known -- see docs/ANALYSIS.md)'
+    else:
+        code = None
     if code:
         lines.append('')
-        lines.append('bytecode (%d bytes) -- best effort, see docs/ANALYSIS.md:' % len(code))
-        reached = 0
-        for off, op, argv, text in dgds.disasm(code):
+        lines.append('bytecode (%d bytes)%s:' % (len(code), note))
+        end = 0
+        for off, op, argv, text in dgds.disasm(code, valid):
+            name = dgds.TTM_NAMES.get(op, '')
             if text is not None:
-                lines.append('  %04X  %04X  %r' % (off, op, text))
+                lines.append('  %04X  %04X %-20s %r' % (off, op, name, text))
+                end = off + 2 + len(text) + 1
+                if end & 1:
+                    end += 1
             else:
-                lines.append('  %04X  %04X  %s' % (off, op, ' '.join(str(a) for a in argv)))
-            reached = off
-        if reached < len(code) - 4:
-            lines.append('  ---- decoding stopped at %04X of %04X ----' % (reached, len(code)))
+                lines.append('  %04X  %04X %-20s %s'
+                             % (off, op, name, ' '.join(str(a) for a in argv)))
+                end = off + 2 + len(argv) * 2
+        if end < len(code) - 2:
+            lines.append('  ---- stopped at %04X of %04X ----' % (end, len(code)))
     with open(path, 'w') as fh:
         fh.write('\n'.join(lines) + '\n')
 

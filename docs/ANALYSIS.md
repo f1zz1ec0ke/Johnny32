@@ -112,22 +112,32 @@ carries a `RES:` chunk listing the `.TTM` files it drives.
 
 * all three unwrapping layers, end to end
 * the `RESOURCE.MAP` / `RESOURCE.001` container format
-* the LZW codec — ported from the disassembly; all 139 compressed chunks
-  decode to exactly their declared size (`python3 tools/verify.py`)
+* both codecs — LZW ported from the disassembly, and RLE once the disassembly
+  showed the literal/repeat convention is the opposite of the obvious reading.
+  All 180 compressed chunks decode to exactly their declared size
 * 4bpp image decoding, the palette, and index 0 as the transparency key
 * every background and all 2,392 sprite frames export to PNG correctly
 
+* **the TTM bytecode**, read out of the interpreter in segment 12 rather than
+  inferred. All 41 animation scripts now disassemble end to end — 34,781
+  instructions — against the three opcode tables the interpreter itself uses.
+
+The TTM breakthrough was not the opcode table; it was noticing that `TT3:` is
+RLE-compressed at all. Raw `TT3:` looks like plain bytecode — the strings are
+readable and the first few dozen instructions decode — because RLE stores long
+literal runs verbatim. What gives it away is one stray byte every ~128 bytes,
+which is a literal-run marker. Two wrong assumptions (raw chunk, inverted RLE
+convention) had been cancelling out just well enough to look like progress.
+
 **Open:**
 
-* **The TTM/ADS opcode table.** The encoding shape is clear — 16-bit opcodes,
-  low nibble is the operand count, `0x0F` means an inline NUL-terminated
-  string — and the head of every script decodes cleanly (`F010` load
-  background, `F020` load bitmap, `F050` load palette, `A500 [x,y,frame,slot]`
-  draw sprite, `0FF0` end frame). But the decoder loses sync partway into most
-  scripts, so at least some opcodes carry an operand count that is not the low
-  nibble. `0x0FF0` end-frame markers appear at both even and odd offsets,
-  which means either the stream is byte-aligned or those byte pairs also occur
-  inside operand data. Not yet resolved here.
+* **ADS operand counts.** The 44 ADS opcodes are known (`seg10:0x1875`), but
+  their operand counts are *not* the low nibble — each handler advances the
+  script pointer itself. Several are read off already (`0001`/`0005` take
+  none, `2000`/`2005` take four, `4000`/`4010` take three), but the `0x10x0`
+  and `0x13x0` families are variable-length branch forms that need more of the
+  interpreter read. ADS is the sequencer, so this overlaps with the scheduler
+  below.
 * **The scheduler.** Which scene plays when, the story progression, the
   day/night and tide cycles, and the walking transitions all live in those
   81,919 bytes of 16-bit code. This is the part no existing project has

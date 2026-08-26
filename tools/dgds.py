@@ -67,8 +67,9 @@ def flatten(tree, path=()):
 
 # Leaf chunks that carry a [type:uint8][uncompressed size:uint32] header.
 # VGA: is context-dependent: inside a .BMP it is compressed, inside a .PAL the
-# payload is the raw palette. See is_compressed().
-COMPRESSED_TAGS = {'BIN:', 'SCR:'}
+# payload is the raw palette. See is_compressed(). TT3: is RLE-compressed --
+# easy to miss, because RLE literal runs leave most of the bytecode readable.
+COMPRESSED_TAGS = {'BIN:', 'SCR:', 'TT3:'}
 
 
 def is_compressed(record_name, tag):
@@ -167,20 +168,22 @@ def lzw_decompress(data, usize):
 
 
 def rle_decompress(data, usize):
+    """Bit 7 set means repeat the next byte (n & 0x7F) times; clear means a
+    literal run of n bytes. Getting this backwards still decodes small streams
+    almost right, which is a good way to lose a day."""
     out = bytearray()
     p = 0
     while p < len(data) and len(out) < usize:
         n = data[p]
         p += 1
         if n & 0x80:
-            n &= 0x7F
-            out += data[p:p + n]
-            p += n
-        else:
             if p >= len(data):
                 break
-            out += bytes([data[p]]) * n
+            out += bytes([data[p]]) * (n & 0x7F)
             p += 1
+        else:
+            out += data[p:p + n]
+            p += n
     return bytes(out[:usize])
 
 
@@ -266,29 +269,98 @@ def parse_id_table(payload):
     return out
 
 
-def disasm(code):
+# TTM opcodes, read out of the interpreter in SCRANTIC.EXE segment 12. The
+# interpreter looks each one up in a table and jumps to a parallel handler
+# table; anything not found goes to an ignore path.
+#   seg12:0x12BD  47 general opcodes   (handlers at 0x131B)
+#   seg12:0x03BC + 0x1900   the 0xAxxx drawing opcodes
+#   seg12:0x00FC            the 0xCxxx opcodes
+# 0x0FF0 is special-cased before the lookup and ends the frame; 0x1301/0x1311
+# are rewritten to 0xC051/0xC061 on the way in.
+TTM_GENERAL = [
+    0x0010, 0x0020, 0x0070, 0x0080, 0x0090, 0x00C0, 0x00E0, 0x0110,
+    0x0400, 0x0500, 0x0510, 0x1011, 0x1021, 0x1031, 0x1041, 0x1051,
+    0x1061, 0x1071, 0x1101, 0x1111, 0x1121, 0x1201, 0x2002, 0x2012,
+    0x2022, 0x2032, 0x2302, 0x2312, 0x2322, 0x2402, 0x3003, 0x3103,
+    0x4004, 0x4114, 0x4124, 0x4136, 0x4204, 0x4214, 0x5005, 0xB000,
+    0xB013, 0xB606, 0xF01F, 0xF02F, 0xF04F, 0xF05F, 0xF08F,
+]
+TTM_DRAW = [
+    0xA002, 0xA014, 0xA024, 0xA034, 0xA044, 0xA054, 0xA064, 0xA094,
+    0xA0A4, 0xA0B5, 0xA104, 0xA114, 0xA404, 0xA424, 0xA504, 0xA506,
+    0xA514, 0xA516, 0xA524, 0xA526, 0xA534, 0xA536, 0xA5A7, 0xA601,
+    0xA704, 0xAF02, 0xAF1F, 0xAF2F,
+]
+TTM_C = [
+    0xC01F, 0xC02F, 0xC031, 0xC041, 0xC051, 0xC061, 0xC071, 0xC081,
+    0xC091, 0xC0A1, 0xC0B2, 0xC0C2, 0xC0D3, 0xC0E3, 0xC0F4, 0xC102,
+    0xCF01, 0xCF11,
+]
+TTM_OPCODES = set(TTM_GENERAL) | set(TTM_DRAW) | set(TTM_C) | {0x0FF0, 0x1301, 0x1311}
+
+# ADS opcodes, from the table at SCRANTIC.EXE seg10:0x1875 (handlers at 0x18CD).
+ADS_OPCODES = [
+    0xF000, 0xF010, 0xF200, 0xF210, 0xFFFF, 0x0001, 0x0005, 0x1010,
+    0x1020, 0x1030, 0x1040, 0x1050, 0x1060, 0x1070, 0x1080, 0x1310,
+    0x1320, 0x1330, 0x1340, 0x1350, 0x1360, 0x1370, 0x1380, 0x1390,
+    0x13A0, 0x13A1, 0x13B0, 0x13B1, 0x13C0, 0x13C1, 0x1420, 0x1430,
+    0x1500, 0x1510, 0x1520, 0x2000, 0x2005, 0x2010, 0x2015, 0x2020,
+    0x3010, 0x3020, 0x4000, 0x4010,
+]
+
+# What the confirmed TTM opcodes do, where it is known.
+TTM_NAMES = {
+    0x0FF0: 'END_FRAME',
+    0x0080: 'FREE_SHAPES',
+    0x0110: 'PURGE',
+    0x1021: 'SET_DELAY',
+    0x1051: 'SELECT_BMP_SLOT',
+    0x1061: 'SELECT_PAL_SLOT',
+    0x1111: 'SET_SCENE',
+    0x1121: 'SET_BACKGROUND',
+    0x1201: 'GOTO_FRAME',
+    0x4204: 'SAVE_REGION',
+    0x4214: 'SET_CLIP_REGION',
+    0xA504: 'DRAW_SPRITE',
+    0xA524: 'DRAW_SPRITE_FLIPPED',
+    0xA601: 'CLEAR_REGION',
+    0xA0A4: 'DRAW_RECT',
+    0xF01F: 'LOAD_SCREEN',
+    0xF02F: 'LOAD_BITMAP',
+    0xF05F: 'LOAD_PALETTE',
+}
+
+
+def disasm(code, opcodes=None):
     """TTM TT3: / ADS SCR: bytecode -> [(offset, opcode, args, string)].
 
-    Opcodes are 16-bit; the low nibble is the operand count, 0x0F meaning a
-    single NUL-terminated string padded to a word boundary.
+    Opcodes are 16-bit; the low nibble is the operand count, 0x0F meaning one
+    NUL-terminated string padded to a word boundary. The interpreter confirms
+    this at seg12:0x0461, where it masks the fetched word with 0x0F and jumps
+    through a table indexed by the result.
 
-    INCOMPLETE. This decodes the opening of every script correctly -- resource
-    loads, sprite draws, end-of-frame -- but loses sync partway into most of
-    them, so some opcodes must carry an operand count that is not the low
-    nibble. Decoding stops at the first inconsistency rather than emitting
-    garbage; the caller gets however much was understood. See docs/ANALYSIS.md.
+    Pass `opcodes` to reject anything outside a known set; decoding then stops
+    at the first word that is not a valid opcode rather than emitting garbage.
+    All 41 TTM scripts decode end to end with TTM_OPCODES.
+
+    ADS is only partly understood: its opcodes are known (ADS_OPCODES) but
+    several carry an operand count that is not the low nibble -- 0x0001 and
+    0x0005 take none, 0x2000/0x2005 take four, 0x4000/0x4010 take three -- and
+    the 0x10x0 and 0x13x0 families are variable length. Do not trust an ADS
+    disassembly past the first few instructions.
     """
     ops = []
     p = 0
     while p + 2 <= len(code):
         w = struct.unpack_from('<H', code, p)[0]
+        if opcodes is not None and w not in opcodes:
+            break
         count = w & 0x0F
-        op = w & 0xFFF0
         if count == 0x0F:
             end = code.find(b'\0', p + 2)
             if end < 0:
                 break
-            ops.append((p, op, [], code[p + 2:end].decode('latin1')))
+            ops.append((p, w, [], code[p + 2:end].decode('latin1')))
             p = end + 1
             if p & 1:
                 p += 1
@@ -297,7 +369,7 @@ def disasm(code):
                 break
             args = [struct.unpack_from('<h', code, p + 2 + i * 2)[0]
                     for i in range(count)]
-            ops.append((p, op, args, None))
+            ops.append((p, w, args, None))
             p += 2 + count * 2
     return ops
 

@@ -63,10 +63,36 @@ for name, body, _ in records:
         except Exception as exc:                     # noqa: BLE001
             failures.append('%s failed to decode: %s' % (name, exc))
 
+ttm_ok = ttm_total = 0
+ads_ok = ads_total = 0
+for name, body, _ in records:
+    leaves = dict((path[-1], payload) for path, payload in dgds.flatten(dgds.parse_chunks(body)))
+    if 'TT3:' in leaves:
+        ttm_total += 1
+        code = dgds.decompress(leaves['TT3:'])
+        ops = dgds.disasm(code, dgds.TTM_OPCODES)
+        consumed = 0
+        if ops:
+            off, op, argv, text = ops[-1]
+            consumed = off + 2 + (len(text) + 1 + ((off + len(text) + 3) & 1)
+                                  if text is not None else len(argv) * 2)
+        if consumed >= len(code) - 2:
+            ttm_ok += 1
+        else:
+            failures.append('%s disassembly stopped at %d of %d'
+                            % (name, consumed, len(code)))
+    elif 'SCR:' in leaves and name.upper().endswith('.ADS'):
+        ads_total += 1
+        if dgds.disasm(dgds.decompress(leaves['SCR:']), set(dgds.ADS_OPCODES)):
+            ads_ok += 1
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
 print('sprites      %d frames' % frames)
+print('TTM scripts  %d/%d disassemble end to end' % (ttm_ok, ttm_total))
+print('ADS scripts  %d/%d start decoding (operand counts only partly known)'
+      % (ads_ok, ads_total))
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))

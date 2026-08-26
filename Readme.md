@@ -17,12 +17,15 @@ decoded:
 
 * all three unwrapping layers, automated end to end
 * the `RESOURCE.001` container format
-* the LZW codec, ported from the original's disassembly — all 139 compressed
+* both codecs, ported from the original's disassembly — all 180 compressed
   chunks decode to exactly their declared size
 * 4bpp images, palette and transparency — 10 backgrounds and 2,392 sprite
   frames export to PNG
 
-Still open: the TTM/ADS opcode table, and the scene scheduler that lives in the
+* the TTM animation bytecode — all 41 scripts disassemble end to end against
+  the opcode tables read out of the interpreter
+
+Still open: ADS operand counts, and the scene scheduler that lives in the
 81,919 bytes of 16-bit code.
 
 Details in [docs/ANALYSIS.md](docs/ANALYSIS.md),
