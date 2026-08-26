@@ -885,6 +885,23 @@ ids 1 to 24, so one of them is silent in the original too. `ds:0x00BC` is the
 `Sounds` switch from `SCRANTIC.INI`, and when it is off the loader does not
 even run.
 
+### The clip nobody takes off
+
+`4004` sets a clip rectangle and nothing in the engine ever clears it. The live
+one is the globals at `ds:0x1EA3`-`ds:0x1EAA`, which is what the blitter reads
+(`seg8:0x1ADE`); `seg12:0x0F40` also writes a copy into the instance record at
++0x20, and that copy is never read back by anything. `seg10:0x0BA6` fills it in
+with the whole screen when an instance is made, which says what was meant even
+though nothing acts on it — the same shape as `1121` writing a field only a
+dead opcode reads.
+
+Leaving it set costs the original almost nothing, because it keeps its work
+page between frames: a stale clip only limits where *new* drawing lands, and
+everything already on the page stays. This port repaints the backdrop every
+tick, so a stale clip means everything outside it stops being drawn at all —
+and thirty-seven scenes in a twenty-six minute run were ending with one set,
+which every scene after inherited. The port clears it when a scene starts.
+
 ## Still open
 
 * What the two position components mean geometrically. Major 0-6 and minor

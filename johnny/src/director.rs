@@ -1055,6 +1055,22 @@ impl Director {
         ));
         // A scene draws its own Johnny.
         self.standing = None;
+        // Start it unclipped.
+        //
+        // `4004` sets a clip and nothing in the engine ever takes it off
+        // again: the live rectangle is the globals at `ds:0x1EA3`, and the
+        // copy `seg12:0x0F40` also writes into the instance record at +0x20 is
+        // never read back by anything. `seg10:0x0BA6` does fill that copy in
+        // with the whole screen when an instance is made, which says what was
+        // meant even though nothing acts on it.
+        //
+        // Leaving it set is nearly harmless in the original, which keeps its
+        // work page between frames -- a stale clip only limits where *new*
+        // drawing lands. This port repaints the backdrop every tick, so a
+        // stale clip means everything outside it stops being drawn at all.
+        // Thirty-seven scenes in a twenty-six minute run were ending with one
+        // still set, and every scene after inherited it.
+        self.stage.surface.clip = None;
         self.activity = Activity::Scene {
             row: scene,
             seq: Box::new(seq),
@@ -1311,6 +1327,9 @@ impl Director {
                         *self.ads_todo.entry(*op).or_insert(0) += n;
                     }
                     self.restore_island();
+                    if let Some(c) = self.stage.surface.clip {
+                        self.note(format!("scene left a clip set: {c:?}"));
+                    }
                     self.note(format!("scene over, Johnny at {:?}", self.position));
                     if same(self.story_scene, row) {
                         // `seg4:0x0884`: the story got told.
