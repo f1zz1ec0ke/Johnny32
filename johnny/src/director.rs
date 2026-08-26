@@ -475,10 +475,11 @@ impl Director {
     /// waits it out rather than flickering underneath.
     fn step_surf(&mut self) -> bool {
         let now = self.tick;
+        let rng = &mut self.rng;
         let Some(scenery) = self.scenery.as_mut() else {
             return false;
         };
-        if !scenery.tick(now) || self.stage.background_gen != self.scenery_gen {
+        if !scenery.tick(now, rng) || self.stage.background_gen != self.scenery_gen {
             return false;
         }
         let frame = scenery.compose();
@@ -723,6 +724,11 @@ impl Director {
             self.day = if self.day >= STORY_DAYS { 1 } else { self.day + 1 };
             self.note(format!("--- day {} ---", self.day));
         }
+    }
+
+    /// How many waves are on the open water right now.
+    pub fn wave_count(&self) -> usize {
+        self.scenery.as_ref().map_or(0, |s| s.wave_count())
     }
 
     /// Ticks since the director started; one tick is `MS_PER_TICK`.

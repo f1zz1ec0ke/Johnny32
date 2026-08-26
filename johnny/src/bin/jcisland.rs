@@ -44,9 +44,13 @@ fn main() -> ExitCode {
     d.faithful_router = std::env::var("JC_FAITHFUL").is_ok();
     let mut frame = 0usize;
     let mut logged = 0usize;
+    let mut waves_max = 0usize;
+    let mut waves_total = 0usize;
 
     for _ in 0..ticks {
         let drew = d.tick(&archive);
+        waves_max = waves_max.max(d.wave_count());
+        waves_total += d.wave_count();
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
@@ -71,7 +75,11 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\n{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
+        "\nwaves: {waves_max} at most, {:.1} on average",
+        waves_total as f32 / ticks.max(1) as f32
+    );
+    println!(
+        "{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
         d.ticks() as f32 * johnny::director::MS_PER_TICK as f32 / 1000.0,
         d.day,
         d.phase,

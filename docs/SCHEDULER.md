@@ -363,24 +363,62 @@ answer is:
 The port fills it with index 9 — the water it sits in — which cannot be far
 wrong either way.
 
-### Rolling waves, not yet ported
+### Waves on the open water
 
-There is a second wave system, and this one moves. `ds:0x0268`, `ds:0x0270`
-and `ds:0x0278` hold three sequences of `BACKGRND.BMP` frame indices,
-terminated by `0xFF`:
+There is a second wave system, and this one comes and goes. `seg3:0x04BD`
+walks an array of twelve-byte object records at `ds:0x2F42`; an empty slot may
+be filled, a live one is moved on.
 
-```
-1a 1b 1c 1d 1c 1b 1a ff     frames 26-29, 104x16
-16 17 18 19 18 17 16 ff     frames 22-25, 64x12
-12 13 14 15 14 13 12 ff     frames 18-21, 32x6
-```
+Three of the four kinds are waves, and each is a four-frame `BACKGRND.BMP`
+animation played as a ping-pong. The sequences live at `ds:0x0268`, `ds:0x0270`
+and `ds:0x0278`, terminated by `0xFF`:
 
-Each is a four-frame animation played as a ping-pong, and the three sizes are
-three distances — a wave that grows as it comes in. `seg3:0x06FA` walks one:
-a record holds a position, a cursor into the sequence and a hold count; every
-time the 160ms slot at `ds:0x028A` comes round the position advances by
-`ds:0x0280` and the cursor may step; reaching the `0xFF` retires the wave.
-The spawn positions are still to be read out.
+| Kind | Sequence | Frames | Size | On the water at once | Spawns in | Set up at |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `ds:0x0278` | 18-21 | 32x6 | 4 | x -10 +650, y 249 +40 | `seg3:0x05CA` |
+| 2 | `ds:0x0270` | 22-25 | 64x12 | 2 | x -40 +680, y 289 +93 | `seg3:0x0627` |
+| 3 | `ds:0x0268` | 26-29 | 104x16 | 1 | x -70 +710, y 382 +142 | `seg3:0x0682` |
+
+The three sizes are three distances: the small one high and far out, the big
+one low and close. `seg3:0x14BF` picks the spot inside the band, taking the
+sprite's own size off the span so it lands whole, and the caps come from
+`seg3:0x046E`.
+
+A slot is filled by two rolls through the weighted chooser at `seg4:0x1F1B`,
+whose arguments are percentages (it scales each by 655, a hundredth of 65536,
+and walks them against a 16-bit draw). First a flat 35% for the slot to be
+filled at all (`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it
+(`seg3:0x04EE`): 35% a glint, 5% each wave size, 50% nothing after all.
+
+A wave holds each frame for 0, 1 or 2 steps — `seg4:0x1F1B(30, 50)`, so 30%
+one, 50% two, 20% none — and a step is 160ms, from the delay slot at
+`ds:0x028A` (`seg3:0x0A19`). Seven frames later the cursor hits the `0xFF` and
+the wave retires, giving its slot back. So one lasts between about one and
+three and a half seconds.
+
+They barely travel. Each step adds `ds:0x0280` to the x, and that is +1 or -1,
+re-rolled at `seg3:0x0A59` on a straight 50/50. The effect is a crest that
+swells, shimmers and subsides where it is, not one that rolls ashore.
+
+### The speed gate
+
+Nothing in that array spawns unless `ds:0x30BE` is over 100 (`seg3:0x04E4`),
+and `ds:0x30BE` is a **speed index**: `seg2:0x1600` times a calibration loop
+against the system clock and divides `100000 * iterations` by the elapsed
+time, twice by ten. On a slow 386 the decorative objects were simply skipped.
+Any machine running this port is over the line, so the port spawns them.
+
+### Glints, not yet ported
+
+The fourth kind (spawn at `seg3:0x0515`, update at `seg3:0x07DE`) has a budget
+of thirty and is the only one that gets 35% of the roll rather than 5%. It is
+not sprite-based: it blits small regions between the three pages at
+`ds:0x1EB0`, `ds:0x1EB2` and `ds:0x1EB4` and puts them back when its hold
+expires. `seg3:0x055E` rejects any position overlapping the palm trunk
+(24x145 at 443,148) or the fronds (152x69 at 366,122), which is what gives it
+away as something on the water rather than on the island — thirty glints
+twinkling on the sea. Porting it needs the page semantics of the blitter at
+`seg13:0x007E`, which are not read out yet.
 
 ## In the port
 
@@ -412,8 +450,9 @@ Two things the port had to get right that are easy to get wrong:
   port's three-minute cap is a backstop rather than the schedule, but what
   `cost` is a price *in* is still unanswered: the chooser compares `cost / 2`
   against a ceiling (`seg4:0x0D76`), which makes it a price, not a duration.
-* What the engine draws in the oceans' index-0 crests, and where the rolling
-  waves are spawned — both above, under "The island itself".
+* What the engine draws in the oceans' index-0 crests, above under "The
+  colour that is not there".
+* The glints, above — the page semantics of `seg13:0x007E` are the blocker.
 * The rest of the 42 frames of `BACKGRND.BMP`. Six are the island and
   twenty-one are the surf; the remainder (a raft, a hut, a signal fire) are
   what Johnny builds, so which of them are drawn is part of the story state.

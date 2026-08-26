@@ -106,7 +106,9 @@ The island is the real one now: a 640x480 sea (`OCEAN00/01/02.SCR` by day,
 scrub, palm trunk, fronds, and a rock and sandbar that come and go on a coin
 flip — and seven patches of surf breaking round the shore, three frames each,
 on three counters that chase one another so the shoreline never moves in
-lockstep. `docs/SCHEDULER.md` has the addresses and the frame table.
+lockstep. Out on the open water, wave crests swell and subside at random
+spots in three bands of distance, up to seven at a time.
+`docs/SCHEDULER.md` has the addresses and the frame tables.
 
 And Johnny lives on his island — the scheduler picking scenes by weight and
 time of day, walking him to them, and running them:

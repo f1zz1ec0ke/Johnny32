@@ -15,6 +15,7 @@
 //!    frames each, driven by three counters that chase each other so the
 //!    whole shoreline does not move in lockstep.
 
+use crate::ads::Rng;
 use crate::dgds::{self, Archive, Frame};
 use crate::render::{Mirror, Surface, SCREEN_H, SCREEN_W};
 
@@ -52,6 +53,64 @@ const SURF: [(i32, i32, usize, usize); 7] = [
     (0x082, 0x154, 39, 0), // seg3:0x1496
 ];
 
+/// Ticks between wave steps. `seg3:0x0A19` writes 10 into the delay slot at
+/// `ds:0x028A`, so one step is 160ms.
+pub const WAVE_TICKS: u32 = 10;
+
+/// The waves out on the open sea, in the order their spawn handlers sit in
+/// the table at `seg3:0x0A30`.
+///
+/// Each is a four-frame animation of `BACKGRND.BMP` played as a ping-pong,
+/// from the sequences at `ds:0x0268`, `ds:0x0270` and `ds:0x0278`, and each
+/// appears at a random spot inside a band of sea. The three bands are three
+/// distances: the small one sits high and far off, the big one low and close.
+struct Kind {
+    /// Frame indices, terminated in the data by `0xFF`.
+    sequence: [usize; 7],
+    /// How many of this size may be on the water at once (`seg3:0x046E`).
+    budget: u8,
+    /// Top-left of the band, and how far the spawn may wander inside it.
+    base: (i32, i32),
+    span: (i32, i32),
+}
+
+const KINDS: [Kind; 3] = [
+    // seg3:0x05CA, sequence at ds:0x0278 -- 32x6, furthest out
+    Kind {
+        sequence: [18, 19, 20, 21, 20, 19, 18],
+        budget: 4,
+        base: (-10, 249),
+        span: (650, 40),
+    },
+    // seg3:0x0627, sequence at ds:0x0270 -- 64x12
+    Kind {
+        sequence: [22, 23, 24, 25, 24, 23, 22],
+        budget: 2,
+        base: (-40, 289),
+        span: (680, 93),
+    },
+    // seg3:0x0682, sequence at ds:0x0268 -- 104x16, nearest
+    Kind {
+        sequence: [26, 27, 28, 29, 28, 27, 26],
+        budget: 1,
+        base: (-70, 382),
+        span: (710, 142),
+    },
+];
+
+/// One wave, mid-life. The engine keeps these in twelve-byte records in the
+/// array at `ds:0x2F42` and walks them at `seg3:0x04BD`.
+struct Wave {
+    kind: usize,
+    x: i32,
+    y: i32,
+    /// How far into the sequence; reaching the end retires the wave.
+    cursor: usize,
+    /// Steps to wait between frames, and the countdown to the next one.
+    hold: u16,
+    left: u16,
+}
+
 /// The three sea frames, in the order the pointer table at `ds:0x0262` has
 /// them. `seg3:0x01F5` draws `rand() % 3`.
 pub const SEAS: [&str; 3] = ["OCEAN00.SCR", "OCEAN01.SCR", "OCEAN02.SCR"];
@@ -80,6 +139,11 @@ pub struct Scenery {
     counters: [u8; 3],
     /// Tick at which the counters step again.
     next: u32,
+    /// The waves out on the water, and the tick they next move on.
+    waves: Vec<Wave>,
+    wave_next: u32,
+    /// Which way the water is drifting this step: `ds:0x0280`, +1 or -1.
+    drift: i32,
     pub sea: &'static str,
     pub extras: bool,
 }
@@ -129,6 +193,9 @@ impl Scenery {
             pieces,
             counters: [2, 2, 2],
             next: now,
+            waves: Vec::new(),
+            wave_next: now,
+            drift: 1,
             sea,
             extras,
         })
@@ -140,9 +207,10 @@ impl Scenery {
     /// on how they currently sit relative to each other, so the three patches
     /// they drive stay out of phase. From `[2, 2, 2]` it runs a nine-step
     /// cycle -- 576ms for the shoreline to come back round.
-    pub fn tick(&mut self, now: u32) -> bool {
+    pub fn tick(&mut self, now: u32, rng: &mut Rng) -> bool {
+        let waves = self.step_waves(now, rng);
         if now < self.next {
-            return false;
+            return waves;
         }
         self.next = now + SURF_TICKS;
         let [c0, c1, c2] = self.counters;
@@ -161,6 +229,90 @@ impl Scenery {
         true
     }
 
+    /// How many waves are on the water, for the tools that report it.
+    pub fn wave_count(&self) -> usize {
+        self.waves.len()
+    }
+
+    /// Try to put another wave on the water, then move the ones already there.
+    ///
+    /// `seg3:0x04BD` walks the object array once per pass. An empty slot gets
+    /// a 35% roll to be filled at all (`seg3:0x04CE`), and if it wins, a
+    /// second weighted roll picks what goes in it: 35% a glint, 5% each for
+    /// the three wave sizes, 50% nothing after all. A live slot moves on when
+    /// its 160ms is up.
+    fn step_waves(&mut self, now: u32, rng: &mut Rng) -> bool {
+        let mut moved = false;
+
+        // `seg3:0x04E4` will not spawn anything unless `ds:0x30BE` is over
+        // 100. That is a speed index -- segment 2 times a calibration loop
+        // and divides -- so on a 386 the extra objects were simply skipped.
+        // Any machine running this port is over the line.
+        if weighted(rng, &[35]) == 1 {
+            // Weights from `seg3:0x04EE`. Choice 1 is the glint, which the
+            // port does not draw; 2, 3 and 4 are the wave sizes.
+            let pick = weighted(rng, &[35, 5, 5, 5]);
+            if (2..=4).contains(&pick) {
+                let kind = pick - 2;
+                let live = self.waves.iter().filter(|w| w.kind == kind).count();
+                if live < KINDS[kind].budget as usize {
+                    if let Some(w) = self.spawn(kind, rng) {
+                        self.waves.push(w);
+                        moved = true;
+                    }
+                }
+            }
+        }
+
+        if now < self.wave_next {
+            return moved;
+        }
+        self.wave_next = now + WAVE_TICKS;
+        // `ds:0x0280`, which the engine re-rolls every pass: the water drifts
+        // one pixel one way or the other rather than travelling.
+        self.drift = if weighted(rng, &[50]) == 1 { -1 } else { 1 };
+
+        let drift = self.drift;
+        for w in self.waves.iter_mut() {
+            w.x += drift;
+            let due = w.left == 0;
+            w.left = w.left.wrapping_sub(1);
+            if due {
+                w.left = w.hold;
+                w.cursor += 1;
+            }
+        }
+        let before = self.waves.len();
+        self.waves
+            .retain(|w| w.cursor < KINDS[w.kind].sequence.len());
+        moved || self.waves.len() != before
+    }
+
+    /// Place a new wave inside its band. `seg3:0x14BF` picks the spot, and
+    /// takes the sprite's own size off the span so it lands whole.
+    fn spawn(&self, kind: usize, rng: &mut Rng) -> Option<Wave> {
+        let k = &KINDS[kind];
+        let sprite = self.pieces.get(k.sequence[0])?;
+        let sx = k.span.0 - sprite.width as i32;
+        let sy = k.span.1 - sprite.height as i32;
+        if sx < 0 || sy < 0 {
+            return None;
+        }
+        // `seg4:0x1F1B(30, 50, 0)`: 30% one step of hold, 50% two, 20% none.
+        let hold = match weighted(rng, &[30, 50]) {
+            0 => 0,
+            n => n as u16,
+        };
+        Some(Wave {
+            kind,
+            x: k.base.0 + span_roll(rng, sx),
+            y: k.base.1 + span_roll(rng, sy),
+            cursor: 0,
+            hold,
+            left: hold,
+        })
+    }
+
     /// The backdrop as it stands: island, then this step's surf.
     pub fn compose(&self) -> Frame {
         let mut surface = Surface::new(self.base.width, self.base.height);
@@ -169,6 +321,12 @@ impl Scenery {
             let frame = first + self.counters[counter] as usize;
             if let Some(f) = self.pieces.get(frame) {
                 surface.draw_sprite(f, x, y, Mirror::default());
+            }
+        }
+        for w in self.waves.iter() {
+            let frame = KINDS[w.kind].sequence[w.cursor.min(6)];
+            if let Some(f) = self.pieces.get(frame) {
+                surface.draw_sprite(f, w.x, w.y, Mirror::default());
             }
         }
         Frame {
@@ -188,5 +346,34 @@ fn fit_to_screen(src: &Frame) -> Frame {
         width: SCREEN_W,
         height: SCREEN_H,
         pixels: surface.pixels,
+    }
+}
+
+/// The engine's weighted choice, from `seg4:0x1F1B`.
+///
+/// The arguments are percentages. It draws a 16-bit random number and walks
+/// the list scaling each weight by 655 -- a hundredth of 65536 -- returning
+/// the 1-based position of the one it lands on, or 0 if it runs off the end.
+fn weighted(rng: &mut Rng, weights: &[u32]) -> usize {
+    let mut roll = rng.next_u32() & 0xFFFF;
+    for (i, &w) in weights.iter().enumerate() {
+        if w == 0 {
+            break;
+        }
+        let scaled = w * 655;
+        if scaled > roll {
+            return i + 1;
+        }
+        roll -= scaled;
+    }
+    0
+}
+
+/// `rand() % span`, and zero when there is no room to move.
+fn span_roll(rng: &mut Rng, span: i32) -> i32 {
+    if span <= 0 {
+        0
+    } else {
+        (rng.next_u32() % span as u32) as i32
     }
 }
