@@ -83,16 +83,24 @@ for name, body, _ in records:
                             % (name, consumed, len(code)))
     elif 'SCR:' in leaves and name.upper().endswith('.ADS'):
         ads_total += 1
-        if dgds.disasm(dgds.decompress(leaves['SCR:']), set(dgds.ADS_OPCODES)):
+        code = dgds.decompress(leaves['SCR:'])
+        ops = dgds.disasm_ads(code)
+        consumed = 0
+        if ops:
+            off, op, argv = ops[-1]
+            consumed = off + dgds.ADS_LENGTHS.get(op, 2)
+        if consumed == len(code):
             ads_ok += 1
+        else:
+            failures.append('%s consumed %d of %d bytes'
+                            % (name, consumed, len(code)))
 
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
 print('sprites      %d frames' % frames)
 print('TTM scripts  %d/%d disassemble end to end' % (ttm_ok, ttm_total))
-print('ADS scripts  %d/%d start decoding (operand counts only partly known)'
-      % (ads_ok, ads_total))
+print('ADS scripts  %d/%d consume exactly' % (ads_ok, ads_total))
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))

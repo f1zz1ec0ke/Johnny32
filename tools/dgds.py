@@ -308,6 +308,69 @@ ADS_OPCODES = [
     0x3010, 0x3020, 0x4000, 0x4010,
 ]
 
+# ADS instruction lengths, from the length function at seg10:0x0303. It looks
+# the opcode up in a 35-entry table at seg10:0x0383 (handlers at 0x03C9) whose
+# handlers do nothing but add a constant to the script pointer. Anything not
+# listed advances 2 -- which covers the 0x000N sequence labels, the block
+# delimiters and the terminators. Every ADS script consumes exactly under this.
+ADS_LENGTHS = {
+    0xF000: 2, 0xF010: 4, 0xF200: 4, 0xF210: 4,
+    0x1010: 6, 0x1020: 6, 0x1030: 6, 0x1040: 6, 0x1050: 6, 0x1060: 6,
+    0x1070: 6, 0x1080: 4,
+    0x1310: 6, 0x1320: 6, 0x1330: 6, 0x1340: 6, 0x1350: 6, 0x1360: 6,
+    0x1370: 6, 0x1380: 4, 0x1390: 4,
+    0x13A0: 4, 0x13A1: 4, 0x13B0: 4, 0x13B1: 4, 0x13C0: 4, 0x13C1: 4,
+    0x2000: 10, 0x2005: 10, 0x2010: 8, 0x2015: 8, 0x2020: 8,
+    0x3020: 4, 0x4000: 8, 0x4010: 8,
+}
+
+ADS_NAMES = {
+    0x2000: 'PLAY_SCENE',      # (ttm, scene, flags, weight)
+    0x2005: 'PLAY_SCENE',      # same shape; weight is operand 4
+    0x3010: 'RANDOM_BEGIN',    # weighted pick of one entry, up to RANDOM_END
+    0x30FF: 'RANDOM_END',
+    0x3020: 'RANDOM_SKIP',     # a weighted "play nothing" choice
+    0x1510: 'STEP',
+    0x1520: 'STEP_END',
+    0x1420: 'STOP',
+    0x1430: 'STOP',
+    0xFFFF: 'END_SEQUENCE',
+    # conditionals; see docs/FILE_FORMATS.md for the exact predicates
+    0x1010: 'IF_FINISHED',     0x1310: 'IF_FINISHED',
+    0x1020: 'IF_NOT_FINISHED', 0x1320: 'IF_NOT_FINISHED',
+    0x1030: 'IF_NOT_STARTED',  0x1330: 'IF_NOT_STARTED',
+    0x1040: 'IF_STARTED',      0x1340: 'IF_STARTED',
+    0x1050: 'IF_RUNNING',      0x1350: 'IF_RUNNING',
+    0x1060: 'IF_IDLE',         0x1360: 'IF_IDLE',
+    0x1070: 'IF_PAUSED',       0x1370: 'IF_PAUSED',
+    0x1080: 'IF_COUNT_LE',     0x1380: 'IF_COUNT_LE',
+    0x1390: 'IF_COUNT_GE',
+    0x13A0: 'IF_VAR_LE', 0x13A1: 'IF_VAR_LE',
+    0x13B0: 'IF_VAR_GE', 0x13B1: 'IF_VAR_GE',
+    0x13C0: 'IF_VAR_EQ', 0x13C1: 'IF_VAR_EQ',
+}
+
+
+def disasm_ads(code):
+    """ADS SCR: bytecode -> [(offset, opcode, operands)].
+
+    ADS does not use the TTM rule -- its operand counts are not the low nibble.
+    Each handler advances the script pointer itself, and the lengths come from
+    ADS_LENGTHS. All ten ADS scripts consume exactly under this.
+    """
+    ops = []
+    p = 0
+    while p + 2 <= len(code):
+        w = struct.unpack_from('<H', code, p)[0]
+        n = ADS_LENGTHS.get(w, 2)
+        if p + n > len(code):
+            break
+        args = [struct.unpack_from('<H', code, p + 2 + i * 2)[0]
+                for i in range((n - 2) // 2)]
+        ops.append((p, w, args))
+        p += n
+    return ops
+
 # What the confirmed TTM opcodes do, where it is known.
 TTM_NAMES = {
     0x0FF0: 'END_FRAME',

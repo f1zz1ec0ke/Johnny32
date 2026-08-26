@@ -44,6 +44,58 @@ def parse(data):
     return info
 
 
+def imported_names(data, info):
+    """Module reference table -> list of module names, in ordinal order."""
+    ne = info['ne']
+    mods = []
+    for i in range(info['nmods']):
+        nameoff = struct.unpack_from('<H', data, ne + info['modrefs'] + i * 2)[0]
+        p = ne + info['imports'] + nameoff
+        mods.append(data[p + 1:p + 1 + data[p]].decode('latin1'))
+    return mods
+
+
+def relocations(data, info, seg):
+    """Per-segment relocation records -> {offset: description}.
+
+    A segment with flag 0x100 stores, right after its data, a uint16 count and
+    that many 8-byte records. Borland leaves the instruction operand as a
+    placeholder (0000:FFFF for a far call) and patches it at load time, so
+    without these every imported call disassembles identically and uselessly.
+    """
+    if not (seg['flags'] & 0x100):
+        return {}
+    mods = imported_names(data, info)
+    base = seg['offset'] + seg['length']
+    if base + 2 > len(data):
+        return {}
+    count = struct.unpack_from('<H', data, base)[0]
+    out = {}
+    for i in range(count):
+        o = base + 2 + i * 8
+        if o + 8 > len(data):
+            break
+        addr_type = data[o]
+        rel_type = data[o + 1]
+        offset = struct.unpack_from('<H', data, o + 2)[0]
+        a, b = struct.unpack_from('<HH', data, o + 4)
+        kind = rel_type & 3
+        if kind == 0:                                   # internal reference
+            segno = a & 0xFF
+            desc = 'seg%d:%#06x' % (segno, b) if segno != 0xFF else 'movable#%d' % b
+        elif kind == 1:                                 # by ordinal
+            mod = mods[a - 1] if 0 < a <= len(mods) else '?%d' % a
+            desc = '%s.%d' % (mod, b)
+        elif kind == 2:                                 # by name
+            mod = mods[a - 1] if 0 < a <= len(mods) else '?%d' % a
+            p = info['ne'] + info['imports'] + b
+            desc = '%s.%s' % (mod, data[p + 1:p + 1 + data[p]].decode('latin1'))
+        else:
+            desc = 'osfixup'
+        out[offset] = desc
+    return out
+
+
 def names_at(data, off):
     out = []
     p = off
@@ -80,10 +132,16 @@ def main():
         seg = info['segments'][args.disasm - 1]
         body = data[seg['offset']:seg['offset'] + seg['length']]
         end = args.end if args.end is not None else len(body)
+        fixups = relocations(data, info, seg)
         md = Cs(CS_ARCH_X86, CS_MODE_16)
         for ins in md.disasm(body[args.start:end], args.start):
-            print('%04x  %-14s %s %s' % (ins.address, ins.bytes.hex(),
-                                         ins.mnemonic, ins.op_str))
+            note = ''
+            for k in range(ins.size):
+                if ins.address + k in fixups:
+                    note = '   ; ' + fixups[ins.address + k]
+                    break
+            print('%04x  %-14s %s %s%s' % (ins.address, ins.bytes.hex(),
+                                           ins.mnemonic, ins.op_str, note))
         return
 
     if args.strings:
@@ -108,12 +166,7 @@ def main():
             total += s['length']
     print('  total code: %d bytes' % total)
     print()
-    mods = []
-    for i in range(info['nmods']):
-        nameoff = struct.unpack_from('<H', data, ne + info['modrefs'] + i * 2)[0]
-        p = ne + info['imports'] + nameoff
-        mods.append(data[p + 1:p + 1 + data[p]].decode('latin1'))
-    print('imports:      %s' % ', '.join(mods))
+    print('imports:      %s' % ', '.join(imported_names(data, info)))
     print('resident:     %s' % ', '.join(
         '%s@%d' % n for n in names_at(data, ne + info['resnames'])))
     print('non-resident: %s' % ', '.join(

@@ -24,9 +24,10 @@ decoded:
 
 * the TTM animation bytecode — all 41 scripts disassemble end to end against
   the opcode tables read out of the interpreter
+* the ADS sequencer — all 10 scripts consume exactly, including the weighted
+  random-choice blocks that drive the screensaver's variety
 
-Still open: ADS operand counts, and the scene scheduler that lives in the
-81,919 bytes of 16-bit code.
+Still open: the scene scheduler that lives in the 81,919 bytes of 16-bit code.
 
 Details in [docs/ANALYSIS.md](docs/ANALYSIS.md),
 [docs/FILE_FORMATS.md](docs/FILE_FORMATS.md) and

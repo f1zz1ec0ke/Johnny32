@@ -97,8 +97,23 @@ def dump_script(path, name, body):
         note = ''
     elif 'SCR:' in chunks:
         code = dgds.decompress(chunks['SCR:'])
-        valid = set(dgds.ADS_OPCODES)
-        note = '  (ADS operand counts are only partly known -- see docs/ANALYSIS.md)'
+        lines.append('')
+        lines.append('bytecode (%d bytes):' % len(code))
+        depth = 0
+        for off, op, argv in dgds.disasm_ads(code):
+            name = dgds.ADS_NAMES.get(op, '')
+            if op == 0x30FF:
+                depth = max(0, depth - 1)
+            if op & 0xFFF0 == 0x0000 and op != 0x0000:
+                name = 'SEQUENCE %d' % op
+            pad = '  ' * depth
+            lines.append('  %04X  %04X  %s%-16s %s'
+                         % (off, op, pad, name, ' '.join(str(a) for a in argv)))
+            if op == 0x3010:
+                depth += 1
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        return
     else:
         code = None
     if code:

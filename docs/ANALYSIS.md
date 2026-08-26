@@ -129,15 +129,18 @@ literal runs verbatim. What gives it away is one stray byte every ~128 bytes,
 which is a literal-run marker. Two wrong assumptions (raw chunk, inverted RLE
 convention) had been cancelling out just well enough to look like progress.
 
+* **the ADS sequencer.** ADS turned out not to use the TTM length rule at all;
+  it has its own length function at `seg10:0x0303`. With that, all ten scripts
+  consume exactly, and they read as what they are — small state machines that
+  play a scene, wait for it, and branch on what happened.
+
+  The find worth having is `seg10:0x0CDA`: `3010 ... 30FF` is a **weighted
+  random choice**. It sums a weight per entry, draws `rand() % total`, and runs
+  the one it lands on. That is the mechanism behind the screensaver's variety,
+  and the weights are sitting in the data as operand 4 of every `2005`.
+
 **Open:**
 
-* **ADS operand counts.** The 44 ADS opcodes are known (`seg10:0x1875`), but
-  their operand counts are *not* the low nibble — each handler advances the
-  script pointer itself. Several are read off already (`0001`/`0005` take
-  none, `2000`/`2005` take four, `4000`/`4010` take three), but the `0x10x0`
-  and `0x13x0` families are variable-length branch forms that need more of the
-  interpreter read. ADS is the sequencer, so this overlaps with the scheduler
-  below.
 * **The scheduler.** Which scene plays when, the story progression, the
   day/night and tide cycles, and the walking transitions all live in those
   81,919 bytes of 16-bit code. This is the part no existing project has
