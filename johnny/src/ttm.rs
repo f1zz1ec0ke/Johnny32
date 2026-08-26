@@ -73,6 +73,12 @@ pub enum Op {
         slot: u16,
         mirror: Mirror,
     },
+    /// Wait a random number of ticks between the two operands.
+    /// `seg12:0x0E12` computes `min + rand() % (max - min)`, which is what
+    /// keeps repeated animations from looking metronomic.
+    SetRandomDelay { min: u16, max: u16 },
+    /// Set a single pixel in the foreground colour.
+    DrawPixel { x: i16, y: i16 },
     /// Set the clip rectangle. `seg12:0x0F40` stores the two x values
     /// together and the two y values together, so the operands are
     /// (x1, y1, x2, y2) and it also raises the clip-enabled flag.
@@ -93,6 +99,21 @@ pub enum Op {
     /// so it does nothing here -- but the cues are in the scripts, 535 of them,
     /// ready for a release that has the WAVs.
     PlaySound(u16),
+    /// The `A014`..`A094` and `A0B5` region family, dispatched at
+    /// `seg12:0x02F6` into `seg7:0x1510` with the opcode, a rectangle and a
+    /// mode. Two of them appear once each in the shipped scripts, so what
+    /// each variant draws is not pinned down yet.
+    RegionOp {
+        opcode: u16,
+        x: i16,
+        y: i16,
+        w: i16,
+        h: i16,
+    },
+    /// `B606`: six operands into `seg8:0x06CE` at `seg12:0x0EBE`, with two of
+    /// them converted first. A region copy of some kind; four call sites in
+    /// the whole corpus.
+    CopyRegion { args: Vec<i16> },
     /// Accepted by the original interpreter, but its handler does nothing.
     NoOp(u16),
     /// Decoded correctly, not yet implemented here. Carries everything needed
@@ -168,6 +189,11 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         },
         0xA5A7 => Op::NoOp(opcode),
 
+        0x2022 => Op::SetRandomDelay {
+            min: a(0) as u16,
+            max: a(1) as u16,
+        },
+        0xA002 => Op::DrawPixel { x: a(0), y: a(1) },
         0x4004 => Op::SetClip {
             x1: a(0),
             y1: a(1),
@@ -205,7 +231,22 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         // but seg12:0x0860 jumps to "done" whichever way the guard goes.
         // 0x2012 sets a flag and calls seg12:0x197C, which is an empty
         // function -- prologue, epilogue, nothing between.
-        0xA601 | 0x4214 | 0x5005 | 0x2012 => Op::NoOp(opcode),
+        //
+        // 0x4204 saves a screen region (seg12:0x0E69). This renderer repaints
+        // the whole background every tick, so there is nothing for a saved
+        // region to restore and no-oping it is correct rather than lazy.
+        0xA601 | 0x4214 | 0x5005 | 0x2012 | 0x4204 => Op::NoOp(opcode),
+
+        0xA014 | 0xA024 | 0xA034 | 0xA044 | 0xA054 | 0xA064 | 0xA094 | 0xA0B5 => {
+            Op::RegionOp {
+                opcode,
+                x: a(0),
+                y: a(1),
+                w: a(2),
+                h: a(3),
+            }
+        }
+        0xB606 => Op::CopyRegion { args },
 
         other => Op::Todo {
             opcode: other,
@@ -230,6 +271,8 @@ pub struct Stage {
     /// Current drawing colours, for the vector opcodes.
     pub fg: u8,
     pub bg: u8,
+    /// Drives `SetRandomDelay`.
+    pub rng: crate::ads::Rng,
     /// Opcodes decoded but not implemented, tallied so they stay visible.
     pub todo_seen: std::collections::BTreeMap<u16, usize>,
 }
@@ -243,6 +286,7 @@ impl Default for Stage {
             surface: Surface::screen(),
             fg: 0,
             bg: 0,
+            rng: crate::ads::Rng::new(0x7A11_5EED),
             todo_seen: Default::default(),
         }
     }
@@ -414,6 +458,17 @@ impl Instance {
                 Op::SelectBitmapSlot(n) => self.bitmap_slot = (n as usize).min(15),
                 Op::SelectPaletteSlot(n) => self.palette_slot = (n as usize).min(15),
                 Op::SetDelay(n) => self.delay = n,
+                Op::SetRandomDelay { min, max } => {
+                    self.delay = if max > min {
+                        min + stage.rng.below((max - min) as u32) as u16
+                    } else {
+                        min
+                    };
+                }
+                Op::DrawPixel { x, y } => {
+                    let fg = stage.fg;
+                    stage.surface.draw_line(x as i32, y as i32, x as i32, y as i32, fg);
+                }
                 Op::SetColors { fg, bg } => {
                     stage.fg = fg;
                     stage.bg = bg;
@@ -464,6 +519,14 @@ impl Instance {
                 | Op::Purge
                 | Op::PlaySound(_)
                 | Op::NoOp(_) => {}
+                // Known, named, and not yet drawn. Counted rather than
+                // silently skipped so they stay visible.
+                Op::RegionOp { opcode, .. } => {
+                    *stage.todo_seen.entry(opcode).or_insert(0) += 1;
+                }
+                Op::CopyRegion { .. } => {
+                    *stage.todo_seen.entry(0xB606).or_insert(0) += 1;
+                }
                 Op::Todo { opcode, .. } => {
                     *stage.todo_seen.entry(opcode).or_insert(0) += 1;
                 }

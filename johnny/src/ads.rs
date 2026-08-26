@@ -109,6 +109,10 @@ pub enum Op {
     RandomEnd,
     /// A weighted "play nothing" choice inside a random block.
     RandomSkip { weight: u16 },
+    /// Reset a scene to idle (`seg10:0x0E9B` writes state 0).
+    StopScene { ttm: u16, scene: u16 },
+    /// Mark a scene finished (`seg10:0x0E6E` writes state 5).
+    FinishScene { ttm: u16, scene: u16 },
     /// Guards the block that follows, up to the next `Step`.
     If {
         cond: Cond,
@@ -119,6 +123,11 @@ pub enum Op {
     ChainOr,
     Stop,
     End,
+    /// `F000`, `F200` and `F210` resolve another ADS context by id
+    /// (`seg10:0x19E7`) and work on its state field at +0x12. `F200` opens
+    /// every STAND sequence. What they do to the other context is not pinned
+    /// down; they are decoded and counted, not guessed at.
+    ContextOp { opcode: u16, arg: u16 },
     Todo { opcode: u16, args: Vec<u16> },
 }
 
@@ -144,11 +153,26 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
                 flags: a(2),
                 weight: a(3),
             },
+            0x2010 => Op::StopScene {
+                ttm: a(0),
+                scene: a(1),
+            },
+            0x2015 => Op::FinishScene {
+                ttm: a(0),
+                scene: a(1),
+            },
+            // seg10:0x1669 flags the context and clears the script pointer,
+            // which ends the running sequence.
+            0xF010 => Op::End,
             0x1510 => Op::Step,
             0x1520 => Op::StepEnd,
             0x3010 => Op::RandomBegin,
             0x30FF => Op::RandomEnd,
             0x3020 => Op::RandomSkip { weight: a(0) },
+            0xF000 | 0xF200 | 0xF210 => Op::ContextOp {
+                opcode: w,
+                arg: a(0),
+            },
             0x1420 | 0x1430 => Op::ChainOr,
             0xFFFF => Op::End,
             other => match Cond::from_opcode(other) {
@@ -380,10 +404,19 @@ impl Sequencer {
                     }
                 }
                 Op::RandomEnd | Op::RandomSkip { .. } => {}
+                Op::StopScene { ttm, scene } => {
+                    self.states.insert((ttm, scene), SceneState::Idle);
+                }
+                Op::FinishScene { ttm, scene } => {
+                    self.states.insert((ttm, scene), SceneState::Finished);
+                }
                 Op::PlayScene { ttm, scene, .. } => {
                     if let Some(action) = self.begin(ttm, scene) {
                         return action;
                     }
+                }
+                Op::ContextOp { opcode, .. } => {
+                    *self.todo_seen.entry(opcode).or_insert(0) += 1;
                 }
                 Op::Todo { opcode, .. } => {
                     *self.todo_seen.entry(opcode).or_insert(0) += 1;
