@@ -323,13 +323,27 @@ interpreter that *are* pure data — the instruction lengths, the pre-shift
 tables, both dispatch tables read out of the segment opcode by opcode, the
 opcode census — have been read out and compared.
 
-**The blitter.** `seg8:0x0AE4` is where a sprite actually lands, and it is
-reached through three thunks from the opcode handler. It carries a scale pair
-(`ds:0x2E76` against a shape's own `[si+1]`) that halves or doubles a shape,
-and a choice of three origin pairs in the shape header depending on the mirror
-bits. Neither is reachable from the shipped data as far as anything here can
-tell — the art is authored at one scale and the origins are zero — but that is
-an argument from the pictures coming out right, not a check.
+**The blitter.** `seg8:0x0AE4` is where a sprite lands, three thunks below the
+opcode handler — and the pixels are not Sierra's. It builds device contexts
+and hands the work to GDI, so there is no inner loop of the original's to
+compare a port against: any port writes its own, and this one does.
+
+What it decides before that call is a scale and a mirror.
+
+The scale is dead. `seg8:0x0B02` rescales a shape whose own `[si+1]` differs
+from `ds:0x2E77`, and `seg8:0x0B26` halves or doubles its dimensions when
+`ds:0x2E76` differs from `ds:0x2E77` — but `seg2:0x148F` sets both of those
+bytes to 3, in the same instruction that fixes the screen at 640x480, and
+nothing else writes either. Neither branch can be taken in this build.
+
+The mirror is a second copy. A shape carries two pairs of GDI handles: the
+plain one at `[si+2]`/`[si+4]` and a pre-flipped one at
+`[si+0x0A]`/`[si+0x0C]`, which TTM `2012` asks the loader to build and which
+mirror bit 1 selects. `seg8:0x0B97` falls back to the plain pair if the
+flipped one is missing, which is what the "Bitmaps won't be flipped." string
+in the data segment is for. This port flips at draw time instead, which is why
+`2012` has nothing to do here — and it is why only mirror modes 0 and 2 appear
+in 15,000 sprite draws.
 
 ## Checking the port against itself, where the binary cannot reach
 

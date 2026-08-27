@@ -1014,12 +1014,17 @@ three red pixels on the sand.
   colour that is not there". Showing them as what is behind the transparency
   key — black, which is index 5 in this palette — was tried and turns the near
   water to mud, so the port still shows them as water.
-* The blitter. `seg8:0x0AE4` is where a sprite lands, three thunks below the
-  opcode handler, and it carries two things nothing here has been able to
-  reach: a scale pair (`ds:0x2E76` against the shape's own `[si+1]`) that
-  halves or doubles a shape, and a choice of three origin pairs in the shape
-  header selected by the mirror bits — `[si+0x0A]`/`[si+0x0C]` when bit 1 is
-  set, (0,0) when bit 0 is, `[si+2]`/`[si+4]` otherwise, and back to
-  `[si+2]`/`[si+4]` if the chosen pair holds a zero. The art appears to be
-  authored at one scale with zero origins, so neither is reachable, but that
-  is an argument from the pictures coming out right.
+* The blitter's inner loop, because there is not one. `seg8:0x0AE4` builds
+  device contexts and hands the blit to GDI, so the pixel work belongs to
+  Windows and any port writes its own. What the function decides first is a
+  scale and a mirror, and both are now read out rather than assumed. The scale
+  is dead: `seg8:0x0B02` rescales a shape whose `[si+1]` differs from
+  `ds:0x2E77` and `seg8:0x0B26` halves or doubles its dimensions when
+  `ds:0x2E76` differs from `ds:0x2E77`, but `seg2:0x148F` assigns both bytes
+  the constant 3 in the same breath as fixing the screen at 640x480, and
+  nothing else writes either. The mirror is a second bitmap: a shape holds a
+  plain pair of GDI handles at `[si+2]`/`[si+4]` and a pre-flipped pair at
+  `[si+0x0A]`/`[si+0x0C]` that TTM `2012` asks the loader to build, mirror
+  bit 1 chooses between them, and `seg8:0x0B97` falls back to the plain pair
+  when the flipped one was never built — which is what the "Bitmaps won't be
+  flipped." string is for. This port flips at draw time, so it needs neither.
