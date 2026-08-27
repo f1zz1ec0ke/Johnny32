@@ -406,6 +406,15 @@ impl Active {
         }
     }
 
+    /// `seg10:0x1DBA`: the runner could not run this scene at all. It is
+    /// wound back to the scene's own start and put into state 4 whatever the
+    /// repeat mode says -- `seg10:0x1D21`'s count and deadline restarts are
+    /// on the other side of that branch and never see it.
+    pub fn cannot_run(&mut self) {
+        self.inst.seek_scene(self.scene);
+        self.state = SceneState::Over;
+    }
+
     /// `seg10:0x1DEB`: a scene queued until a deadline is over once that
     /// deadline passes, and then ends on its next time round.
     pub fn check_deadline(&mut self, now: u32) {
@@ -447,8 +456,13 @@ pub fn advance_scenes(
         if a.wake > now || a.ending {
             a.inst.repaint(stage);
         } else {
-            let ended = match a.inst.run_frame(stage, archive) {
-                ttm::Step::Finished => true,
+            match a.inst.run_frame(stage, archive) {
+                // `seg10:0x1DBA`: nothing ran. That is not a scene that has
+                // played out, it is a scene that cannot play, so it goes
+                // straight to state 4 with none of the count or deadline
+                // restarts `seg10:0x1D21` allows -- restarting a program
+                // with nothing left in it would only do this again.
+                ttm::Step::Finished => a.cannot_run(),
                 ttm::Step::Frame(delay) => {
                     a.wake = now + delay.max(1) as u32;
                     // The frame carried an `EndScene`, which is how a scene
@@ -462,11 +476,7 @@ pub fn advance_scenes(
                     // `seg10:0x1D65`: the end flag waits for the frame's own
                     // delay before it counts.
                     a.ending = a.inst.ended;
-                    false
                 }
-            };
-            if ended && !a.program_ended() {
-                finished.push((a.ttm, a.scene));
             }
         }
         // The held last frame's delay has run out, so now the scene is over.
@@ -1758,12 +1768,21 @@ impl Director {
                         a.rearm(repeat, self.tick);
                         continue;
                     }
-                    if let Some(program) = self.program(archive, &file) {
-                        let mut inst = Instance::new(program);
-                        if inst.seek_scene(scene) {
-                            active.push(Active::start(ttm_id, scene, inst, repeat, self.tick));
-                        }
+                    // A scene the TTM has not got -- or a TTM that is not
+                    // in the archive at all -- still gets an instance.
+                    // `seg10:0x0DB6` never checks, and `seg10:0x1DBA` is
+                    // what deals with it: the runner cannot run the scene,
+                    // so it goes into state 4 on its first tick and the
+                    // block waiting on it fires. Dropping the play instead
+                    // leaves that block waiting for ever.
+                    let program = self
+                        .program(archive, &file)
+                        .unwrap_or_else(|| Rc::new(ttm::Program::empty()));
+                    let mut inst = Instance::new(program);
+                    if !inst.seek_scene(scene) {
+                        inst.exhaust();
                     }
+                    active.push(Active::start(ttm_id, scene, inst, repeat, self.tick));
                 }
             }
         }

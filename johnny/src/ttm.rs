@@ -181,10 +181,12 @@ pub fn decode(code: &[u8]) -> (Vec<Op>, usize) {
                 break;
             };
             let s = String::from_utf8_lossy(&code[p + 2..end]).into_owned();
-            let mut next = end + 1;
-            if next & 1 == 1 {
-                next += 1;
-            }
+            // `seg11:0x04a8` counts the bytes before the NUL and steps over
+            // the NUL as well, then one byte further when that count is
+            // even -- so a string always consumes an even number of bytes
+            // and the next opcode stays word aligned.
+            let text_len = end - (p + 2);
+            let next = end + 1 + if text_len % 2 == 0 { 1 } else { 0 };
             (Vec::new(), Some(s), next)
         } else {
             if p + 2 + count * 2 > code.len() {
@@ -654,6 +656,13 @@ impl Program {
         Some(Program { ops })
     }
 
+    /// A program with nothing in it, for an instance of a scene whose TTM is
+    /// not in the archive. `seg11:0x074A` gives the same answer -- no TTM
+    /// loaded, so the scene cannot be run -- and `seg10:0x1DBA` acts on it.
+    pub fn empty() -> Program {
+        Program { ops: Vec::new() }
+    }
+
     /// The instruction index just after a scene marker.
     pub fn scene_start(&self, scene: u16) -> Option<usize> {
         self.ops
@@ -761,6 +770,19 @@ impl Instance {
             self.last_goto,
             self.ended,
         )
+    }
+
+    /// Leave the program pointer past the end, so the next frame asked for
+    /// is `Finished`.
+    ///
+    /// This is the state `seg11:0x074A` reports by returning zero: the scene
+    /// index is outside the TTM's scene table, or its entry in that table is
+    /// null. The engine still makes the instance record -- `seg10:0x0DB6`
+    /// never checks whether the scene exists -- and the runner puts it into
+    /// state 4 on its first tick, so a block waiting on that scene to end
+    /// fires instead of waiting for ever.
+    pub fn exhaust(&mut self) {
+        self.pc = self.program.ops.len();
     }
 
     pub fn seek_scene(&mut self, scene: u16) -> bool {

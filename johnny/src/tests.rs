@@ -491,3 +491,49 @@ fn a_broken_png_is_refused_rather_than_fatal() {
         assert!(png::read(junk).is_err());
     }
 }
+
+#[test]
+fn a_string_operand_always_lands_on_a_word() {
+    // `seg11:0x04a8` counts the bytes before the NUL, steps over the NUL,
+    // and steps one further when that count came out even. Both lengths and
+    // both parities, so the rule is pinned rather than the one case the data
+    // happens to hold.
+    for text in ["A", "AB", "ABC", "ABCD", ""] {
+        let mut bytes = 0xF02Fu16.to_le_bytes().to_vec();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+        let consumed = 2 + text.len() + 1 + usize::from(text.len() % 2 == 0);
+        bytes.resize(consumed + 2, 0);
+        // A second instruction, so `decode` has to land on it exactly.
+        bytes[consumed..consumed + 2].copy_from_slice(&0x0FF0u16.to_le_bytes());
+        let (ops, used) = ttm::decode(&bytes);
+        assert_eq!(used, bytes.len(), "{text:?} left {} bytes", bytes.len() - used);
+        assert_eq!(ops.len(), 2, "{text:?} did not decode as two instructions");
+        assert!(matches!(ops[1], ttm::Op::EndFrame), "{text:?} misread the second instruction");
+    }
+}
+
+#[test]
+fn a_scene_that_cannot_run_ends_rather_than_hanging() {
+    // `seg11:0x074A` refuses a scene index the TTM's table has not got, and
+    // `seg10:0x1DBA` puts that instance straight into state 4 -- so the
+    // block waiting on it fires on the next pass. Dropping the play instead,
+    // which is the obvious thing to do, leaves that block waiting for ever.
+    let program = std::rc::Rc::new(ttm::Program::empty());
+    let mut inst = ttm::Instance::new(program);
+    assert!(!inst.seek_scene(7), "an empty program has no scenes");
+    inst.exhaust();
+    let mut stage = ttm::Stage::new();
+    let archive = dgds::Archive::load(&[], None).expect("an empty archive");
+    assert_eq!(inst.run_frame(&mut stage, &archive), ttm::Step::Finished);
+
+    // And a count or a deadline does not resurrect it: `seg10:0x1DBA` is on
+    // the other side of the branch from `seg10:0x1D21`'s restarts.
+    for repeat in [ads::Repeat::Once, ads::Repeat::Times(4), ads::Repeat::ForTicks(600)] {
+        let mut inst = ttm::Instance::new(std::rc::Rc::new(ttm::Program::empty()));
+        inst.exhaust();
+        let mut a = director::Active::start(1, 7, inst, repeat, 0);
+        a.cannot_run();
+        assert_eq!(a.state, ads::SceneState::Over, "{repeat:?} kept a dead scene alive");
+    }
+}

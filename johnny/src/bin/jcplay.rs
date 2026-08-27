@@ -159,13 +159,25 @@ fn main() -> ExitCode {
                             p
                         }
                     };
-                    let mut inst = ttm::Instance::new(program);
-                    if !inst.seek_scene(scene) {
-                        println!("   (no scene {scene} in {file})");
+                    println!("[tick {tick:5}] play {file} scene {scene} {repeat:?}");
+                    // Already on screen: re-arm it where it stands.
+                    // `seg10:0x0DB6` leaves the program pointer alone, and so
+                    // does the director -- so this tool has to as well, or it
+                    // is not watching the same animation the screensaver runs.
+                    if let Some(a) = active
+                        .iter_mut()
+                        .find(|a: &&mut Active| (a.ttm, a.scene) == (ttm_id, scene))
+                    {
+                        a.rearm(repeat, tick);
                         continue;
                     }
-                    println!("[tick {tick:5}] play {file} scene {scene} {repeat:?}");
-                    active.retain(|a: &Active| (a.ttm, a.scene) != (ttm_id, scene));
+                    let mut inst = ttm::Instance::new(program);
+                    if !inst.seek_scene(scene) {
+                        // `seg10:0x1DBA` ends it on its first tick rather
+                        // than never starting it.
+                        println!("   (no scene {scene} in {file})");
+                        inst.exhaust();
+                    }
                     active.push(Active::start(ttm_id, scene, inst, repeat, tick));
                 }
             }

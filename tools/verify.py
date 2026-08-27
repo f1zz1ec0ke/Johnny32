@@ -193,6 +193,130 @@ def _census():
     return ttm_used, ads_used
 
 
+def _res_table(payload):
+    """A count, then that many (id word, NUL-terminated name) pairs."""
+    out = {}
+    if len(payload) < 2:
+        return out
+    i = 2
+    for _ in range(int.from_bytes(payload[0:2], 'little')):
+        if i + 2 > len(payload):
+            break
+        rid = int.from_bytes(payload[i:i + 2], 'little')
+        i += 2
+        end = payload.find(b'\0', i)
+        if end < 0:
+            break
+        out[rid] = payload[i:end].decode('latin-1')
+        i = end + 1
+    return out
+
+
+def _leaf(body, want):
+    code = None
+    for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+        if path[-1] == want:
+            try:
+                code = dgds.decompress(payload)
+            except Exception:
+                code = payload
+    return code
+
+
+def _ttm_scenes(code):
+    """The scene numbers a TTM defines: what `seg11:0x074A` will accept."""
+    scenes, p = set(), 0
+    while p + 2 <= len(code):
+        op = int.from_bytes(code[p:p + 2], 'little')
+        n = op & 0x0F
+        if n == 0x0F:
+            e = code.find(b'\x00', p + 2)
+            if e < 0:
+                break
+            size = (e + 1) - p
+            p += size + (size & 1)
+            continue
+        if op in (0x1101, 0x1111):
+            scenes.add(int.from_bytes(code[p + 2:p + 4], 'little'))
+        p += 2 + n * 2
+    return scenes
+
+
+def _references():
+    """Does every scene the scripts name actually exist?
+
+    `seg11:0x074A` refuses a scene index outside the TTM's scene table or
+    whose entry is null, and `seg10:0x1DBA` puts that instance straight into
+    state 4 -- one pass in which the block waiting on it fires, then idle.
+    The port has that path too, but it is a path neither side should ever
+    take, and the difference between "never taken" and "taken and handled
+    differently" is worth keeping true rather than remembering. The same
+    goes for a `1201` goto naming a scene its own script does not define.
+    """
+    bodies = dict((n, b) for n, b, _ in records)
+    scenes_of, refs, bad = {}, 0, []
+
+    def scenes(name):
+        if name not in scenes_of:
+            body = bodies.get(name)
+            code = _leaf(body, 'TT3:') if body is not None else None
+            scenes_of[name] = _ttm_scenes(code) if code else None
+        return scenes_of[name]
+
+    for name, body, _ in records:
+        if name.endswith('.TTM'):
+            code = _leaf(body, 'TT3:')
+            if not code:
+                continue
+            have, p = _ttm_scenes(code), 0
+            while p + 2 <= len(code):
+                op = int.from_bytes(code[p:p + 2], 'little')
+                n = op & 0x0F
+                if n == 0x0F:
+                    e = code.find(b'\x00', p + 2)
+                    if e < 0:
+                        break
+                    size = (e + 1) - p
+                    p += size + (size & 1)
+                    continue
+                if op == 0x1201:
+                    refs += 1
+                    target = int.from_bytes(code[p + 2:p + 4], 'little')
+                    if target not in have:
+                        bad.append('%s @%04X gotos scene %d, which it does not define'
+                                   % (name, p, target))
+                p += 2 + n * 2
+            continue
+        if not name.endswith('.ADS'):
+            continue
+        code = _leaf(body, 'SCR:')
+        res = None
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'RES:':
+                res = _res_table(payload)
+        if not code or res is None:
+            continue
+        p = 0
+        while p + 2 <= len(code):
+            op = int.from_bytes(code[p:p + 2], 'little')
+            size = _ads_length(op)
+            if op in (0x2000, 0x2005, 0x2010, 0x2015, 0x2020) and p + 6 <= len(code):
+                refs += 1
+                ttm = int.from_bytes(code[p + 2:p + 4], 'little')
+                scene = int.from_bytes(code[p + 4:p + 6], 'little')
+                fname = res.get(ttm)
+                if fname is None:
+                    bad.append('%s plays TTM id %d, which its RES: table has not got'
+                               % (name, ttm))
+                elif scenes(fname) is None:
+                    bad.append('%s plays %s, which is not in the archive' % (name, fname))
+                elif scene not in scenes(fname):
+                    bad.append('%s plays %s scene %d, which that TTM does not define'
+                               % (name, fname, scene))
+            p += size
+    return refs, bad
+
+
 def _declared(path, const):
     text = open(path).read()
     body = text[text.index(const):]
@@ -249,6 +373,13 @@ else:
         tables_note = '%d lines, byte for byte what gen_tables.py writes' % len(
             _fresh.splitlines())
 
+_refs, _bad_refs = _references()
+if _bad_refs:
+    failures.extend('references: ' + line for line in _bad_refs[:10])
+    refs_note = '%d scene references, %d of them dangling' % (_refs, len(_bad_refs))
+else:
+    refs_note = '%d scene references, every one resolves' % _refs
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
@@ -258,6 +389,7 @@ print('ADS scripts  %d/%d consume exactly' % (ads_ok, ads_total))
 print('scheduler    %s' % sched_note)
 print('census       %s' % census_note)
 print('tables       %s' % tables_note)
+print('references   %s' % refs_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))
