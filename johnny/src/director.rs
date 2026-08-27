@@ -1596,7 +1596,15 @@ impl Director {
                     // left him standing.
                     self.stand(archive, true);
                     if same(self.story_scene, row) {
-                        // `seg4:0x0884`: the story got told.
+                        // `seg4:0x0884`: the story got told. It asks for
+                        // sound 25 first (`seg5:0x00BA` with 0x19), which is
+                        // one past the last wave in `SCRANTIC.EXE` and so
+                        // plays nothing -- the engine wanted a noise here and
+                        // the file it shipped with has not got one. Asked for
+                        // anyway, so a sound census says what the scripts and
+                        // the engine actually ask for rather than what could
+                        // be heard.
+                        self.stage.sounds.push(25);
                         self.story_scene = None;
                         self.story_state = 2;
                     }
