@@ -227,6 +227,10 @@ class Machine:
         """
         self.regs['sp'] = self.STACK_TOP
         self.sregs['ss'] = self.ds
+        # The budget is per call. Letting it accumulate turns "this function
+        # will not terminate" into "you have asked too many questions", which
+        # looks exactly like a bug in whatever was being compared.
+        self.steps = 0
         for a in reversed(args):
             self.push(a & 0xFFFF)
         self.push(0)             # a return segment the runner recognises
