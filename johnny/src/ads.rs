@@ -538,29 +538,14 @@ impl Sequencer {
         let body = archive.get(name)?;
         let scr = dgds::leaf(body, b"SCR:")?;
         let code = dgds::decompress(scr.payload).ok()?;
-        let (ops, _) = decode(&code);
-        Some(Sequencer {
-            ops,
-            files: dgds::leaf(body, b"RES:")
-                .map(|l| id_table(l.payload))
-                .unwrap_or_default(),
-            labels: dgds::leaf(body, b"TAG:")
-                .map(|l| id_table(l.payload))
-                .unwrap_or_default(),
-            pc: 0,
-            states: BTreeMap::new(),
-            seqs: BTreeMap::new(),
-            current: 0,
-            depth: 0,
-            plays: BTreeMap::new(),
-            tracing: false,
-            trace: Vec::new(),
-            resume: BTreeMap::new(),
-            hits: BTreeMap::new(),
-            wait_at: None,
-            solo: false,
-            todo_seen: BTreeMap::new(),
-        })
+        let mut me = Sequencer::from_script(&code);
+        me.files = dgds::leaf(body, b"RES:")
+            .map(|l| id_table(l.payload))
+            .unwrap_or_default();
+        me.labels = dgds::leaf(body, b"TAG:")
+            .map(|l| id_table(l.payload))
+            .unwrap_or_default();
+        Some(me)
     }
 
     /// Build a sequencer straight from a decoded script, with no file table

@@ -288,7 +288,16 @@ control flow enough that it stops walking. What stands in for it: every one of
 the 6,631 frames in the data disassembles end to end, the 65 scenes all run to
 completion, the repaint check is clean on all of them, and the pieces of the
 interpreter that *are* pure data — the instruction lengths, the pre-shift
-tables, the opcode census — have been read out and compared.
+tables, both dispatch tables read out of the segment opcode by opcode, the
+opcode census — have been read out and compared.
+
+**The blitter.** `seg8:0x0AE4` is where a sprite actually lands, and it is
+reached through three thunks from the opcode handler. It carries a scale pair
+(`ds:0x2E76` against a shape's own `[si+1]`) that halves or doubles a shape,
+and a choice of three origin pairs in the shape header depending on the mirror
+bits. Neither is reachable from the shipped data as far as anything here can
+tell — the art is authored at one scale and the origins are zero — but that is
+an argument from the pictures coming out right, not a check.
 
 ## Checking the port against itself, where the binary cannot reach
 
@@ -303,6 +312,14 @@ picture if putting a frame back draws exactly what stepping it drew and changes
 nothing else. `JC_CHECK=1` holds every tick to that: paint the whole tick
 again out of the frames alone, and compare the pixels, the loaded artwork, the
 palette, the clip, the sound queue, the generator and each instance's cursor.
+
+The engine turns out to have the same idea. `seg10:0x1E5A` walks the instance
+list a second time and re-runs each instance's last frame with `[si+0x0E]`
+forced to 1 — the flag every state-changing opcode tests, so the redraw loads
+nothing, plays nothing and saves no region. It restores that instance's own
+colours and clip out of its record first, exactly as the runner does. That is
+this port's repaint, written in 1992: a frame is expected to be re-runnable,
+and the parts of it that are not are marked as such.
 
 ```sh
 JC_CHECK=1 JC_NOWRITE=1 cargo run --release --manifest-path johnny/Cargo.toml \
@@ -357,6 +374,12 @@ twenty-three sound effects are Windows resources inside `SCRANTIC.EXE`, type
 the data and the screensaver pulls them out and plays them the way the original
 does: `sndPlaySound`, asynchronous, from memory, one noise at a time. The
 scripts ask for sound 535 times across 32 of the 41 of them.
+
+`seg5:0x00BA` takes any id from 1 to 25 and looks it up in a table of
+twenty-five far pointers, so two of the ids the scripts use — the file only
+has twenty-three waves — find a null and play nothing. A run reports sound 24
+as having no resource, and that is the original being silent there too, not
+something this port failed to find.
 
 `JC_NOWRITE=1` skips the PNG output. `JC_FROM`/`JC_TO` bound which ticks get
 written, so a long run can be sampled without filling the disk. `JC_HHMM=1430`

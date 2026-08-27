@@ -342,7 +342,14 @@ impl Active {
     /// first frame over and over, never reaches its end, and never lets the
     /// scene that is waiting on it start.
     pub fn rearm(&mut self, repeat: Repeat, now: u32) {
-        self.ending = false;
+        // Not `ending`. `seg10:0x0DB6` writes the run state and the repeat
+        // count and nothing else, and the end flag is not a field it could
+        // clear: `ds:0x4644` is per frame, raised again by the `0110` in the
+        // frame that is being held. So a scene re-armed while its last frame
+        // is still on screen still ends when that frame's delay runs out --
+        // and then the repeat mode decides whether it starts again. Clearing
+        // it here instead steps the instance out of the held frame and into
+        // whatever is filed after the scene.
         self.state = repeat.state();
         self.count = repeat.count();
         self.until = match repeat {
