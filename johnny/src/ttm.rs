@@ -370,10 +370,12 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
 
 /// One resolved drawing operation, kept so a held frame can be painted again.
 ///
-/// The engine leaves what a frame drew on the screen until something paints
-/// over it, so it only ever runs a frame once. This port repaints the backdrop
-/// every tick and so has to put every held frame back on top of it -- and
-/// re-running the frame's instructions is *not* the same thing.
+/// The engine runs a held frame **again**, every tick, with `ds:0x46DA` raised
+/// (`seg10:0x1CD6`) so that everything with a side effect is gated off and
+/// everything that draws is not. This port has to put the same frames back
+/// too, and re-running their instructions is not the same thing -- because by
+/// the time a frame is drawn again the slot it drew from can hold something
+/// else, and the engine has that bug.
 ///
 /// A file's bitmap slots are shared by every scene of it on screen, and slots
 /// are loaded and freed from inside frames rather than from a header: 263

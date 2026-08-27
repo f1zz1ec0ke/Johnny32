@@ -972,6 +972,70 @@ found:
   `seg12:0x0291` takes the no-shape path — the one answer that is not garbage,
   and the one the port gives.
 
+## The tick, driven
+
+`seg10:0x1ACB` takes no arguments. It reads the current ADS context out of
+`ds:0x2608` and is the whole of what happens in sixteen milliseconds:
+
+1. **`seg10:0x1B12`, the sequence bookkeeping.** Each sequence keeps a
+   null-terminated array of the instance records it plays, at
+   `ctx+0x3D2+sid*2` — `seg10:0x040F` builds it by walking the script for the
+   two opcodes at `ds:0x260A` (`2000` and `2005`) and resolving each one's
+   first two operands through `seg10:0x0BF4`. A sequence whose state is 3, the
+   state `seg4:0x07CE` starts one in, has every record in its array reset by
+   `seg10:0x0B3E`; every other state is stamped onto each record's `+0x2B`.
+2. **`seg10:0x1B6B`, one pass of every sequence**, in id order, through the
+   interpreter at `seg10:0x1925` — and only for a sequence in state 1
+   (`seg10:0x1C0B`).
+3. **`seg10:0x1C32`, the instance walk.** `ctx+0x10` is the head and `+0x3B`
+   chains it. Each record selects its own loaded TTM (`seg10:0x1C71`), has its
+   colours and clip put back (`seg10:0x1C81`), and runs its current frame
+   (`seg10:0x1CBA` into `seg11:0x074A`).
+
+**The script runs before the instances.** A scene the pass starts therefore
+draws its first frame on the same tick, and a scene that reached its end last
+tick is still in state 4 when this pass reads it — because it is the walk that
+clears it, at `seg10:0x1DDC`.
+
+### A held frame is run again, not kept
+
+`seg10:0x1CD6` raises `[bx+0x0E]` the moment a frame has run, and the frame
+runs again on every tick after that with `ds:0x46DA` set. Every opcode with a
+side effect — the loads, `0080`, the whole `C` family, `2022`, `B606`, `1061` —
+opens with `cmp word ptr [0x46da], 0` and does nothing; every opcode that draws
+does not test it and draws again. So the engine's picture is not retained, it
+is redrawn from the script fifty times a second, and the mechanism the port
+needed for its own repaint turns out to be the engine's own.
+
+It also has a bug this port does not: a held frame re-reads the bitmap slot it
+drew from, and a slot loaded over in the meantime gives it different artwork.
+
+### When a frame is stepped on
+
+`seg10:0x196E` is the whole of it, and it both tests and acts:
+
+* `+0x29` is zero → up, with no reference to the clock at all. `seg10:0x0B3E`
+  resets it to zero, so a frame that asks for no delay is stepped past on the
+  tick it ran.
+* otherwise it compares the deadline at `+0x37`/`+0x39` against `ds:0x2E72`
+  (bumped by one per tick at `seg2:0x16D8`) and steps on `now >= deadline`,
+  setting the next deadline to `now + delay` as it goes.
+* on stepping: `[bx+0x0E]` back to zero, and either `[bx+8] = [bx+6]` if a goto
+  left something pending or `[bx+8]++`.
+
+The end of a scene runs through the same function: `seg10:0x1D65` asks it, and
+only when it says yes does the scene reach state 4. So a scene's last frame is
+held for exactly as long as any other, and one that asks for no delay is not
+held at all.
+
+The subtlety is `seg10:0x1CE6`, which re-bases the deadline to `now + delay`
+**only when the frame changed the delay** — `ds:0x46E8` is what the frame
+asked for, `-1` if it asked for nothing, and nothing happens when it already
+matches `+0x29`. A frame that inherits the delay it was given keeps the
+deadline `seg10:0x196E` set when it stepped, one tick earlier. So a frame that
+changes the delay is shown one tick longer than one that does not, and
+`tools/oracle.py tick` is what found that.
+
 ## Every opcode, audited
 
 The shipped scripts use thirty TTM opcodes and eighteen ADS ones. Every one is
@@ -1080,7 +1144,8 @@ three red pixels on the sand.
   key — black, which is index 5 in this palette — was tried and turns the near
   water to mud, so the port still shows them as water.
 * The blitter's inner loop, because there is not one. It is the last thing
-  here that is not driven out of the binary. `seg8:0x0AE4` builds
+  here that is not driven out of the binary, and it cannot be: the pixels are
+  GDI's, not Sierra's. `seg8:0x0AE4` builds
   device contexts and hands the blit to GDI, so the pixel work belongs to
   Windows and any port writes its own. What the function decides first is a
   scale and a mirror, and both are now read out rather than assumed. The scale

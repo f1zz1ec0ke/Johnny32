@@ -58,7 +58,7 @@ python3 tools/verify.py
 
 Or check everything at once — the tests, the decoder, the 65 scenes, three
 long soaks of the whole island, every story day and holiday and both halves of
-the clock, what the scenes actually draw, and the twenty-one questions the
+the clock, what the scenes actually draw, and the twenty-two questions the
 oracle puts to the 1992 binary:
 
 ```sh
@@ -173,6 +173,7 @@ python3 tools/oracle.py
   holiday     366 answers, all identical
   codec       181 answers, all identical
   ttm       51475 answers, all identical
+  tick       1327 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
@@ -354,6 +355,17 @@ length the real bitmap has, so `seg12:0x025B` finds artwork exactly where the
 port does and the two agree about which of the 15,368 sprite draws happen at
 all. What it found is below.
 
+Nor the tick. `seg10:0x1ACB` *is* one, and it takes no arguments: it reads the
+current ADS context out of `ds:0x2608` and does the three things a tick does —
+the sequence bookkeeping at `seg10:0x1B12`, one pass of every sequence at
+`seg10:0x1B6B`, and the instance walk at `seg10:0x1C32`. With the wall already
+up it runs, and that puts the last layer under the binary: `seqrun` asks what a
+pass does with no instances running and `ttm` what a frame does with nothing
+else on screen, and what was left over between them was the interleaving.
+`tools/oracle.py tick` drives it a scene at a time and compares, per tick, the
+actions the pass took, which instances were stepped and which were held, in
+what order, and everything they drew. What it found is below.
+
 That leaves one, and it is worth being plain about it.
 
 **The blitter.** `seg8:0x0AE4` is where a sprite lands, three thunks below the
@@ -377,6 +389,30 @@ flipped one is missing, which is what the "Bitmaps won't be flipped." string
 in the data segment is for. This port flips at draw time instead, which is why
 `2012` has nothing to do here — and it is why only mirror modes 0 and 2 appear
 in 15,000 sprite draws.
+
+### What driving the tick found
+
+Three more, all of them in the port, and all in the sixteen-millisecond
+neighbourhood where the eye notices timing rather than geometry:
+
+* **The script runs before the instances, not after.** `seg10:0x1B6B` and then
+  `seg10:0x1C32`. This port had it the other way round, on the reasoning that a
+  script running first would be reading last pass's answers — which is exactly
+  what the engine wants, because it is the walk that clears state 4
+  (`seg10:0x1DDC`). What the wrong order cost was a tick on the front of every
+  scene: started by the pass, first drawn on the tick after.
+* **A delay of zero is not a delay of one.** `seg10:0x196E` answers "the delay
+  is up" without looking at the clock when `+0x29` is zero, and `seg10:0x0B3E`
+  resets it to zero — so a scene whose last frame asks for no delay ends on the
+  tick it ran. This port floored the delay at one and held that frame for a
+  tick first.
+* **A frame that changes the delay is shown one tick longer than one that
+  inherits it.** `seg10:0x1CE6` re-bases the deadline to `now + delay` only
+  when `ds:0x46E8` differs from `+0x29`; a frame that asks for the delay it
+  already had keeps the deadline `seg10:0x196E` set when it last stepped the
+  instance on, which is a tick earlier. Six ticks either way is a tenth of a
+  second, and across a loop it is the difference between running in step with
+  the original and drifting.
 
 ### What driving the interpreter found
 
@@ -420,21 +456,27 @@ still cannot reach is the pixels: the blitter is GDI's, and putting a frame
 *back* on screen is this port's own problem — the engine never has to. That
 half needs an invariant of its own.
 
-The engine leaves what a frame drew on the screen until something paints over
-it, so it runs each frame exactly once. This port instead repaints the backdrop
-every tick and puts the held frames back on top — which is only the same
-picture if putting a frame back draws exactly what stepping it drew and changes
-nothing else. `JC_CHECK=1` holds every tick to that: paint the whole tick
-again out of the frames alone, and compare the pixels, the loaded artwork, the
-palette, the clip, the sound queue, the generator and each instance's cursor.
+The engine draws every live frame again, every tick — that is what the `tick`
+oracle turned up first, and it settled a claim that used to sit here saying the
+opposite. `seg10:0x1CD6` raises `[si+0x0E]` after a frame's first run, and from
+then on `seg12:0x040C` is handed the same frame every tick with `ds:0x46DA` set:
+every opcode with a side effect checks that flag and does nothing, and every
+opcode that draws does not check it and draws again.
 
-The engine turns out to have the same idea. `seg10:0x1E5A` walks the instance
-list a second time and re-runs each instance's last frame with `[si+0x0E]`
-forced to 1 — the flag every state-changing opcode tests, so the redraw loads
-nothing, plays nothing and saves no region. It restores that instance's own
-colours and clip out of its record first, exactly as the runner does. That is
-this port's repaint, written in 1992: a frame is expected to be re-runnable,
-and the parts of it that are not are marked as such.
+This port puts the held frames back too, but from what they *drew* rather than
+by running them again — which is only the same picture if putting a frame back
+draws exactly what stepping it drew and changes nothing else. `JC_CHECK=1`
+holds every tick to that: paint the whole tick again out of the frames alone,
+and compare the pixels, the loaded artwork, the palette, the clip, the sound
+queue, the generator and each instance's cursor. It is the stricter of the two
+models: a held frame in the original re-reads a bitmap slot that may since have
+been loaded over, and draws whatever is in it now.
+
+`seg10:0x1E5A` is the same idea again, from the other end: it walks the
+instance list and re-runs each instance's last frame with `[si+0x0E]` forced
+to 1, restoring that instance's own colours and clip out of its record first,
+exactly as the runner does. A frame is expected to be re-runnable, and the
+parts of it that are not are marked as such.
 
 ```sh
 JC_CHECK=1 JC_NOWRITE=1 cargo run --release --manifest-path johnny/Cargo.toml \
@@ -612,7 +654,7 @@ tools/verify.py             the archive, the scripts, the generated tables,
                             and the facts the port's simplifications rest on
 tools/dgds_digest.py        canonical digest, for differential testing
 tools/difftest.sh           run the Rust decoder against the Python reference
-tools/oracle.py             twenty-one questions put to the 1992 binary and
+tools/oracle.py             twenty-two questions put to the 1992 binary and
                             to the port, and diffed
 tools/scenes.py             the 65 scenes, derived from the scene table
 tools/sweep.py              play all of them with the repaint check on
