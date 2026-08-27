@@ -10,8 +10,10 @@
 //! table at `ds:0x355A`.
 //!
 //! Two of the twenty-five are not there, which is why the loader tolerates a
-//! miss. The scripts ask for ids 1 to 24 and there are resources 1 to 23, so
-//! one id is silent in the original too.
+//! miss: the resources are 1 to 23. The scripts ask for 24, and the scheduler
+//! asks for 25 when the story scene finishes (`seg4:0x0891`), so both of
+//! those are silent in the original as well -- there is nothing missing here
+//! to go and find.
 //!
 //! Playing one is `seg5:0x00BA`: bounds-check the id, look the pointer up, and
 //! call `sndPlaySound` with flags 7 — `SND_ASYNC | SND_NODEFAULT |

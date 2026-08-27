@@ -634,7 +634,7 @@ pub struct Director {
     /// Where the island is allowed to stand this time round (`ds:0x30C0`).
     /// The queue's scenes vote on it as they are picked, and a scene that
     /// disagrees with the votes already cast cannot join.
-    island_state: u16,
+    pub island_state: u16,
     /// What the queue's scenes between them want the island to look like
     /// (`ds:0x30B0`-`ds:0x30B6`, `ds:0x30C2`).
     backdrop: Backdrop,
@@ -724,8 +724,13 @@ impl Director {
         self.backdrop.allow_clouds = s.clouds;
         self.activity = Activity::Intro { until: s.intro_ticks };
         if s.story_reached > 0 {
+            // `Introduction` is the day on offer (`ds:0x2D9B`) and `NumDays`
+            // the day reached (`ds:0x2D9C`). They leapfrog -- the offer moves
+            // on when a queue holding it runs out, the reached day catches up
+            // on the next real day -- so the offer is often one ahead, and
+            // taking it for both jumps the story forward on every reload.
             self.story_offered = s.story_offered.max(1);
-            self.day = self.story_offered;
+            self.day = s.story_reached;
             let (y, m, d) = s.story_date;
             if y > 0 {
                 self.story_date = Some(days_from_civil(y as i64, m as u32, d as u32));
@@ -738,7 +743,7 @@ impl Director {
     pub fn story_snapshot(&self) -> (u8, u8, (u16, u8, u8)) {
         (
             self.story_offered,
-            self.day.max(self.story_offered),
+            self.day,
             self.story_date.map(civil_from_days).unwrap_or_default(),
         )
     }
@@ -829,7 +834,7 @@ impl Director {
     /// quadrants. A scene that wants the island on one side cannot join a
     /// queue that has already claimed the other, and a scene that wants a
     /// single quadrant cannot join one that has claimed the opposite half.
-    fn island_allows(&self, mask: u32) -> bool {
+    pub fn island_allows(&self, mask: u32) -> bool {
         let state = self.island_state;
         if state == scenery::ANYWHERE {
             return true;
@@ -867,7 +872,7 @@ impl Director {
     /// quadrants, and they accumulate: the first scene to ask for anything
     /// clears the "anywhere" marker and every scene after it narrows the
     /// choice further.
-    fn take_wishes(&mut self, mask: u32) {
+    pub fn take_wishes(&mut self, mask: u32) {
         self.backdrop.apply(mask);
         let want = (mask >> 16) as u16;
         if self.island_state == scenery::ANYWHERE && want & 0x3F != 0 {

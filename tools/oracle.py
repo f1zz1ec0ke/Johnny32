@@ -213,6 +213,35 @@ def q_adslen():
     return out
 
 
+def q_island():
+    """seg4:0x0EDB and seg3:0x1C41, exhaustively.
+
+    A scene's table row carries six bits saying which parts of the water it
+    needs free, and the queue keeps a running state of what has been claimed.
+    `seg4:0x0EDB` says whether a scene can still join, and `seg3:0x1C41`
+    folds it in when one does. Every state against every combination of
+    wishes -- 64 by 64 -- is small enough to be exhaustive rather than
+    sampled, and this is a bitmask machine, which is exactly the kind that
+    passes a spot check and fails somewhere in the middle.
+    """
+    m = fresh()
+    out = []
+    for state in list(range(64)) + [0xFFFF]:
+        for want in range(64):
+            m.write16(m.ds, ISLAND_STATE, state)
+            # The mask is a long: low word first, and the six wish bits
+            # are in the high one (`seg4:0x0EF3` reads `[bp+8]`).
+            allowed = m.call(4, 0x0EDB, [0, want])
+            out.append('island allow %d %d %d' % (state, want, 1 if allowed else 0))
+    for state in list(range(64)) + [0xFFFF]:
+        for want in range(64):
+            m.write16(m.ds, ISLAND_STATE, state)
+            m.call(3, 0x1C41, [0, want])
+            out.append('island take %d %d %d'
+                       % (state, want, m.read16(m.ds, ISLAND_STATE)))
+    return out
+
+
 def q_route(n=32):
     """seg4:0x0094, the walk driver, stopped the moment it has picked a step.
 
@@ -618,6 +647,7 @@ QUERIES = {
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
     'adslen': (q_adslen, lambda: port('adslen')),
+    'island': (q_island, lambda: port('island')),
     'route': (q_route, lambda: port('route', 32)),
     'turn': (q_turn, lambda: port('turn', 8)),
     'blocks': (q_blocks, lambda: port('blocks')),

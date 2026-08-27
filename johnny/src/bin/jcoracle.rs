@@ -115,6 +115,27 @@ fn main() -> ExitCode {
                 println!("{from},{to},{at}");
             }
         }
+        // Which parts of the water a scene needs free, and what claiming
+        // them leaves behind. A bitmask machine, so exhaustively.
+        "island" => {
+            let mut d = director::Director::new(0);
+            for state in (0..64u16).chain(std::iter::once(0xFFFF)) {
+                for want in 0..64u32 {
+                    d.island_state = state;
+                    println!(
+                        "island allow {state} {want} {}",
+                        d.island_allows(want << 16) as u8
+                    );
+                }
+            }
+            for state in (0..64u16).chain(std::iter::once(0xFFFF)) {
+                for want in 0..64u32 {
+                    d.island_state = state;
+                    d.take_wishes(want << 16);
+                    println!("island take {state} {want} {}", d.island_state);
+                }
+            }
+        }
         // Which way Johnny goes: one roll of the route picker for every
         // (block, position) the six-by-six matrix offers.
         "route" => {

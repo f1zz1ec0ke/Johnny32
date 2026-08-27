@@ -325,6 +325,28 @@ These paths are hand-authored, 5 to 32 waypoints each. That is the part a
 behavioural reimplementation has to approximate, and it is why walking is
 where `jc_reborn` reports its remaining inaccuracy.
 
+### The story is two numbers, and they leapfrog
+
+`ds:0x2D9B` is the day **on offer** and `ds:0x2D9C` the day **reached**, and
+they are not the same number. `SCRANTIC.INI` calls them `Introduction` and
+`NumDays`, which is no help at all.
+
+* `seg4:0x0C28`, at the end of a queue: if the queue ran itself out
+  (`ds:0x30F0`) and a story flag is set (`ds:0x30EE`), and the offer is not
+  already ahead, the **offer** moves on by one.
+* `seg4:0x0BDC`, on a new calendar day: if the reached day is behind the
+  offer, the **reached** day moves on by one. Past eleven or below two, both
+  reset to one.
+
+So the offer runs a step ahead and the reached day catches up once a real day
+has passed, which is what makes eleven days of story take eleven days. Taking
+the offer for both — on a reload, say — moves the story on every time the
+screen goes blank.
+
+`seg4:0x0861` is the other half: when the scene that ends *is* the story
+scene, the flag goes to 2 and sound 25 is asked for. There is no resource 25,
+so that is silent in the original too.
+
 ## Time of day
 
 `seg4:0x0554` computes it, and the unit is the **half hour**. `seg4:0x0C48`
@@ -863,12 +885,14 @@ Things the port had to get right that are easy to get wrong:
   spread of ways to *set out* again from there, and he wanders: 4 → 3 → 6 → 5
   → 4 → 3 → 1 where the block would have taken him 4 → 3 → 1. Twenty-three
   seconds of walking instead of four.
-* **The weighted pickers stop on "not positive", not "negative".**
-  `seg4:0x0118` subtracts each weight from the draw and takes the option the
-  moment the running count stops being positive, so a draw landing exactly on
-  a boundary belongs to the option *before* it. Starting the count one higher
-  takes the next one instead — twenty-seven of the oracle's 4,736 route rolls,
-  or a wrong turn about once every two hundred walks.
+* **The two weighted pickers count differently, and it is not a mistake.**
+  Both subtract weights from a draw and stop when the running count stops
+  being positive. The scene chooser (`seg4:0x0E62`) draws `rand() % total`
+  and then adds one; the walk router (`seg4:0x0111`) draws `rand() % 100` and
+  does not. So a draw landing exactly on a boundary belongs to the option
+  *after* it in one and the option *before* it in the other. Giving the
+  router the chooser's extra one sent it the wrong way twenty-seven times in
+  the oracle's 4,736 rolls — a wrong turn about once every two hundred walks.
 * **`F200` starts a second sequence.** Every one of `STAND.ADS`'s twelve
   standing sequences opens with `F200 14`, and 14 is its own `TAG:` entry
   "STAND INIT" — four instructions that put up the base pose,

@@ -397,3 +397,31 @@ fn only_the_horizontal_mirror_is_ever_asked_for() {
     assert_eq!(render::Mirror::from_mode(2), render::Mirror { x: true, y: false });
     assert_eq!(render::Mirror::from_mode(0), render::Mirror::none());
 }
+
+// ---- the story --------------------------------------------------------
+
+#[test]
+fn the_two_story_days_leapfrog() {
+    // `Introduction` (`ds:0x2D9B`) is the day on offer and `NumDays`
+    // (`ds:0x2D9C`) the day reached, and they are not the same number.
+    // `seg4:0x0C28` moves the offer on when a queue holding it runs out;
+    // `seg4:0x0BDC` lets the reached day catch up on the next real day. So
+    // the offer is usually one ahead, and a reload that takes it for both
+    // jumps the story forward every time the screen goes blank.
+    let mut s = settings::Settings::default();
+    s.story_offered = 5;
+    s.story_reached = 4;
+    s.story_date = (1992, 6, 1);
+    let mut d = director::Director::new(0);
+    d.configure(s.clone());
+    assert_eq!(d.day, 4, "the reached day");
+    let (offered, reached, _) = d.story_snapshot();
+    assert_eq!((offered, reached), (5, 4), "a round trip must not move it on");
+}
+
+#[test]
+fn a_fresh_settings_file_does_not_start_the_story_mid_way() {
+    let mut d = director::Director::new(0);
+    d.configure(settings::Settings::default());
+    assert_eq!(d.day, 1);
+}
