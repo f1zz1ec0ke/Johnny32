@@ -242,7 +242,10 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let mut rng = Rng::new(seed);
-            s.begin_pass();
+            // One sequence, because that is all `seg10:0x1925` is. The walk
+            // over every sequence belongs to the driver above it and is what
+            // `seqrun` compares.
+            s.begin_sequence(seq);
             for _ in 0..johnny::ads::PASS_BUDGET {
                 if matches!(s.next_action(&mut rng), johnny::ads::Action::PassOver) {
                     break;

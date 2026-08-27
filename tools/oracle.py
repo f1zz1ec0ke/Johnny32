@@ -633,11 +633,23 @@ def ads_run(machine, code, seqs, seq, pairs, passes=8):
     out = []
     for turn in range(passes):
         mark = len(log)
-        # `seg10:0x1BCC`: a parked resume pointer wins over the sequence start.
-        parked = m.read16(m.ds, ADS_CTX + 0x292 + seq * 4)
-        at = parked if parked else ADS_SCRIPT + seqs[seq][0]
-        if m.read16(m.ds, ADS_CTX + 0x12 + seq * 2) == 1:
-            m.call(10, 0x1925, [at, m.ds])
+        # `seg10:0x1B6B` walks every sequence in id order. Two rules matter
+        # and both are read straight off the driver: states 3 and 4 become 1
+        # **as the walk reaches each one** (`seg10:0x1BE8`), not before the
+        # pass begins -- so a sequence an earlier one has just woken runs in
+        # the same pass -- and a parked resume pointer beats the sequence's
+        # own start (`seg10:0x1BCC`).
+        for sid in sorted(seqs):
+            state = m.read16(m.ds, ADS_CTX + 0x12 + sid * 2)
+            if state in (3, 4):
+                state = 1
+                m.write16(m.ds, ADS_CTX + 0x12 + sid * 2, 1)
+            if state != 1:
+                continue
+            parked = m.read16(m.ds, ADS_CTX + 0x292 + sid * 4)
+            m.write16(m.ds, ADS_CURSEQ, sid)
+            m.call(10, 0x1925,
+                   [parked if parked else ADS_SCRIPT + seqs[sid][0], m.ds])
         out.append('pass %d %s | seq=%d %s' % (
             turn,
             ' ; '.join(log[mark:]),
@@ -658,14 +670,31 @@ def ads_run(machine, code, seqs, seq, pairs, passes=8):
     return out
 
 
+def ads_all_pairs(layout):
+    """Every scene the whole script mentions, in a stable order.
+
+    `ads_pass` seeds one sequence's scenes because that is all one sequence
+    can reach. A `seqrun` walks *every* sequence, so a `F200` can hand the
+    pass to a sequence whose scenes are nowhere in the starting one's list --
+    and a scene with no instance record reads as "never played" forever,
+    which is a hole in the harness, not a rule of the engine.
+    """
+    seen = []
+    for sid in sorted(layout):
+        for pair in layout[sid][1]:
+            if pair not in seen:
+                seen.append(pair)
+    return sorted(seen)
+
+
 def q_seqrun(passes=8):
     """seg10:0x1925 run over and over, which is the only way to see the parts
     of the sequencer that live between passes."""
     out = []
     for name, code in ads_scripts():
         layout = ads_layout(code)
+        pairs = ads_all_pairs(layout)
         for seq in sorted(layout):
-            pairs = layout[seq][1]
             got = ads_run(fresh(), code, layout, seq, pairs, passes)
             for line in got:
                 out.append('seqrun %s %d %s' % (name, seq, line))
@@ -676,8 +705,8 @@ def p_seqrun(passes=8):
     out = []
     for name, code in ads_scripts():
         layout = ads_layout(code)
+        pairs = ','.join('%d:%d' % p for p in ads_all_pairs(layout)) or '-'
         for seq in sorted(layout):
-            pairs = ','.join('%d:%d' % p for p in layout[seq][1]) or '-'
             for line in port('seqrun', name, seq, pairs, passes):
                 out.append('seqrun %s %d %s' % (name, seq, line))
     return out

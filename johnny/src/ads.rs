@@ -469,6 +469,15 @@ pub struct Sequencer {
     /// The nesting depth a `Wait` was entered at, so its block's `Step` can
     /// end the sequence's pass rather than merely close the block.
     wait_at: Option<u16>,
+    /// Interpret one sequence and stop, instead of walking on to the next.
+    ///
+    /// The engine has two functions here and the port has one: `seg10:0x1925`
+    /// interprets a single sequence, and `seg10:0x1BE8` is the driver that
+    /// walks every sequence in turn and calls it. `begin_pass` is the driver;
+    /// `begin_sequence` is `seg10:0x1925` on its own, which is what the
+    /// oracle's `seqpass` compares against. Nothing in the screensaver sets
+    /// it.
+    solo: bool,
     pub todo_seen: BTreeMap<u16, usize>,
 }
 
@@ -549,6 +558,7 @@ impl Sequencer {
             resume: BTreeMap::new(),
             hits: BTreeMap::new(),
             wait_at: None,
+            solo: false,
             todo_seen: BTreeMap::new(),
         })
     }
@@ -585,22 +595,51 @@ impl Sequencer {
     /// That is what makes a cascade work: the block waiting on a scene fires
     /// on the pass that scene ends, however many passes later that is.
     pub fn begin_pass(&mut self) {
-        for state in self.seqs.values_mut() {
-            if *state == 3 || *state == 4 {
-                *state = 1;
-            }
-        }
+        self.solo = false;
         self.current = 0;
         self.next_sequence();
     }
 
+    /// Interpret one named sequence and stop when its pass ends -- what
+    /// `seg10:0x1925` does when the driver hands it a sequence. The oracle
+    /// needs this because the binary's interpreter has no idea there are
+    /// other sequences; walking on to them is the caller's doing.
+    pub fn begin_sequence(&mut self, sequence: u16) -> bool {
+        let Some(body) = self.body_of(sequence) else {
+            return false;
+        };
+        self.solo = true;
+        self.seqs.insert(sequence, 1);
+        self.current = sequence;
+        self.depth = 0;
+        self.wait_at = None;
+        self.pc = self.resume.get(&sequence).copied().unwrap_or(body);
+        true
+    }
+
     /// Move the cursor to the next sequence that wants to run this pass.
+    ///
+    /// `seg10:0x1BE8` turns states 3 and 4 into 1 **as it reaches each
+    /// sequence**, not before the pass begins, and that is not a detail.
+    /// `F200` is usually the first instruction of the sequence that uses it,
+    /// so it runs again every pass and puts its target back into state 4. A
+    /// port that converts every 4 up front therefore converts the one from
+    /// *last* pass, watches this pass set it back to 4, and never runs it --
+    /// so `STAND.ADS`'s twelve standing sequences never reach the four
+    /// instructions that put Johnny in the picture.
     fn next_sequence(&mut self) -> bool {
+        if self.solo {
+            self.current = u16::MAX;
+            return false;
+        }
         let next = self
             .seqs
             .iter()
-            .find(|(id, state)| **state == 1 && **id > self.current)
+            .find(|(id, state)| matches!(**state, 1 | 3 | 4) && **id > self.current)
             .map(|(id, _)| *id);
+        if let Some(id) = next {
+            self.seqs.insert(id, 1);
+        }
         self.depth = 0;
         self.wait_at = None;
         let start = |me: &Self, id: u16| {

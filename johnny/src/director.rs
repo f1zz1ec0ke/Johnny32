@@ -241,6 +241,17 @@ pub struct Active {
     /// self-loop flag at +0xC, set at `seg10:0x1D9E` by comparing the goto
     /// target with the scene's own start.
     pub looping: bool,
+    /// The frame on screen carried an `EndScene`, and its delay has not run
+    /// out yet.
+    ///
+    /// `seg10:0x1D65` does not take a scene's word for it: the end flag only
+    /// becomes state 4 once `seg10:0x196E` says the frame's delay is up. So
+    /// the last frame of a scene is held for as long as it asked for, like
+    /// every other frame. Ending on the tick it *starts* throws that hold
+    /// away -- and a scene whose last frame asks for two to four seconds,
+    /// which is what every standing pose does, is over before it is seen and
+    /// starts again immediately.
+    pub ending: bool,
 }
 
 /// Getting Johnny where a scene wants him standing, and facing the way it
@@ -314,6 +325,7 @@ impl Active {
                 _ => 0,
             },
             looping: false,
+            ending: false,
         }
     }
 
@@ -330,6 +342,7 @@ impl Active {
     /// first frame over and over, never reaches its end, and never lets the
     /// scene that is waiting on it start.
     pub fn rearm(&mut self, repeat: Repeat, now: u32) {
+        self.ending = false;
         self.state = repeat.state();
         self.count = repeat.count();
         self.until = match repeat {
@@ -369,6 +382,15 @@ impl Active {
             // The deadline is what ends this one; until it passes, keep going.
             SceneState::Queued(3) => self.restart(),
             _ => {
+                // `seg10:0x1D21` puts the scene's own start into the pending
+                // jump before it decides anything else, so an instance that
+                // has reached its end is wound back whether or not it is
+                // going to play again. Leaving it at the end means the next
+                // `PlayScene` re-arms something with nothing left to run --
+                // and since `seg10:0x0DB6` re-arms in place rather than
+                // starting over, that scene then ends on the tick it starts,
+                // for ever.
+                self.inst.seek_scene(self.scene);
                 self.state = SceneState::Over;
                 true
             }
@@ -417,8 +439,12 @@ pub fn advance_scenes(
             finished.push((a.ttm, a.scene));
             continue;
         }
-        if a.wake > now {
-            // Not its turn to move, but it is still on screen.
+        // Not its turn to move -- or its last frame is on screen and being
+        // held for the delay it asked for, which is the same thing as far as
+        // the picture is concerned. Stepping it again would run the instance
+        // straight out of its own scene and into whatever follows it in the
+        // file.
+        if a.wake > now || a.ending {
             a.inst.repaint(stage);
         } else {
             let ended = match a.inst.run_frame(stage, archive) {
@@ -433,10 +459,20 @@ pub fn advance_scenes(
                     if a.inst.last_goto == Some(a.scene) {
                         a.looping = true;
                     }
-                    a.inst.ended
+                    // `seg10:0x1D65`: the end flag waits for the frame's own
+                    // delay before it counts.
+                    a.ending = a.inst.ended;
+                    false
                 }
             };
             if ended && !a.program_ended() {
+                finished.push((a.ttm, a.scene));
+            }
+        }
+        // The held last frame's delay has run out, so now the scene is over.
+        if a.ending && now >= a.wake {
+            a.ending = false;
+            if !a.program_ended() {
                 finished.push((a.ttm, a.scene));
             }
         }
