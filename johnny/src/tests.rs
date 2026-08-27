@@ -587,3 +587,80 @@ fn only_the_playable_marker_makes_a_record() {
     assert!(program.scene_start(5).is_some(), "1101 still names a frame");
     assert!(program.scene_start(7).is_some());
 }
+
+#[test]
+fn the_clip_and_the_colours_belong_to_the_instance() {
+    // `seg12:0x0F40` and `seg12:0x06A9` write `4004`'s rectangle and `2002`'s
+    // two colours into the instance record as well as into the globals, and
+    // `seg10:0x1C81` copies them back out of the record before every frame
+    // that instance runs. So a scene that sets a clip does not hand it to the
+    // next scene to draw -- which is what left the raft in `SJLEAVES.TTM`
+    // clipped down to a few pixels.
+    let archive = dgds::Archive::load(&[], None).expect("an empty archive");
+    let mut stage = ttm::Stage::new();
+
+    let setter = std::rc::Rc::new(ttm::Program {
+        ops: vec![
+            ttm::Op::SceneMarker { scene: 0, playable: true },
+            ttm::Op::SetClip { x1: 10, y1: 20, x2: 30, y2: 40 },
+            ttm::Op::SetColors { fg: 3, bg: 4 },
+            ttm::Op::EndFrame,
+        ],
+        scenes: vec![0],
+    });
+    let plain = std::rc::Rc::new(ttm::Program {
+        ops: vec![ttm::Op::EndFrame],
+        scenes: Vec::new(),
+    });
+
+    let mut a = ttm::Instance::new(std::rc::Rc::clone(&setter));
+    let mut b = ttm::Instance::new(std::rc::Rc::clone(&plain));
+
+    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(stage.surface.clip.is_some(), "4004 sets the screen's clip");
+    assert_eq!((stage.fg, stage.bg), (3, 4));
+
+    // The next instance to draw brings its own, and its own is the whole
+    // screen and colour 15 (`seg10:0x0B6E`).
+    assert!(matches!(b.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(stage.surface.clip.is_none(), "the clip followed the wrong scene");
+    assert_eq!((stage.fg, stage.bg), (15, 15), "the colours followed the wrong scene");
+
+    // And the one that set them still has them next time round.
+    assert!(a.seek_scene(0));
+    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(stage.surface.clip.is_some(), "the instance lost its own clip");
+}
+
+#[test]
+fn a_region_that_runs_off_the_screen_is_not_drawn_at_all() {
+    // `seg12:0x0318` refuses the whole `A0x4` family a rectangle that is
+    // empty or whose far edge is past the screen -- it does not clip it to
+    // fit. Nothing in the shipped scripts reaches it, but the difference
+    // between "clipped" and "not drawn" is a real one.
+    let archive = dgds::Archive::load(&[], None).expect("an empty archive");
+    let mut stage = ttm::Stage::new();
+    let w = stage.surface.width as i16;
+    let cases = [
+        (0i16, 0i16, w, 4i16, true),
+        (1, 0, w, 4, false),   // one past the right edge
+        (0, 0, 0, 4, false),   // empty
+        (0, 0, 4, 0, false),
+    ];
+    for (x, y, rw, rh, want) in cases {
+        let program = std::rc::Rc::new(ttm::Program {
+            ops: vec![
+                ttm::Op::RegionOp { opcode: 0xA064, x, y, w: rw, h: rh },
+                ttm::Op::EndFrame,
+            ],
+            scenes: Vec::new(),
+        });
+        let mut inst = ttm::Instance::new(program);
+        let _ = inst.run_frame(&mut stage, &archive);
+        assert_eq!(
+            inst.marks() > 0,
+            want,
+            "A064 at {x},{y} {rw}x{rh} on a {w}-wide screen"
+        );
+    }
+}

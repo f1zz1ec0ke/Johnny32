@@ -703,6 +703,18 @@ impl Program {
     }
 }
 
+/// Will the region family act on this rectangle at all?
+///
+/// `seg12:0x0318` walks off to its "done" label for a width or height that is
+/// not positive, or a rectangle whose far edge is past the screen. There is
+/// no clipping to fit: the op simply does not happen.
+fn fits(stage: &Stage, x: i32, y: i32, w: i16, h: i16) -> bool {
+    w > 0
+        && h > 0
+        && x + w as i32 <= stage.surface.width as i32
+        && y + h as i32 <= stage.surface.height as i32
+}
+
 /// What one step of an instance produced.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -732,6 +744,33 @@ pub struct Instance {
     /// The frame just run contained an `EndScene`: the engine's `ds:0x4644`,
     /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
     pub ended: bool,
+    /// The drawing colours, which belong to the instance and not to the
+    /// screen.
+    ///
+    /// `seg12:0x06A9` writes `2002`'s two operands into the instance record
+    /// at +0x1E and +0x1F as well as into the globals `ds:0x1EAE` and
+    /// `ds:0x1EAD`, and `seg10:0x1C81` copies them back out of the record
+    /// before every frame that instance runs -- the same arrangement as the
+    /// clip below. `seg10:0x0B6E` fills both in with 15 when the record is
+    /// made, so a script that draws a line before it has picked a colour
+    /// draws it white, not in colour 0.
+    fg: u8,
+    bg: u8,
+    /// The clip rectangle, which belongs to the instance and not to the
+    /// screen.
+    ///
+    /// `seg12:0x0F40` writes `4004`'s rectangle into the instance record at
+    /// +0x21 as well as into the globals, and `seg10:0x1C90` copies it back
+    /// out of the record into those globals before every frame that instance
+    /// runs. So two scenes on screen at once each draw under their own clip,
+    /// however they interleave, and a clip one scene set is not inherited by
+    /// the next. `seg10:0x1E2F` then puts the globals back to the whole
+    /// screen once the list has been walked, so nothing drawn outside the
+    /// runner -- Johnny's walk sprite, the island -- is ever clipped.
+    ///
+    /// `None` is the whole screen, which is what `seg10:0x0BA6` fills a new
+    /// record's rectangle in with.
+    clip: Option<Clip>,
     /// What the frame on screen drew, so it can be painted again.
     ///
     /// The engine leaves what a frame drew on screen until something paints
@@ -755,6 +794,9 @@ impl Instance {
             pending_goto: None,
             last_goto: None,
             ended: false,
+            fg: 15,
+            bg: 15,
+            clip: None,
             painted: Vec::new(),
         }
     }
@@ -833,6 +875,11 @@ impl Instance {
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
         self.painted.clear();
+        // `seg10:0x1C81`: the instance's own colours and clip, not whatever
+        // the last scene to draw happened to leave behind.
+        stage.fg = self.fg;
+        stage.bg = self.bg;
+        stage.surface.clip = self.clip;
         self.run_ops(stage, archive)
     }
 
@@ -900,13 +947,22 @@ impl Instance {
                     self.mark(stage, Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: stage.fg });
                 }
                 Op::SetColors { fg, bg } => {
+                    // `seg12:0x06A9` writes both: the instance keeps them,
+                    // and the screen uses them until the next frame puts its
+                    // own back.
+                    self.fg = fg;
+                    self.bg = bg;
                     stage.fg = fg;
                     stage.bg = bg;
                 }
                 Op::SetClip { x1, y1, x2, y2 } => {
                     let (x1, y1) = stage.at(x1, y1);
                     let (x2, y2) = stage.at(x2, y2);
-                    stage.surface.clip = Some(Clip { x1, y1, x2, y2 });
+                    // `seg12:0x0F40` writes both: the instance keeps it, and
+                    // the screen uses it until the next frame restores its
+                    // own.
+                    self.clip = Some(Clip { x1, y1, x2, y2 });
+                    stage.surface.clip = self.clip;
                 }
                 Op::DrawLine { x1, y1, x2, y2 } => {
                     let (x1, y1) = stage.at(x1, y1);
@@ -981,8 +1037,16 @@ impl Instance {
                     h,
                 } => {
                     let (x, y) = stage.at(x, y);
-                    let mark = Mark::Restore { x, y, w: w as i32, h: h as i32 };
-                    self.mark(stage, mark);
+                    // `seg12:0x0318`: the whole family refuses a rectangle
+                    // that is empty or that runs off the screen -- it is not
+                    // clipped to fit, it is not done at all. The island's
+                    // offset is already in `x` and `y` and is what can push a
+                    // rectangle off the right-hand edge, so this has to be
+                    // asked after the shift, not before it.
+                    if fits(stage, x, y, w, h) {
+                        let mark = Mark::Restore { x, y, w: w as i32, h: h as i32 };
+                        self.mark(stage, mark);
+                    }
                 }
                 // The other six have no use in any shipped script. Counted, so
                 // that stays true rather than being assumed.

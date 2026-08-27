@@ -501,6 +501,10 @@ pub fn advance_scenes(
         a.check_deadline(now);
         seq.set_state(a.ttm, a.scene, a.state);
     }
+    // `seg10:0x1E2F`: with the list walked, the clip goes back to the whole
+    // screen. Everything drawn outside the runner -- Johnny's walk sprite,
+    // the island, the surf -- is unclipped, whatever the last scene set.
+    stage.surface.clip = None;
     for (t, s) in &finished {
         seq.set_state(*t, *s, SceneState::Idle);
     }
@@ -1342,21 +1346,12 @@ impl Director {
         ));
         // A scene draws its own Johnny.
         self.standing = None;
-        // Start it unclipped.
-        //
-        // `4004` sets a clip and nothing in the engine ever takes it off
-        // again: the live rectangle is the globals at `ds:0x1EA3`, and the
-        // copy `seg12:0x0F40` also writes into the instance record at +0x20 is
-        // never read back by anything. `seg10:0x0BA6` does fill that copy in
-        // with the whole screen when an instance is made, which says what was
-        // meant even though nothing acts on it.
-        //
-        // Leaving it set is nearly harmless in the original, which keeps its
-        // work page between frames -- a stale clip only limits where *new*
-        // drawing lands. This port repaints the backdrop every tick, so a
-        // stale clip means everything outside it stops being drawn at all.
-        // Thirty-seven scenes in a twenty-six minute run were ending with one
-        // still set, and every scene after inherited it.
+        // Start it unclipped, which by now it already is: the clip belongs
+        // to the instance (`seg10:0x1C90` restores it before every frame) and
+        // `seg10:0x1E2F` puts the screen's own back to full after each pass.
+        // This is here because the two together are what the engine does and
+        // one of them living in the runner is not a reason to leave the other
+        // out.
         self.stage.surface.clip = None;
         self.activity = Activity::Scene {
             row: scene,

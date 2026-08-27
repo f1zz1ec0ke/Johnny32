@@ -242,6 +242,47 @@ def _ttm_scenes(code):
     return scenes
 
 
+def _headers():
+    """Every word <= 0xFF in a script is a sequence header, and every sequence
+    starts where the port thinks it does.
+
+    `seg10:0x0C30` scans forward from a sequence's stored pointer for an
+    instruction whose opcode word is `0005` and resumes just after it,
+    stopping at the `FFFF` that closes the sequence -- so a body holding one
+    would start somewhere the port's "just after the header word" does not.
+    An `0005` is also a word <= 0xFF, which is exactly what marks a header, so
+    it would be read as a second sequence 5 rather than as anything unusual.
+
+    Both readings survive only because every such word in the shipped scripts
+    follows an `FFFF`.
+    """
+    bad, headers = [], 0
+    for name, code in _ads_scripts():
+        after_end, seen = True, set()
+        p = 0
+        while p + 2 <= len(code):
+            op = int.from_bytes(code[p:p + 2], 'little')
+            if 0 < op <= 0xFF:
+                headers += 1
+                if not after_end:
+                    bad.append('%s @%04X: %04X is inside a sequence body' % (name, p, op))
+                if op in seen:
+                    bad.append('%s @%04X: sequence %d is declared twice' % (name, p, op))
+                seen.add(op)
+            after_end = op == 0xFFFF
+            p += _ads_length(op)
+    return headers, bad
+
+
+def _ads_scripts():
+    for name, body, _ in records:
+        if not name.endswith('.ADS'):
+            continue
+        code = _leaf(body, 'SCR:')
+        if code:
+            yield name, code
+
+
 def _frames():
     """Every scene marker is the first instruction of its frame.
 
@@ -418,6 +459,13 @@ else:
         tables_note = '%d lines, byte for byte what gen_tables.py writes' % len(
             _fresh.splitlines())
 
+_headers, _bad_headers = _headers()
+if _bad_headers:
+    failures.extend('sequences: ' + line for line in _bad_headers[:10])
+    headers_note = '%d headers, %d of them wrong' % (_headers, len(_bad_headers))
+else:
+    headers_note = '%d sequence headers, every one after an FFFF' % _headers
+
 _markers, _bad_frames, _headless = _frames()
 if _bad_frames:
     failures.extend('frames: ' + line for line in _bad_frames[:10])
@@ -445,6 +493,7 @@ print('census       %s' % census_note)
 print('tables       %s' % tables_note)
 print('references   %s' % refs_note)
 print('frames       %s' % frames_note)
+print('sequences    %s' % headers_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))
