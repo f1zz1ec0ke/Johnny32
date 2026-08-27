@@ -115,6 +115,30 @@ fn main() -> ExitCode {
                 println!("{from},{to},{at}");
             }
         }
+        // What a scene's backdrop bits ask for. Two of them share one
+        // variable in the engine, so this is where that shows.
+        "backdrop" => {
+            let bits = [0x0010u32, 0x0200, 0x0800, 0x1000, 0x2000, 0x4000];
+            for combo in 0..64u32 {
+                let mut mask = 0u32;
+                for (k, b) in bits.iter().enumerate() {
+                    if combo & (1 << k) != 0 {
+                        mask |= b;
+                    }
+                }
+                let mut b = johnny::scenery::Backdrop::default();
+                b.apply(mask);
+                println!(
+                    "backdrop {mask:04X} raft={} water={} light={} holiday={} layout={}",
+                    b.no_raft as u8,
+                    b.still_water as u8,
+                    // `ds:0x30B4`: 0 plain, 1 night, 2 cutaway.
+                    if b.cutaway { 2 } else { b.night as u8 },
+                    !b.no_holiday as u8,
+                    !b.no_rock as u8
+                );
+            }
+        }
         // How long a scene stays: the run state, the repeat count and the
         // deadline the flags operand asks for.
         "repeat" => {

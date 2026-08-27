@@ -319,8 +319,12 @@ impl Backdrop {
         self.no_raft |= mask & 0x4000 != 0;
         self.no_holiday |= mask & 0x0010 != 0;
         self.still_water |= mask & 0x1000 != 0;
-        // The last two share `ds:0x30B4`, and the cutaway is written second,
-        // so it wins.
+        // The last two share `ds:0x30B4` -- 1 for night, 2 for a cutaway --
+        // and the cutaway is written second, so a row asking for both would
+        // get a cutaway and *not* a night. Two bools cannot say that. No row
+        // in the table asks for both (night is on one scene, the cutaway on
+        // four), so the difference has nowhere to show; `tools/oracle.py
+        // backdrop` compares all sixty-four combinations anyway.
         self.night |= mask & 0x0800 != 0;
         self.cutaway |= mask & 0x2000 != 0;
     }

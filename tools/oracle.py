@@ -245,6 +245,36 @@ def q_repeat():
     return out
 
 
+def q_backdrop():
+    """seg3:0x1C7C, over every combination of the six backdrop bits.
+
+    A scene's table row asks for the island a particular way -- no raft, flat
+    calm, night, a cutaway, no decoration, no rock -- and six bits of the low
+    word say which. Two of them share one variable (`ds:0x30B4`: 1 for night,
+    2 for a cutaway) and the cutaway is written second, so a row asking for
+    both gets a cutaway and *not* a night. Sixty-four combinations is small
+    enough to settle that rather than reason about it.
+    """
+    m = fresh()
+    bits = [0x0010, 0x0200, 0x0800, 0x1000, 0x2000, 0x4000]
+    out = []
+    for combo in range(64):
+        mask = 0
+        for k, b in enumerate(bits):
+            if combo & (1 << k):
+                mask |= b
+        m.call(3, 0x1C41, [0xFFFF, 0xFFFF])          # reset
+        m.call(3, 0x1C41, [mask, 0])
+        out.append('backdrop %04X raft=%d water=%d light=%d holiday=%d layout=%d' % (
+            mask,
+            m.read16(m.ds, 0x30B0),
+            m.read16(m.ds, 0x30B2),
+            m.read16(m.ds, 0x30B4),
+            m.read16(m.ds, 0x30B6),
+            0 if m.read16(m.ds, 0x30C2) == 0 else 1))
+    return out
+
+
 def q_island():
     """seg4:0x0EDB and seg3:0x1C41, exhaustively.
 
@@ -679,6 +709,7 @@ QUERIES = {
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
     'adslen': (q_adslen, lambda: port('adslen')),
+    'backdrop': (q_backdrop, lambda: port('backdrop')),
     'repeat': (q_repeat, lambda: port('repeat')),
     'island': (q_island, lambda: port('island')),
     'route': (q_route, lambda: port('route', 32)),
