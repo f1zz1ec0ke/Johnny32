@@ -213,6 +213,38 @@ def q_adslen():
     return out
 
 
+def q_repeat():
+    """seg10:0x0DB6, over every repeat flag a `PlayScene` could carry.
+
+    The flags operand decides how long a scene stays: zero once, positive that
+    many times, negative for that many ticks. All three write a different run
+    state, and two of them write a second field as well -- one less than the
+    count, or the tick the deadline falls on. `seqrun` compares the states
+    already; this compares what goes with them.
+    """
+    m = fresh()
+    inst = ADS_INSTS
+    # The engine reads the 32-bit tick counter for a deadline.
+    m.write16(m.ds, 0x2E72, 1000)
+    m.write16(m.ds, 0x2E74, 0)
+    out = []
+    for flags in [0, 1, 2, 3, 7, 100, 0x7FFF, -1, -2, -60, -300, -0x7FFF]:
+        for k in range(0, 0x40, 2):
+            m.write16(m.ds, inst + k, 0)
+        m.write16(m.ds, inst + 0x00, 9)
+        m.write16(m.ds, inst + 0x02, 9)
+        m.write16(m.ds, inst + 0x3B, 0)
+        m.write16(m.ds, ADS_CTX + 0x10, inst)
+        m.write16(m.ds, ADS_CURCTX, 0)
+        m.write16(m.ds, ADS_CTXPTR, ADS_CTX)
+        m.write16(m.ds, ADS_CTXPTR + 2, m.ds)
+        m.call(10, 0x0DB6, [9, 9, flags & 0xFFFF])
+        deadline = (m.read16(m.ds, inst + 0x35) << 16) | m.read16(m.ds, inst + 0x33)
+        out.append('repeat %d %d %d %d' % (
+            flags, m.read16(m.ds, inst + 0x2F), m.read16(m.ds, inst + 0x31), deadline))
+    return out
+
+
 def q_island():
     """seg4:0x0EDB and seg3:0x1C41, exhaustively.
 
@@ -647,6 +679,7 @@ QUERIES = {
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
     'adslen': (q_adslen, lambda: port('adslen')),
+    'repeat': (q_repeat, lambda: port('repeat')),
     'island': (q_island, lambda: port('island')),
     'route': (q_route, lambda: port('route', 32)),
     'turn': (q_turn, lambda: port('turn', 8)),

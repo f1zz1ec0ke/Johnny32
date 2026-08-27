@@ -115,6 +115,25 @@ fn main() -> ExitCode {
                 println!("{from},{to},{at}");
             }
         }
+        // How long a scene stays: the run state, the repeat count and the
+        // deadline the flags operand asks for.
+        "repeat" => {
+            const NOW: u32 = 1000;
+            for flags in [0i32, 1, 2, 3, 7, 100, 0x7FFF, -1, -2, -60, -300, -0x7FFF] {
+                let r = johnny::ads::Repeat::from_flags(flags as u16);
+                let state = match r.state() {
+                    johnny::ads::SceneState::Queued(n) => n as u32,
+                    johnny::ads::SceneState::Over => 4,
+                    johnny::ads::SceneState::Finished => 5,
+                    johnny::ads::SceneState::Idle => 0,
+                };
+                let deadline = match r {
+                    johnny::ads::Repeat::ForTicks(n) => NOW + n,
+                    _ => 0,
+                };
+                println!("repeat {flags} {state} {} {deadline}", r.count());
+            }
+        }
         // Which parts of the water a scene needs free, and what claiming
         // them leaves behind. A bitmask machine, so exhaustively.
         "island" => {

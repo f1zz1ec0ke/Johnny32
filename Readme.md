@@ -159,6 +159,7 @@ python3 tools/oracle.py
   seqpass    1143 answers, all identical
   seqrun      528 answers, all identical
   island     8320 answers, all identical
+  repeat       12 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
