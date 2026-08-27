@@ -216,7 +216,15 @@ fn main() -> ExitCode {
             sequence_done = true;
             println!("[tick {tick:5}] sequence finished");
         }
-        if sequence_done && active.iter().all(|a| a.looping) {
+        if sequence_done
+            && active.iter().all(|a: &Active| {
+                a.looping
+                    || matches!(
+                        a.state,
+                        johnny::ads::SceneState::Idle | johnny::ads::SceneState::Over
+                    )
+            })
+        {
             break;
         }
 

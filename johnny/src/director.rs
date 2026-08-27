@@ -1558,11 +1558,24 @@ impl Director {
                 // deducts each scene's cost from a running time allowance.
                 let over_time = ticks > MAX_SCENE_TICKS;
                 // The sequence has to have run out, and everything it left
-                // running has to have finished. A scene that only loops on
-                // itself never will, and does not count: it is scenery, and
-                // the engine passes over it the same way (`seg10:0x07E3`
-                // skips instances carrying the self-loop flag at +0xC).
-                let settled = active.iter().all(|a| a.looping);
+                // running has to have finished. `seg10:0x07D7` walks the
+                // instances and asks three questions of each: state 4 does
+                // not hold the scene open, nor state 0, nor one carrying the
+                // self-loop flag at +0xC -- a scene that only loops on itself
+                // is scenery and will never finish on its own. Anything else
+                // does.
+                //
+                // Where this is still wider than `seg10:0x0766`: that asks
+                // about *one* sequence -- the one the scheduler started --
+                // and its instances alone, while `running` here asks about
+                // every sequence in the file. So a sequence woken by `F200`
+                // and left running keeps the scene alive here and would not
+                // there. It waits longer rather than cutting something off,
+                // and nothing shipped leaves one running: every sequence in
+                // all ten scripts ends by stopping itself.
+                let settled = active
+                    .iter()
+                    .all(|a| a.looping || matches!(a.state, SceneState::Idle | SceneState::Over));
                 if over_time {
                     self.note(format!(
                         "scene ran past {MAX_SCENE_TICKS} ticks, cutting it short"
