@@ -563,6 +563,31 @@ impl Sequencer {
         })
     }
 
+    /// Build a sequencer straight from a decoded script, with no file table
+    /// and no labels. For tests and tools that have the bytes but not the
+    /// archive they came out of.
+    pub fn from_script(code: &[u8]) -> Sequencer {
+        let (ops, _) = decode(code);
+        Sequencer {
+            ops,
+            files: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            pc: 0,
+            states: BTreeMap::new(),
+            seqs: BTreeMap::new(),
+            current: 0,
+            depth: 0,
+            plays: BTreeMap::new(),
+            tracing: false,
+            trace: Vec::new(),
+            resume: BTreeMap::new(),
+            hits: BTreeMap::new(),
+            wait_at: None,
+            solo: false,
+            todo_seen: BTreeMap::new(),
+        }
+    }
+
     pub fn ops(&self) -> &[(usize, Op)] {
         &self.ops
     }
@@ -575,12 +600,36 @@ impl Sequencer {
             .map(|i| i + 1)
     }
 
-    /// Set a sequence running.
+    /// Set a sequence running, the way the scheduler does.
+    ///
+    /// `seg4:0x07CE` calls `seg10:0x0874`, which is `seg10:0x0805(ctx, seq,
+    /// 3)`: state **3**, not 1, and the sequence's parked resume pointer
+    /// cleared. The driver turns 3 into 1 when it reaches the sequence
+    /// (`seg10:0x1BE8`), but not before resetting every instance record that
+    /// sequence owns (`seg10:0x1B33` calls `seg10:0x0B3E` on each): rewound
+    /// to the scene's start, play count zero, run state zero.
+    ///
+    /// Both halves are already true here, because this port builds a
+    /// `Sequencer` per scene and the engine keeps one context per ADS file
+    /// loaded for the whole run (`seg10:0x04FC` only ever *selects* one).
+    /// The difference that leaves is the play count `1330` reads: after two
+    /// scenes from the same file, the engine still remembers what the first
+    /// one played and this port does not.
+    ///
+    /// That difference is the repaint model, not an oversight. The engine
+    /// leaves what a scene drew on the screen, so a backdrop scene guarded by
+    /// `1330` needs to run once and no more. This port paints every tick from
+    /// nothing, so the same scene has to run again to be on screen at all --
+    /// `STAND.ADS` sequence 14 and `MJ_AMB.BMP` are exactly that, and
+    /// remembering the play count across scenes would leave Johnny standing
+    /// on an empty island.
     pub fn start(&mut self, sequence: u16) -> bool {
         if self.body_of(sequence).is_none() {
             return false;
         }
-        self.seqs.insert(sequence, 1);
+        self.resume.remove(&sequence);
+        self.hits.remove(&sequence);
+        self.seqs.insert(sequence, 3);
         true
     }
 
@@ -652,7 +701,21 @@ impl Sequencer {
                 true
             }
             None => {
+                // Nothing wants this pass. Park the pointer past the end of
+                // the script, because the caller cannot see this answer:
+                // `begin_pass` returns nothing and `next_action` would go on
+                // reading from wherever the *last* pass stopped.
+                //
+                // `seg10:0x1C0B` cannot make that mistake -- it calls the
+                // interpreter with an explicit pointer, and only when the
+                // sequence is in state 1 -- but here the pointer is a field,
+                // and a field keeps its value. Left alone it walks: the
+                // instruction after the `F010` that ended the sequence, then
+                // the `FFFF` after that, then the next sequence's header, and
+                // then that sequence's body -- which plays its scenes. A
+                // scene ending would start the animation filed after it.
                 self.current = u16::MAX;
+                self.pc = self.ops.len();
                 false
             }
         }

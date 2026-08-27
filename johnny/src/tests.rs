@@ -664,3 +664,52 @@ fn a_region_that_runs_off_the_screen_is_not_drawn_at_all() {
         );
     }
 }
+
+#[test]
+fn a_pass_with_nothing_to_run_runs_nothing() {
+    // `seg10:0x1C0B` hands the interpreter an explicit pointer and only when
+    // the sequence is in state 1, so a pass in which no sequence wants to run
+    // interprets nothing at all. Here the pointer is a field, and a field
+    // keeps its value: once the last sequence stopped itself, every later
+    // pass carried on from where that one left off -- the instruction after
+    // its `F010`, then the `FFFF`, then the *next sequence's header*, and
+    // then that sequence's body, which plays its own scenes.
+    //
+    // That is a second animation starting on its own a few frames after the
+    // first one ends, with no rule anywhere asking for it.
+    let mut code: Vec<u8> = Vec::new();
+    let mut w = |v: u16| code.extend_from_slice(&v.to_le_bytes());
+    w(0x0001); // sequence 1
+    w(0xF010);
+    w(0xFFFF); // stop this sequence
+    w(0x1510);
+    w(0xFFFF);
+    w(0x0002); // sequence 2, which nothing starts
+    w(0x2005);
+    w(1);
+    w(7);
+    w(0);
+    w(1);
+    w(0x1510);
+    w(0xFFFF);
+
+    let mut s = ads::Sequencer::from_script(&code);
+    s.tracing = true;
+    assert!(s.start(1));
+    let mut rng = ads::Rng::new(0);
+    for pass in 0..8 {
+        s.trace.clear();
+        s.begin_pass();
+        for _ in 0..1000 {
+            if matches!(s.next_action(&mut rng), ads::Action::PassOver) {
+                break;
+            }
+        }
+        assert!(
+            s.trace.is_empty(),
+            "pass {pass} ran {:?} with no sequence in state 1",
+            s.trace
+        );
+    }
+    assert_eq!(s.raw_state(1, 7), 0, "sequence 2 played on its own");
+}

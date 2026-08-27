@@ -310,12 +310,14 @@ fn main() -> ExitCode {
             let mut rng = Rng::new(0);
             for turn in 0..passes {
                 s.trace.clear();
-                if s.sequence_states().iter().any(|(id, st)| *id == seq && *st == 1) {
-                    s.begin_pass();
-                    for _ in 0..johnny::ads::PASS_BUDGET {
-                        if matches!(s.next_action(&mut rng), johnny::ads::Action::PassOver) {
-                            break;
-                        }
+                // The driver walks every pass, whatever state the sequence it
+                // was asked for is in -- `seg10:0x1B6B` has no such guard, and
+                // a sequence another one wakes has to be able to run after the
+                // first has stopped itself.
+                s.begin_pass();
+                for _ in 0..johnny::ads::PASS_BUDGET {
+                    if matches!(s.next_action(&mut rng), johnny::ads::Action::PassOver) {
+                        break;
                     }
                 }
                 let state = s
@@ -332,6 +334,12 @@ fn main() -> ExitCode {
                     s.trace.join(" ; "),
                     scenes.join(" ")
                 );
+                if std::env::var_os("JC_DEBUG").is_some() {
+                    eprintln!(
+                        "  pass {turn} states {:?}",
+                        s.sequence_states()
+                    );
+                }
                 // Move the world on, exactly as the oracle does.
                 let mut sorted = pairs.clone();
                 sorted.sort();
