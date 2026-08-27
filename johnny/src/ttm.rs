@@ -395,12 +395,6 @@ pub struct Paint {
     /// coordinates.
     clip: Option<Clip>,
     mark: Mark,
-    /// What this mark is, in words, kept only while something is listening
-    /// (`Stage::trace`). A repaint says the same thing the frame said, which
-    /// is what lets the `tick` oracle compare a held frame against the
-    /// engine's -- the engine re-runs a held frame's drawing opcodes, so it
-    /// draws again every tick and so must this.
-    said: Option<String>,
 }
 
 enum Mark {
@@ -956,14 +950,10 @@ impl Instance {
     /// `line` describes the mark for `Stage::trace`, and is not built at all
     /// when nothing is listening.
     fn mark(&mut self, stage: &mut Stage, mark: Mark, line: impl FnOnce() -> String) {
-        let said = stage.trace.is_some().then(line);
-        if let (Some(t), Some(l)) = (&mut stage.trace, &said) {
-            t.push(l.clone());
-        }
+        stage.say(line);
         let p = Paint {
             clip: stage.surface.clip,
             mark,
-            said,
         };
         stage.paint(&p);
         self.painted.push(p);
@@ -974,15 +964,16 @@ impl Instance {
     /// Nothing but drawing happens here: the frame's marks were resolved when
     /// it ran, so this cannot load a bitmap, make a noise, draw from the
     /// generator or move the instance on. It does not even need the archive.
+    /// Nothing is said to `Stage::trace` here, and that is deliberate: the
+    /// `tick` oracle compares what a frame draws on the tick it runs, because
+    /// on the ticks after it the engine and this port are knowingly different.
+    /// The engine re-runs the frame's drawing opcodes against slots the frame
+    /// itself may have freed or loaded over -- 49 frames in `RESOURCE.001` do
+    /// exactly that, and 48 of them lose sprites they had a tick earlier. See
+    /// `a_frame_that_frees_what_it_drew_keeps_it_here`.
     pub fn repaint(&mut self, stage: &mut Stage) {
         for p in &self.painted {
             stage.paint(p);
-        }
-        // Say it again, because the engine draws it again: `seg10:0x1CD6`
-        // raises the held flag and the frame runs a second time with the
-        // side effects gated off and the drawing left alone.
-        if let Some(t) = &mut stage.trace {
-            t.extend(self.painted.iter().filter_map(|p| p.said.clone()));
         }
     }
 

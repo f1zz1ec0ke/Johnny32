@@ -328,6 +328,69 @@ def _frames():
     return markers, late, first
 
 
+def _held_frames():
+    """Frames whose held re-run draws a different picture from their first.
+
+    The engine does not keep what a frame drew. `seg10:0x1CD6` raises the held
+    flag and `seg12:0x040C` is handed the same frame again every tick, with
+    every side-effecting opcode gated off `ds:0x46DA` and every drawing one
+    left alone -- so a held frame re-reads the bitmap slots as they stand now,
+    not as they stood when it ran.
+
+    This port replays what the frame drew instead, which is the one place the
+    `tick` oracle compares only the tick a frame runs on. What that costs is
+    exactly the frames that draw from a slot and then free it or load over it
+    before the frame is out, and this counts them: 49, of which 48 lose
+    sprites -- almost all a scene's last frame, which frees its shapes, so in
+    the original the character blinks out and the backdrop is held alone for
+    the rest of the delay.
+    """
+    sizes = {}
+    for name, body, _ in records:
+        if not name.endswith('.BMP'):
+            continue
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'INF:':
+                sizes[name] = struct.unpack_from('<H', payload, 0)[0]
+                break
+
+    def play(frame, slots, sel, held):
+        slots, out = list(slots), []
+        for op, args, text in frame:
+            if op == 0x1051:
+                sel = args[0] & 0x0F
+            elif op == 0xF02F and not held:
+                slots[sel] = sizes.get(text, 0)
+            elif op == 0x0080 and not held:
+                slots[sel] = 0
+            elif (op & 0xFF0F) == 0xA504 and len(args) == 4:
+                x, y, f, slot = args
+                slot &= 0x0F
+                if 0 <= f < slots[slot]:
+                    out.append((x, y, f, slot, (op & 0xF0) >> 4))
+        return out, slots, sel
+
+    shifty = lost = 0
+    for name, body, _ in records:
+        leaves = dict((path[-1], payload)
+                      for path, payload in dgds.flatten(dgds.parse_chunks(body)))
+        if 'TT3:' not in leaves:
+            continue
+        code = dgds.decompress(leaves['TT3:'])
+        slots, sel, frame = [0] * 16, 0, []
+        for _off, op, args, text in dgds.disasm(code, dgds.TTM_OPCODES):
+            if op != 0x0FF0:
+                frame.append((op, args, text))
+                continue
+            drew, after, nsel = play(frame, slots, sel, False)
+            again, _, _ = play(frame, after, nsel, True)
+            if drew != again:
+                shifty += 1
+                lost += len(again) < len(drew)
+            slots, sel, frame = after, nsel, []
+    return shifty, lost
+
+
 def _palettes():
     """There is one palette in the archive and every script loads that one.
 
@@ -534,6 +597,15 @@ if _bad_refs:
 else:
     refs_note = '%d scene references, every one resolves' % _refs
 
+_shifty, _shifty_lost = _held_frames()
+if (_shifty, _shifty_lost) != (49, 48):
+    failures.append('held: %d frames draw differently on the tick after they '
+                    'run (%d losing sprites), not 49 and 48'
+                    % (_shifty, _shifty_lost))
+held_note = ('%d frames redraw differently when held, %d of them losing '
+             'sprites they had a tick earlier -- this port keeps them'
+             % (_shifty, _shifty_lost))
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
@@ -547,6 +619,7 @@ print('references   %s' % refs_note)
 print('frames       %s' % frames_note)
 print('sequences    %s' % headers_note)
 print('palette      %s' % pal_note)
+print('held         %s' % held_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))

@@ -1057,6 +1057,15 @@ class Interpreter:
         what = TTM_LEAVES.get((seg, off))
         if what is None:
             return
+        # Only what a frame draws on the tick it runs. On the ticks after it
+        # the engine runs the frame *again* (`seg10:0x1CD6` raises the flag at
+        # `ds:0x46DA`), against slots the frame itself may have freed or
+        # loaded over -- and this port puts back what the frame drew instead,
+        # which is deliberate and not the same. `tests.rs` pins how far apart
+        # the two can get: 49 frames in the archive, 48 of them losing
+        # sprites they had a tick earlier.
+        if m.read16(m.ds, 0x46DA):
+            return
         name, argc = what
         a = [_s16(m.read16(m.ds, (m.regs['sp'] + k * 2) & 0xFFFF)) for k in range(argc)]
         fg = m.read8(m.ds, 0x1EAE)

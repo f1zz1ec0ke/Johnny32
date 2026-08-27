@@ -786,3 +786,4 @@ fn the_ellipse_opcode_draws_a_circle_the_height_decides() {
         "radius h>>1, centre offset by it, width ignored"
     );
 }
+
