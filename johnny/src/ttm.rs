@@ -75,7 +75,15 @@ pub enum Op {
     SetDelay(u16),
     /// Marks the start of a numbered scene. The original jumps straight to its
     /// "done" label for this, so it is a marker for the caller, not an action.
-    SceneMarker(u16),
+    /// A scene marker. Both `1101` and `1111` name a frame -- `seg12:0x13AA`
+    /// looks a scene number up by walking the frame table and testing the
+    /// first opcode of each frame against either -- but only `1111` gets an
+    /// instance record at load time (`seg11:0x0645`), and a scene with no
+    /// record cannot be played at all: `seg10:0x0DB6` looks one up and
+    /// returns without doing anything when there is none. `SASKDATE.TTM` has
+    /// the only five `1101` markers in the data; nothing plays them and they
+    /// are reachable only by goto from inside the file.
+    SceneMarker { scene: u16, playable: bool },
     GotoFrame(u16),
     /// Release the bitmap held in the selected slot.
     FreeShapes,
@@ -214,7 +222,10 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         0x1061 => Op::SelectPaletteSlot(a(0) as u16),
         0x1121 => Op::SetBackground(a(0) as u16),
         0x1021 => Op::SetDelay(a(0) as u16),
-        0x1101 | 0x1111 => Op::SceneMarker(a(0) as u16),
+        0x1101 | 0x1111 => Op::SceneMarker {
+            scene: a(0) as u16,
+            playable: opcode == 0x1111,
+        },
         0x1201 => Op::GotoFrame(a(0) as u16),
         0x0080 => Op::FreeShapes,
         0x0110 => Op::EndScene,
@@ -645,6 +656,16 @@ impl Untouched {
 /// A decoded `.TTM` program. Shared by every instance of the same file.
 pub struct Program {
     pub ops: Vec<Op>,
+    /// The scenes that get an instance record when this file loads, in the
+    /// order their `1111` markers appear in it.
+    ///
+    /// `seg11:0x0645` makes one record per `1111` and appends it to a single
+    /// list shared by every loaded file, so that order **is** the draw order
+    /// (`seg10:0x1C35` walks it head to tail and the tail lands on top).
+    /// Records are never removed while the file is loaded and `seg10:0x0DB6`
+    /// re-arms the one it finds, so replaying a scene does not move it: only
+    /// `4000` and `4010` do.
+    pub scenes: Vec<u16>,
 }
 
 impl Program {
@@ -653,21 +674,31 @@ impl Program {
         let tt3 = dgds::leaf(body, b"TT3:")?;
         let code = dgds::decompress(tt3.payload).ok()?;
         let (ops, _) = decode(&code);
-        Some(Program { ops })
+        let scenes = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::SceneMarker { scene, playable: true } => Some(*scene),
+                _ => None,
+            })
+            .collect();
+        Some(Program { ops, scenes })
     }
 
     /// A program with nothing in it, for an instance of a scene whose TTM is
     /// not in the archive. `seg11:0x074A` gives the same answer -- no TTM
     /// loaded, so the scene cannot be run -- and `seg10:0x1DBA` acts on it.
     pub fn empty() -> Program {
-        Program { ops: Vec::new() }
+        Program {
+            ops: Vec::new(),
+            scenes: Vec::new(),
+        }
     }
 
     /// The instruction index just after a scene marker.
     pub fn scene_start(&self, scene: u16) -> Option<usize> {
         self.ops
             .iter()
-            .position(|op| matches!(op, Op::SceneMarker(n) if *n == scene))
+            .position(|op| matches!(op, Op::SceneMarker { scene: n, .. } if *n == scene))
             .map(|i| i + 1)
     }
 }
@@ -934,7 +965,7 @@ impl Instance {
                         stage.sounds.remove(0);
                     }
                 }
-                Op::SceneMarker(_) | Op::SetBackground(_) | Op::NoOp(_) => {}
+                Op::SceneMarker { .. } | Op::SetBackground(_) | Op::NoOp(_) => {}
                 // Known, named, and not yet drawn. Counted rather than
                 // silently skipped so they stay visible.
                 // The record half. Nothing to do: this port repaints the

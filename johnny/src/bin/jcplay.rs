@@ -88,6 +88,17 @@ fn main() -> ExitCode {
     let mut stage = ttm::Stage::new();
     let mut programs: HashMap<String, Rc<ttm::Program>> = HashMap::new();
     let mut active: Vec<Active> = Vec::new();
+    // The instance list: one entry per `1111` marker, file by file in `RES:`
+    // order, which is the order the engine loads them in. It is the draw
+    // order, and a scene keeps its place in it whatever plays when.
+    let mut order: Vec<(u16, u16)> = Vec::new();
+    for (id, name) in seq.files.clone() {
+        if let Some(p) = ttm::Program::load(&archive, &name) {
+            for scene in &p.scenes {
+                order.push((id, *scene));
+            }
+        }
+    }
     let mut frame = 0usize;
     let mut tick = 0u32;
     let mut sequence_done = false;
@@ -121,6 +132,17 @@ fn main() -> ExitCode {
                     scene,
                     to_front,
                 } => {
+                    // The engine moves the record inside the instance list
+                    // itself, so the move outlasts the scene it was asked
+                    // for.
+                    if let Some(i) = order.iter().position(|e| *e == (ttm, scene)) {
+                        let e = order.remove(i);
+                        if to_front {
+                            order.push(e);
+                        } else {
+                            order.insert(0, e);
+                        }
+                    }
                     if let Some(i) = active.iter().position(|a: &Active| (a.ttm, a.scene) == (ttm, scene)) {
                         let a = active.remove(i);
                         if to_front {
@@ -178,7 +200,15 @@ fn main() -> ExitCode {
                         println!("   (no scene {scene} in {file})");
                         inst.exhaust();
                     }
-                    active.push(Active::start(ttm_id, scene, inst, repeat, tick));
+                    // At the depth the instance list has always had it.
+                    let rank = johnny::director::depth(&order, ttm_id, scene);
+                    let at = active
+                        .iter()
+                        .position(|a: &Active| {
+                            johnny::director::depth(&order, a.ttm, a.scene) > rank
+                        })
+                        .unwrap_or(active.len());
+                    active.insert(at, Active::start(ttm_id, scene, inst, repeat, tick));
                 }
             }
         }

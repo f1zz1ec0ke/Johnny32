@@ -537,3 +537,53 @@ fn a_scene_that_cannot_run_ends_rather_than_hanging() {
         assert_eq!(a.state, ads::SceneState::Over, "{repeat:?} kept a dead scene alive");
     }
 }
+
+#[test]
+fn the_instance_list_is_marker_order_not_play_order() {
+    // `seg11:0x0645` makes one instance record per `1111` marker as a TTM
+    // loads, appended to a single list, and `seg10:0x1C35` walks that list
+    // head to tail -- so the tail lands on top and a scene's depth is fixed
+    // by where its marker sits in the file. `seg10:0x0DB6` re-arms the
+    // record it finds rather than making a new one, so replaying a scene
+    // does not lift it.
+    //
+    // `MJAMBWLK.TTM` is why this matters: scene 42 is the first marker in
+    // the file and scenes 33 to 61 are the forty-fourth onward, but 42 is
+    // played last, by the sequence `F200` wakes. Appending on play put the
+    // standing backdrop on top of Johnny.
+    let order = [(1u16, 42u16), (1, 33), (1, 61), (2, 5)];
+    assert_eq!(director::depth(&order, 1, 42), 0);
+    assert_eq!(director::depth(&order, 1, 61), 2);
+    assert_eq!(director::depth(&order, 2, 5), 3);
+    // A scene with no record at all sorts last, which is the only place the
+    // engine cannot put it: `seg10:0x0DB6` never plays one.
+    assert_eq!(director::depth(&order, 9, 9), order.len());
+}
+
+#[test]
+fn only_the_playable_marker_makes_a_record() {
+    // Both `1101` and `1111` name a frame -- `seg12:0x13AA` accepts either
+    // when it resolves a goto -- but only `1111` gets an instance record,
+    // and without one `seg10:0x0DB6` does nothing at all.
+    let mut code = Vec::new();
+    for (op, scene) in [(0x1101u16, 5u16), (0x0FF0, 0), (0x1111, 7), (0x0FF0, 0)] {
+        code.extend_from_slice(&op.to_le_bytes());
+        if op & 0x0F != 0 {
+            code.extend_from_slice(&scene.to_le_bytes());
+        }
+    }
+    let (ops, used) = ttm::decode(&code);
+    assert_eq!(used, code.len());
+    let playable: Vec<u16> = ops
+        .iter()
+        .filter_map(|op| match op {
+            ttm::Op::SceneMarker { scene, playable: true } => Some(*scene),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(playable, vec![7], "1101 must not make a record");
+    // Both are still findable, because a goto can name either.
+    let program = ttm::Program { ops, scenes: playable };
+    assert!(program.scene_start(5).is_some(), "1101 still names a frame");
+    assert!(program.scene_start(7).is_some());
+}

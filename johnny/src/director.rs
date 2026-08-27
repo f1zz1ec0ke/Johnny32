@@ -424,6 +424,18 @@ impl Active {
     }
 }
 
+/// Where a scene sits in the instance list, which is how deep it is drawn.
+///
+/// A scene the list has not got goes at the end -- the engine cannot get
+/// there at all, since `seg10:0x0DB6` does nothing without a record, and the
+/// port only reaches it for a scene its TTM does not define.
+pub fn depth(order: &[(u16, u16)], ttm: u16, scene: u16) -> usize {
+    order
+        .iter()
+        .position(|e| *e == (ttm, scene))
+        .unwrap_or(order.len())
+}
+
 /// Advance every live scene by one tick and settle the run states.
 ///
 /// This is `seg10:0x1C3C`'s loop: walk the instance list, run a frame for each
@@ -648,6 +660,22 @@ pub struct Director {
     pub stage: Stage,
     activity: Activity,
     programs: HashMap<String, Rc<Program>>,
+    /// The instance list, in the order the engine builds it.
+    ///
+    /// `seg11:0x0645` makes one record per `1111` marker as each TTM loads
+    /// and appends it to one list, so the list reads: every scene of the
+    /// first file in marker order, then every scene of the second, and so
+    /// on. `seg10:0x1C35` walks that list head to tail, so it is the draw
+    /// order, and `seg10:0x0DB6` re-arms the record it finds rather than
+    /// making a new one -- a scene that ends and plays again comes back at
+    /// the same depth. Only `4000` and `4010` move anything.
+    ///
+    /// Appending a scene to `active` when it starts, which is the obvious
+    /// thing to do, instead puts whatever played most recently on top. With
+    /// five scenes on screen at once that is visible.
+    order: Vec<(u16, u16)>,
+    /// Files loaded but whose header frame has not been run yet.
+    fresh: Vec<String>,
     /// JOHNWALK.BMP, decoded once. `FILES.VIN` preloads it, and decoding it
     /// per walk frame is 36 LZW passes a tick.
     walk_frames: Option<Rc<Vec<Frame>>>,
@@ -731,6 +759,8 @@ impl Director {
             stage: Stage::new(),
             activity: Activity::Intro { until: INTRO_TICKS },
             programs: HashMap::new(),
+            order: Vec::new(),
+            fresh: Vec::new(),
             walk_frames: None,
             standing: None,
             scenery: None,
@@ -1191,12 +1221,26 @@ impl Director {
         self.next_step(from, (to, 0)).map(|w| w.id)
     }
 
+    /// Load a TTM, or hand back the one already loaded. Nothing is run: the
+    /// instance list is built from what the file says, and the engine builds
+    /// it as the file loads.
     fn program(&mut self, archive: &Archive, name: &str) -> Option<Rc<Program>> {
         if let Some(p) = self.programs.get(name) {
             return Some(Rc::clone(p));
         }
         let p = Rc::new(Program::load(archive, name)?);
         self.programs.insert(name.to_string(), Rc::clone(&p));
+        self.fresh.push(name.to_string());
+        Some(p)
+    }
+
+    /// The same, with the header frame run if it has not been yet.
+    fn ready(&mut self, archive: &Archive, name: &str) -> Option<Rc<Program>> {
+        let p = self.program(archive, name)?;
+        let Some(i) = self.fresh.iter().position(|f| f == name) else {
+            return Some(p);
+        };
+        self.fresh.remove(i);
         // The header before the first scene marker does the loads.
         let mut header = Instance::new(Rc::clone(&p));
         let _ = header.run_frame(&mut self.stage, archive);
@@ -1266,6 +1310,22 @@ impl Director {
         if !seq.start(scene.sequence as u16) {
             self.note(format!("{file} has no sequence {}", scene.sequence));
             return;
+        }
+        // Build the instance list, which is what draw order is. The engine
+        // loads the files an ADS names as the ADS loads and makes one record
+        // per `1111` marker as each arrives (`seg11:0x0645`), so the list is
+        // file order then marker order. `seq.files` is keyed by the id in the
+        // `RES:` table, and that table is the load order.
+        self.order.clear();
+        let files: Vec<(u16, String)> =
+            seq.files.iter().map(|(id, f)| (*id, f.clone())).collect();
+        for (id, name) in files {
+            let Some(p) = self.program(archive, &name) else {
+                continue;
+            };
+            for scene in &p.scenes {
+                self.order.push((id, *scene));
+            }
         }
         // `seg4:0x07DF`: a scene can ask to be drawn 272 pixels to the right
         // of the island, and eight of them do. Everything else follows the
@@ -1737,6 +1797,19 @@ impl Director {
                 } => {
                     // Draw order is list order, and the runner walks it head
                     // to tail, so the tail is on top.
+                    // The engine moves the record inside the instance list
+                    // (`seg10:0x0F8C` to the tail, `seg10:0x0EF2` to the
+                    // head), so the move outlives the scene it was asked
+                    // for: the record is still there, at its new depth, when
+                    // the scene plays again.
+                    if let Some(i) = self.order.iter().position(|e| *e == (ttm, scene)) {
+                        let e = self.order.remove(i);
+                        if to_front {
+                            self.order.push(e);
+                        } else {
+                            self.order.insert(0, e);
+                        }
+                    }
                     if let Some(i) = active.iter().position(|a| (a.ttm, a.scene) == (ttm, scene)) {
                         let a = active.remove(i);
                         if to_front {
@@ -1782,7 +1855,16 @@ impl Director {
                     if !inst.seek_scene(scene) {
                         inst.exhaust();
                     }
-                    active.push(Active::start(ttm_id, scene, inst, repeat, self.tick));
+                    let _ = self.ready(archive, &file);
+                    // Back where the instance list has always had it, not on
+                    // top: the engine's record was made when the file loaded
+                    // and has been sitting there, idle, ever since.
+                    let rank = depth(&self.order, ttm_id, scene);
+                    let at = active
+                        .iter()
+                        .position(|a| depth(&self.order, a.ttm, a.scene) > rank)
+                        .unwrap_or(active.len());
+                    active.insert(at, Active::start(ttm_id, scene, inst, repeat, self.tick));
                 }
             }
         }

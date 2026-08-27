@@ -242,6 +242,51 @@ def _ttm_scenes(code):
     return scenes
 
 
+def _frames():
+    """Every scene marker is the first instruction of its frame.
+
+    `seg12:0x13AA` resolves a scene number by walking the frame table and
+    testing only the *first* opcode of each frame, so a marker anywhere else
+    names nothing -- while the port, which searches the decoded instructions,
+    would find it wherever it sat. That is the check.
+
+    The count of files whose frame 0 is itself a named scene comes back with
+    it. The port runs frame 0 once when a file loads, for the palette and
+    backdrop in it, and in `WOULDBE.TTM` -- the only one -- that frame is
+    scene 3. It loads the same palette and the same backdrop as the other
+    forty and draws nothing, so running it is the same either way; the number
+    is here so that stays true rather than stays assumed.
+    """
+    late, first, markers = [], [], 0
+    for name, body, _ in records:
+        if not name.endswith('.TTM'):
+            continue
+        code = _leaf(body, 'TT3:')
+        if not code:
+            continue
+        p, at_start = 0, True
+        while p + 2 <= len(code):
+            op = int.from_bytes(code[p:p + 2], 'little')
+            n = op & 0x0F
+            if n == 0x0F:
+                e = code.find(b'\x00', p + 2)
+                if e < 0:
+                    break
+                size = (e + 1) - p
+                p += size + (size & 1)
+                at_start = False
+                continue
+            if op in (0x1101, 0x1111):
+                markers += 1
+                if not at_start:
+                    late.append('%s @%04X is a marker inside a frame' % (name, p))
+                if p == 0:
+                    first.append(name)
+            at_start = op == 0x0FF0
+            p += 2 + n * 2
+    return markers, late, first
+
+
 def _references():
     """Does every scene the scripts name actually exist?
 
@@ -373,6 +418,15 @@ else:
         tables_note = '%d lines, byte for byte what gen_tables.py writes' % len(
             _fresh.splitlines())
 
+_markers, _bad_frames, _headless = _frames()
+if _bad_frames:
+    failures.extend('frames: ' + line for line in _bad_frames[:10])
+    frames_note = '%d scene markers, %d misplaced' % (_markers, len(_bad_frames))
+else:
+    frames_note = ('%d scene markers, every one starts its frame (%s '
+                   'has no unnamed header frame)'
+                   % (_markers, ', '.join(_headless) if _headless else 'none'))
+
 _refs, _bad_refs = _references()
 if _bad_refs:
     failures.extend('references: ' + line for line in _bad_refs[:10])
@@ -390,6 +444,7 @@ print('scheduler    %s' % sched_note)
 print('census       %s' % census_note)
 print('tables       %s' % tables_note)
 print('references   %s' % refs_note)
+print('frames       %s' % frames_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))
