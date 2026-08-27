@@ -27,6 +27,18 @@ pub fn length(opcode: u16) -> usize {
     }
 }
 
+/// Every ADS opcode the shipped scripts contain, sequence labels aside.
+/// `tools/verify.py` checks it still matches.
+///
+/// Five the dispatch table accepts never appear: `2000` (only `2005` is
+/// used), `2015`, `2020`, `4010` and `F000`/`F210`. So "which of `4000` and
+/// `4010` is the front of the draw order" is a question about one
+/// instruction, four times.
+pub const USED_IN_DATA: [u16; 18] = [
+    0x1070, 0x1330, 0x1350, 0x1360, 0x1370, 0x1420, 0x1430, 0x1510, 0x1520, 0x2005, 0x2010,
+    0x3010, 0x3020, 0x30FF, 0x4000, 0xF010, 0xF200, 0xFFFF,
+];
+
 /// The predicates the `10x0` and `13x0` families test, from the handler table
 /// at `seg10:0x14EB`. `state` is the scene's run state and `started` its
 /// separate started flag (the field at +0x2D).

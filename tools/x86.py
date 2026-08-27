@@ -96,6 +96,7 @@ class Machine:
         self.hooks = {}
         self.hooked = {}
         self.watches = {}
+        self.breaks = {}
         self.steps = 0
         self.limit = 5_000_000
 
@@ -349,6 +350,17 @@ class Machine:
         """
         self.hooks[(seg, off)] = fn or (lambda m: m.regs.__setitem__('ax', 0))
 
+    def watch_at(self, seg, off, fn):
+        """Look at the machine every time execution reaches an address.
+
+        `watch` needs something to be *called*; a lot of what is worth seeing
+        happens in the middle of a function. The TTM interpreter, for one,
+        decodes an instruction inline and dispatches through a jump table, so
+        the only place its instruction stream exists is a particular address
+        in the middle of `seg12:0x040C`.
+        """
+        self.breaks.setdefault((seg, off), []).append(fn)
+
     def watch(self, seg, off, fn):
         """Look at a call without standing in for it.
 
@@ -385,6 +397,9 @@ class Machine:
 
     def step(self):
         start = self.ip
+        if self.breaks:
+            for fn in self.breaks.get((self.sregs['cs'], start), ()):
+                fn(self)
         seg_override = None
         op = self.fetch8()
         while op in (0x26, 0x2E, 0x36, 0x3E):

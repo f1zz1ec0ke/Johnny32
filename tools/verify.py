@@ -8,6 +8,7 @@ tautology -- the block-reading LZW behaviour is what makes the large files pass.
 
 import os
 import struct
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -140,6 +141,83 @@ if os.path.exists(exe):
                   % (len(files) - 1, len(rows), len(enabled), days[0], days[-1],
                      len(steps)))
 
+# The opcode census, against the lists the port carries.
+#
+# Several readings of the disassembly differ only where the data never goes --
+# the general pre-shift, the string-length exception, which of `4000` and
+# `4010` is the front of the draw order. The port writes down what the data
+# actually contains and leans on it; this is what stops that going stale.
+
+def _ads_length(op):
+    if op in (0x2000, 0x2005): return 10
+    if op in (0x2010, 0x2015, 0x2020, 0x4000, 0x4010): return 8
+    if (0x1010 <= op <= 0x1070 or 0x1310 <= op <= 0x1370) and op & 0xF == 0: return 6
+    if op in (0xF010, 0xF200, 0xF210, 0x1080, 0x1380, 0x1390, 0x3020): return 4
+    if op in (0x13A0, 0x13A1, 0x13B0, 0x13B1, 0x13C0, 0x13C1): return 4
+    return 2
+
+
+def _census():
+    ttm_used, ads_used = set(), set()
+    for name, body, _ in records:
+        want = 'TT3:' if name.endswith('.TTM') else ('SCR:' if name.endswith('.ADS') else None)
+        if want is None:
+            continue
+        code = None
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == want:
+                try:
+                    code = dgds.decompress(payload)
+                except Exception:
+                    code = payload
+        if not code:
+            continue
+        p = 0
+        while p + 2 <= len(code):
+            op = int.from_bytes(code[p:p + 2], 'little')
+            if want == 'TT3:':
+                n = op & 0x0F
+                size = 2 + n * 2
+                if n == 0x0F:
+                    e = code.find(b'\x00', p + 2)
+                    if e < 0:
+                        break
+                    size = (e + 1) - p
+                    size += size & 1
+                ttm_used.add(op)
+            else:
+                size = _ads_length(op)
+                if not (0 < op <= 0xFF):
+                    ads_used.add(op)
+            p += size
+    return ttm_used, ads_used
+
+
+def _declared(path, const):
+    text = open(path).read()
+    body = text[text.index(const):]
+    body = body[body.index('['):body.index('];')]
+    return set(int(v, 16) for v in re.findall(r'0x([0-9A-Fa-f]{4})', body))
+
+
+_ttm_used, _ads_used = _census()
+for _path, _found, _label in [
+        ('johnny/src/ttm.rs', _ttm_used, 'TTM'),
+        ('johnny/src/ads.rs', _ads_used, 'ADS')]:
+    try:
+        _said = _declared(_path, 'pub const USED_IN_DATA')
+    except Exception as _e:
+        failures.append('%s census: could not read %s (%s)' % (_label, _path, _e))
+        continue
+    if _said != _found:
+        failures.append(
+            '%s census: %s declares %s the archive does not use, and misses %s'
+            % (_label, _path,
+               sorted('%04X' % v for v in _said - _found) or 'nothing',
+               sorted('%04X' % v for v in _found - _said) or 'nothing'))
+census_note = ('%d TTM and %d ADS opcodes, matching what the port declares'
+               % (len(_ttm_used), len(_ads_used)))
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
@@ -147,6 +225,7 @@ print('sprites      %d frames' % frames)
 print('TTM scripts  %d/%d disassemble end to end' % (ttm_ok, ttm_total))
 print('ADS scripts  %d/%d consume exactly' % (ads_ok, ads_total))
 print('scheduler    %s' % sched_note)
+print('census       %s' % census_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))

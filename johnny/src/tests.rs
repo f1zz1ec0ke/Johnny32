@@ -339,3 +339,61 @@ fn png_rejects_what_it_cannot_read() {
     assert!(png::read(b"not a png at all").is_err());
     assert!(png::read(&[]).is_err());
 }
+
+// ---- facts about the shipped data ----------------------------------------
+//
+// Several readings of the disassembly differ only where the data never goes.
+// These say where that is, so a claim the port leans on cannot quietly stop
+// being true. `tools/verify.py` checks the lists against the archive itself.
+
+#[test]
+fn every_opcode_the_data_uses_is_understood() {
+    for op in ttm::USED_IN_DATA {
+        let mut bytes = op.to_le_bytes().to_vec();
+        let n = (op & 0x0F) as usize;
+        if n == 0x0F {
+            bytes.extend_from_slice(b"X\0");
+        } else {
+            bytes.resize(2 + n * 2, 0);
+        }
+        let (ops, _) = ttm::decode(&bytes);
+        assert!(
+            !matches!(ops.first(), Some(ttm::Op::Todo { .. })),
+            "TTM {op:04X} is not implemented"
+        );
+    }
+    for op in ads::USED_IN_DATA {
+        let mut bytes = op.to_le_bytes().to_vec();
+        bytes.resize(ads::length(op), 0);
+        let (ops, used) = ads::decode(&bytes);
+        assert_eq!(used, bytes.len(), "ADS {op:04X} did not consume its operands");
+        assert!(
+            !matches!(ops[0].1, ads::Op::Todo { .. }),
+            "ADS {op:04X} is not implemented"
+        );
+    }
+}
+
+#[test]
+fn the_general_pre_shift_never_runs() {
+    // `seg12:0x0569` shifts an opcode's coordinates by `ds:0x46E0/2` before
+    // the handler sees them, but only while `ds:0x27C2` is non-zero -- and
+    // the only thing that raises it is TTM `3003`, which is in no shipped
+    // script. So the port having one offset rather than two is not a
+    // simplification; it is the whole of what the data can reach.
+    assert!(!ttm::USED_IN_DATA.contains(&0x3003));
+    // Likewise the two opcodes whose operands are a count of four-byte
+    // records rather than a string (`seg12:0x04F8`).
+    assert!(!ttm::USED_IN_DATA.contains(&0xAF1F));
+    assert!(!ttm::USED_IN_DATA.contains(&0xAF2F));
+}
+
+#[test]
+fn only_the_horizontal_mirror_is_ever_asked_for() {
+    // 12,546 sprite draws at mode 0 and 2,822 at mode 2. Modes 1 and 3 --
+    // the ones that flip vertically -- never appear, which is why reading the
+    // two bits the wrong way round showed up as Johnny walking upside down
+    // rather than as nothing at all.
+    assert_eq!(render::Mirror::from_mode(2), render::Mirror { x: true, y: false });
+    assert_eq!(render::Mirror::from_mode(0), render::Mirror::none());
+}

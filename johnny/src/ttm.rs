@@ -30,6 +30,21 @@ pub const DRAW: [u16; 28] = [
     0xA5A7, 0xA601, 0xA704, 0xAF02, 0xAF1F, 0xAF2F,
 ];
 
+/// Every TTM opcode the shipped scripts actually contain, counted out of
+/// `RESOURCE.001`. `tools/verify.py` checks it still matches.
+///
+/// The list is not decoration: several readings of the disassembly differ
+/// only where the data never goes, and this is what says so. `3003` is
+/// absent, which is why the general pre-shift at `seg12:0x0569` never runs
+/// and one island offset is the whole story. `AF1F`/`AF2F` are absent, which
+/// is why the string-length rule has no exception to make. `5005` is absent,
+/// and so is every `A0x4` region opcode but two.
+pub const USED_IN_DATA: [u16; 30] = [
+    0x0080, 0x0110, 0x0FF0, 0x1021, 0x1051, 0x1061, 0x1101, 0x1111, 0x1121, 0x1201, 0x2002,
+    0x2012, 0x2022, 0x4004, 0x4204, 0x4214, 0xA002, 0xA054, 0xA064, 0xA0A4, 0xA104, 0xA404,
+    0xA504, 0xA524, 0xA601, 0xB606, 0xC051, 0xF01F, 0xF02F, 0xF05F,
+];
+
 pub const CFAMILY: [u16; 18] = [
     0xC01F, 0xC02F, 0xC031, 0xC041, 0xC051, 0xC061, 0xC071, 0xC081, 0xC091, 0xC0A1, 0xC0B2,
     0xC0C2, 0xC0D3, 0xC0E3, 0xC0F4, 0xC102, 0xCF01, 0xCF11,
