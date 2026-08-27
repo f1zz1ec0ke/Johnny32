@@ -403,6 +403,128 @@ fn main() -> ExitCode {
             // mistaken for one that compared everything.
             println!("total {leaves} leaves {bytes} bytes");
         }
+        // A whole tick of the engine: one pass of the ADS script, then every
+        // live instance stepped or held, in the order the instance list has
+        // them. `tools/oracle.py tick` drives `seg10:0x1ACB` -- the 1992
+        // function that *is* a tick -- over the same script and diffs.
+        //
+        // This is the layer neither `seqrun` nor `ttm` reaches. `seqrun`
+        // checks what a pass does to the scene states with no instances
+        // running; `ttm` checks what a frame does with nothing else on
+        // screen. What is left is the interleaving: which instance draws
+        // first, when a held frame is drawn again, and when a scene that has
+        // reached its end stops.
+        "tick" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let record = args.get(1).cloned().unwrap_or_default();
+            let sequence: u16 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1);
+            let ticks: u32 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(64);
+            let Some(mut seq) = johnny::ads::Sequencer::from_record(&archive, &record) else {
+                eprintln!("no ADS record {record}");
+                return ExitCode::FAILURE;
+            };
+            seq.tracing = true;
+            if !seq.start(sequence) {
+                eprintln!("{record} has no sequence {sequence}");
+                return ExitCode::FAILURE;
+            }
+            let mut stage = johnny::ttm::Stage::new();
+            stage.rng = Rng::new(0);
+            stage.trace = Some(Vec::new());
+            let mut rng = Rng::new(0);
+            let mut programs: std::collections::HashMap<String, std::rc::Rc<johnny::ttm::Program>> =
+                std::collections::HashMap::new();
+            let mut active: Vec<director::Active> = Vec::new();
+            // The instance list: one entry per `1111` marker, file by file in
+            // `RES:` id order. `seg11:0x0645` builds it as each file loads,
+            // and that order is the draw order.
+            let mut order: Vec<(u16, u16)> = Vec::new();
+            for (id, name) in seq.files.clone() {
+                if let Some(p) = johnny::ttm::Program::load(&archive, &name) {
+                    for scene in &p.scenes {
+                        order.push((id, *scene));
+                    }
+                    programs.insert(name, std::rc::Rc::new(p));
+                }
+            }
+            for now in 0..ticks {
+                if let Some(t) = &mut stage.trace {
+                    t.clear();
+                }
+                seq.trace.clear();
+                // The script runs first and the instances after it, which is
+                // the order `seg10:0x1ACB` has -- the pass at `seg10:0x1B6B`,
+                // then the walk at `seg10:0x1C32`. A scene the pass starts
+                // therefore draws its first frame on the same tick.
+                seq.begin_pass();
+                for _ in 0..johnny::ads::PASS_BUDGET {
+                    match seq.next_action(&mut rng) {
+                        johnny::ads::Action::PassOver => break,
+                        johnny::ads::Action::Reorder { ttm, scene, to_front } => {
+                            if let Some(i) = order.iter().position(|e| *e == (ttm, scene)) {
+                                let e = order.remove(i);
+                                if to_front {
+                                    order.push(e);
+                                } else {
+                                    order.insert(0, e);
+                                }
+                            }
+                            if let Some(i) =
+                                active.iter().position(|a| (a.ttm, a.scene) == (ttm, scene))
+                            {
+                                let a = active.remove(i);
+                                if to_front {
+                                    active.push(a);
+                                } else {
+                                    active.insert(0, a);
+                                }
+                            }
+                        }
+                        johnny::ads::Action::Play { file, scene, repeat } => {
+                            let ttm_id = seq
+                                .files
+                                .iter()
+                                .find(|(_, f)| **f == file)
+                                .map(|(id, _)| *id)
+                                .unwrap_or(0);
+                            let Some(program) = programs.get(&file).cloned() else {
+                                continue;
+                            };
+                            if let Some(a) =
+                                active.iter_mut().find(|a| (a.ttm, a.scene) == (ttm_id, scene))
+                            {
+                                a.rearm(repeat, now);
+                                continue;
+                            }
+                            let mut inst = johnny::ttm::Instance::new(program);
+                            if !inst.seek_scene(scene) {
+                                inst.exhaust();
+                            }
+                            let rank = director::depth(&order, ttm_id, scene);
+                            let at = active
+                                .iter()
+                                .position(|a| director::depth(&order, a.ttm, a.scene) > rank)
+                                .unwrap_or(active.len());
+                            active.insert(at, director::Active::start(ttm_id, scene, inst, repeat, now));
+                        }
+                    }
+                }
+                println!("{record} {now} act {}", seq.trace.join(" ; "));
+                director::advance_scenes(&mut active, &mut seq, &mut stage, &archive, now);
+                for line in stage.trace.iter().flatten() {
+                    println!("{record} {now} {line}");
+                }
+            }
+        }
         // Every frame of every `.TTM` in the archive, twice over: the
         // instructions the frame is made of, and what running it left on the
         // instance record. `tools/oracle.py ttm` drives `seg12:0x040C` -- the

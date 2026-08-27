@@ -393,6 +393,12 @@ pub struct Paint {
     /// coordinates.
     clip: Option<Clip>,
     mark: Mark,
+    /// What this mark is, in words, kept only while something is listening
+    /// (`Stage::trace`). A repaint says the same thing the frame said, which
+    /// is what lets the `tick` oracle compare a held frame against the
+    /// engine's -- the engine re-runs a held frame's drawing opcodes, so it
+    /// draws again every tick and so must this.
+    said: Option<String>,
 }
 
 enum Mark {
@@ -535,9 +541,9 @@ impl Stage {
             .or_insert_with(|| (0..16).map(|_| Vec::new()).collect())
     }
 
-    /// Note a drawing decision, when anything is listening. The line is not
-    /// built at all when nothing is.
-    fn say(&mut self, f: impl FnOnce() -> String) {
+    /// Note a decision, when anything is listening. The line is not built at
+    /// all when nothing is.
+    pub fn say(&mut self, f: impl FnOnce() -> String) {
         if let Some(t) = &mut self.trace {
             t.push(f());
         }
@@ -862,6 +868,23 @@ pub struct Instance {
     /// The frame just run contained an `EndScene`: the engine's `ds:0x4644`,
     /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
     pub ended: bool,
+    /// The frame this instance last ran, for the tools -- the engine keeps it
+    /// at `[bx+8]` and hands it back to `seg11:0x074A` every tick a held
+    /// frame is drawn again.
+    last_frame: usize,
+    /// The frame just run asked for a delay, and asked for a different one
+    /// than the instance already had.
+    ///
+    /// `seg10:0x1CE6` re-bases the instance's deadline to `now + delay` only
+    /// then: `ds:0x46E8` is what the frame asked for, `-1` if it asked for
+    /// nothing, and the deadline is left alone when it matches `+0x29`
+    /// already. Otherwise the deadline is whatever `seg10:0x196E` set when it
+    /// last stepped the instance on, which is a tick earlier -- so a frame
+    /// that changes the delay is shown one tick longer than one that inherits
+    /// the same delay. Six ticks either way is a tenth of a second, and it is
+    /// the difference between a scene that loops in step with the original
+    /// and one that drifts.
+    delay_changed: bool,
     /// The drawing colours, which belong to the instance and not to the
     /// screen.
     ///
@@ -906,12 +929,19 @@ impl Instance {
         Instance {
             program,
             pc: 0,
-            delay: 1,
+            // `seg10:0x0B3E` resets `+0x29` to zero, and zero is not "one
+            // tick": `seg10:0x196E` treats a delay of zero as always up, so a
+            // frame that asks for none is stepped past on the same tick it
+            // ran -- and a scene whose *last* frame asks for none ends there
+            // too, rather than being held for a tick first.
+            delay: 0,
             bitmap_slot: 0,
             palette_slot: 0,
             pending_goto: None,
             last_goto: None,
             ended: false,
+            last_frame: 0,
+            delay_changed: false,
             fg: 15,
             bg: 15,
             clip: None,
@@ -920,10 +950,18 @@ impl Instance {
     }
 
     /// Draw something, and keep it so the frame can be painted again.
-    fn mark(&mut self, stage: &mut Stage, mark: Mark) {
+    ///
+    /// `line` describes the mark for `Stage::trace`, and is not built at all
+    /// when nothing is listening.
+    fn mark(&mut self, stage: &mut Stage, mark: Mark, line: impl FnOnce() -> String) {
+        let said = stage.trace.is_some().then(line);
+        if let (Some(t), Some(l)) = (&mut stage.trace, &said) {
+            t.push(l.clone());
+        }
         let p = Paint {
             clip: stage.surface.clip,
             mark,
+            said,
         };
         stage.paint(&p);
         self.painted.push(p);
@@ -938,6 +976,28 @@ impl Instance {
         for p in &self.painted {
             stage.paint(p);
         }
+        // Say it again, because the engine draws it again: `seg10:0x1CD6`
+        // raises the held flag and the frame runs a second time with the
+        // side effects gated off and the drawing left alone.
+        if let Some(t) = &mut stage.trace {
+            t.extend(self.painted.iter().filter_map(|p| p.said.clone()));
+        }
+    }
+
+    /// The frame this instance is about to run: the engine's `[bx+8]`, which
+    /// `seg11:0x074A` is handed.
+    pub fn frame_index(&self) -> usize {
+        self.program.frame_of(self.pc)
+    }
+
+    /// The frame it last ran, which is the one a held instance draws again.
+    pub fn held_frame(&self) -> usize {
+        self.last_frame
+    }
+
+    /// See `delay_changed`.
+    pub fn rebased(&self) -> bool {
+        self.delay_changed
     }
 
     /// What the frame on screen is made of, for the tools.
@@ -967,7 +1027,7 @@ impl Instance {
             c.x2,                // +0x23
             c.y1,                // +0x25
             c.y2,                // +0x27
-            self.delay.max(1),   // +0x29, floored the way the director does
+            self.delay,          // +0x29
             self.ended as u8,    // ds:0x4644
             // ds:0x4646, which the engine writes as a *frame* index.
             match self.last_goto {
@@ -1027,6 +1087,7 @@ impl Instance {
     /// program that never reaches an `EndFrame` should end the scene, not hang
     /// the screensaver.
     pub fn run_frame(&mut self, stage: &mut Stage, archive: &Archive) -> Step {
+        self.last_frame = self.program.frame_of(self.pc);
         self.painted.clear();
         // `seg10:0x1C81`: the instance's own colours and clip, not whatever
         // the last scene to draw happened to leave behind.
@@ -1041,6 +1102,10 @@ impl Instance {
         // the end flag and `seg12:0x0452` resets the goto target before the
         // frame runs.
         self.ended = false;
+        // `ds:0x46E8`, which `seg10:0x1CB4` sets to -1 in front of every
+        // frame: what this frame asks to be held for, if it asks at all.
+        let had = self.delay;
+        let mut asked: Option<u16> = None;
         let mut budget = 100_000u32;
         loop {
             budget -= 1;
@@ -1053,6 +1118,7 @@ impl Instance {
             self.pc += 1;
             match op {
                 Op::EndFrame => {
+                    self.delay_changed = matches!(asked, Some(v) if v != had);
                     self.last_goto = self.pending_goto.take();
                     if let Some(target) = self.last_goto {
                         if !self.seek_scene(target) {
@@ -1091,19 +1157,26 @@ impl Instance {
                 }
                 Op::SelectBitmapSlot(n) => self.bitmap_slot = (n as usize).min(15),
                 Op::SelectPaletteSlot(n) => self.palette_slot = (n as usize).min(15),
-                Op::SetDelay(n) => self.delay = n,
+                Op::SetDelay(n) => {
+                    self.delay = n;
+                    asked = Some(n);
+                }
                 Op::SetRandomDelay { min, max } => {
                     self.delay = if max > min {
                         min + stage.rng.below((max - min) as u32) as u16
                     } else {
                         min
                     };
+                    asked = Some(self.delay);
                 }
                 Op::DrawPixel { x, y } => {
                     let (x, y) = stage.at(x, y);
                     let fg = stage.fg;
-                    stage.say(|| format!("pixel {x} {y} {fg}"));
-                    self.mark(stage, Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: fg });
+                    self.mark(
+                        stage,
+                        Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: fg },
+                        || format!("pixel {x} {y} {fg}"),
+                    );
                 }
                 Op::SetColors { fg, bg } => {
                     // `seg12:0x06A9` writes both: the instance keeps them,
@@ -1127,22 +1200,24 @@ impl Instance {
                     let (x1, y1) = stage.at(x1, y1);
                     let (x2, y2) = stage.at(x2, y2);
                     let fg = stage.fg;
-                    stage.say(|| format!("line {x1} {y1} {x2} {y2} {fg}"));
-                    self.mark(stage, Mark::Line { x1, y1, x2, y2, colour: fg });
+                    self.mark(stage, Mark::Line { x1, y1, x2, y2, colour: fg }, || {
+                        format!("line {x1} {y1} {x2} {y2} {fg}")
+                    });
                 }
                 Op::DrawRect { x, y, w, h, filled } => {
                     let (x, y) = stage.at(x, y);
                     let fg = stage.fg;
-                    stage.say(|| format!("rect {x} {y} {w} {h} {fg} {}", filled as u8));
                     let mark = Mark::Rect {
                         x,
                         y,
                         w: w as i32,
                         h: h as i32,
-                        colour: stage.fg,
+                        colour: fg,
                         filled,
                     };
-                    self.mark(stage, mark);
+                    self.mark(stage, mark, || {
+                        format!("rect {x} {y} {w} {h} {fg} {}", filled as u8)
+                    });
                 }
                 Op::DrawEllipse { x, y, w: _, h, filled } => {
                     // `seg12:0x01C9`: a radius of `h >> 1` and a centre at
@@ -1151,15 +1226,16 @@ impl Instance {
                     let r = (h >> 1) as i32;
                     let (cx, cy) = (x + r, y + r);
                     let fg = stage.fg;
-                    stage.say(|| format!("circle {r} {cx} {cy} {fg} {}", filled as u8));
                     let mark = Mark::Circle {
                         cx,
                         cy,
                         r,
-                        colour: stage.fg,
+                        colour: fg,
                         filled,
                     };
-                    self.mark(stage, mark);
+                    self.mark(stage, mark, || {
+                        format!("circle {r} {cx} {cy} {fg} {}", filled as u8)
+                    });
                 }
                 Op::FreeShapes => {
                     stage.loads += 1;
@@ -1183,8 +1259,9 @@ impl Instance {
                         // The mode back out of the mirror, which is how
                         // `seg12:0x025B` hands it to the blitter.
                         let mode = (mirror.x as u16) << 1 | mirror.y as u16;
-                        stage.say(|| format!("sprite {slot} {frame} {x} {y} {mode}"));
-                        self.mark(stage, Mark::Sprite { art, x, y, mirror });
+                        self.mark(stage, Mark::Sprite { art, x, y, mirror }, || {
+                            format!("sprite {slot} {frame} {x} {y} {mode}")
+                        });
                     } else if loaded {
                         // A frame the loaded bitmap does not have. Eleven
                         // draws in the shipped scripts ask for one;
@@ -1236,9 +1313,8 @@ impl Instance {
                     // rectangle off the right-hand edge, so this has to be
                     // asked after the shift, not before it.
                     if fits(stage, x, y, w, h) {
-                        stage.say(|| format!("region A064 {x} {y} {w} {h}"));
                         let mark = Mark::Restore { x, y, w: w as i32, h: h as i32 };
-                        self.mark(stage, mark);
+                        self.mark(stage, mark, || format!("region A064 {x} {y} {w} {h}"));
                     }
                 }
                 // The other six have no use in any shipped script. Counted, so
@@ -1255,14 +1331,13 @@ impl Instance {
                     to,
                 } => {
                     if from == 2 && to == 1 {
-                        stage.say(|| format!("copy {x} {y} {w} {h}"));
                         let mark = Mark::Restore {
                             x: x as i32,
                             y: y as i32,
                             w: w as i32,
                             h: h as i32,
                         };
-                        self.mark(stage, mark);
+                        self.mark(stage, mark, || format!("copy {x} {y} {w} {h}"));
                     } else {
                         // A copy between two pages the port does not keep
                         // apart. No script does this; count it if one ever

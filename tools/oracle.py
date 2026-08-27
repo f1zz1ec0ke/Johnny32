@@ -996,11 +996,14 @@ class Interpreter:
         m.hook(1, 0x229C, self._malloc)
         m.hook(1, 0x22E1, lambda mm: mm.regs.__setitem__('ax', 0))   # free
         m.hook(1, 0x121A, self._memset)
-        m.wall({1, 12}, self._outside,
-               # Two functions outside that are arithmetic on their arguments
-               # and reach no further: the string-length rule the fetch needs
-               # to step over a filename, and the generator `2022` draws from.
-               allow={(11, 0x04A8), (4, 0x1E86)})
+        m.wall({1, 10, 12}, self._outside,
+               # What is outside the wall but allowed through. Three of these
+               # are arithmetic on their arguments and reach no further: the
+               # string-length rule the fetch needs to step over a filename,
+               # the generator `2022` draws from, and the file-id lookup that
+               # picks which loaded TTM an instance belongs to. The fourth is
+               # the frame runner itself, which is the thing being driven.
+               allow={(11, 0x04A8), (4, 0x1E86), (11, 0x03E2), (11, 0x074A)})
         m.watch_at(12, 0x0620, self._dispatch)
         # Where a load, a free and the region family finish, so what they
         # settled on can be read out of the record the same way for both of
@@ -1097,19 +1100,27 @@ class Interpreter:
         m.regs['ax'] = self._table(table, n)
 
     def _slot(self):
-        """The shape table the instance's current bitmap slot holds, and how
-        long it is. `seg12:0x0785` reads it out of the loaded-TTM record at
-        `+0x0C + slot*2`."""
+        """The shape table the running instance's bitmap slot holds, and how
+        long it is.
+
+        Both pointers have to come from where the engine keeps them:
+        `ds:0x263E` is the instance whose frame is running and `ds:0x2638` the
+        loaded TTM it belongs to, and `seg12:0x0785` reads the slot out of
+        *that* record at `+0x0C + slot*2`. The slots are per file.
+        """
         m = self.m
-        slot = m.read16(m.ds, TTM_INST + 0x14)
-        at = m.read16(TTM_REC, TTM_RECOFF + 0x0C + (slot & 0x0F) * 2)
+        inst = m.read16(m.ds, 0x263E)
+        slot = m.read16(m.ds, inst + 0x14) & 0x0F
+        rec = (m.read16(m.ds, 0x263A), m.read16(m.ds, 0x2638))
+        at = m.read16(rec[0], rec[1] + 0x0C + slot * 2)
         return slot, self.tables.get(at, 0)
 
     def _loaded(self, m):
         self.draws.append('shapes %d %d' % self._slot())
 
     def _freed(self, m):
-        self.draws.append('shapes %d 0' % m.read16(m.ds, TTM_INST + 0x14))
+        inst = m.read16(m.ds, 0x263E)
+        self.draws.append('shapes %d 0' % (m.read16(m.ds, inst + 0x14) & 0x0F))
 
     def _blank(self, m):
         """`seg12:0x0291`: the slot has a table, and the frame the opcode
@@ -1218,10 +1229,263 @@ class Interpreter:
                   % (r(0x12), r(0x14),
                      m.read8(m.ds, TTM_INST + 0x1E), m.read8(m.ds, TTM_INST + 0x1F),
                      _s16(r(0x21)), _s16(r(0x23)), _s16(r(0x25)), _s16(r(0x27)),
-                     max(self.delay, 1),
+                     self.delay,
                      1 if m.read16(m.ds, 0x4644) else 0,
                      _s16(m.read16(m.ds, 0x4646))))
         return list(self.ops), list(self.draws), record
+
+
+# ---- a whole tick --------------------------------------------------------
+
+# `seg10:0x1ACB` *is* a tick. It takes no arguments: it reads the current ADS
+# context out of `ds:0x2608` and does the three things a tick does.
+#
+#   `seg10:0x1B12`  the sequence bookkeeping. Each sequence keeps a
+#                   null-terminated array of the instance records it plays
+#                   (`ctx+0x3D2+sid*2`, built by `seg10:0x040F` from the
+#                   script's `2000` and `2005` operands). A sequence that has
+#                   just been started -- state 3 -- has every one of them
+#                   reset by `seg10:0x0B3E`; otherwise its state is stamped
+#                   onto each instance's `+0x2B`.
+#   `seg10:0x1B6B`  one pass of every sequence, in id order, through the
+#                   interpreter at `seg10:0x1925`.
+#   `seg10:0x1C32`  the instance walk: `ctx+0x10` is the head and `+0x3B`
+#                   chains it. Each instance selects its own loaded TTM
+#                   (`seg10:0x1C71`), has its colours and clip put back
+#                   (`0x1C81`), and runs its current frame (`0x1CBA`).
+#
+# The order matters and it is not the obvious one: the script runs **before**
+# the instances, so a scene the pass starts draws its first frame in the same
+# tick.
+#
+# This is the layer neither `seqrun` nor `ttm` reaches. `seqrun` asks what a
+# pass does to the scene states with no instances running; `ttm` asks what a
+# frame does with nothing else on screen. What is left over is the
+# interleaving -- which instance draws first, when a held frame is drawn
+# again, and when a scene that has reached its end stops -- and that is what
+# this compares.
+
+TICK_REC = 30            # the loaded-TTM records and their frame tables
+TICK_DATA = 32           # one 64K segment per TTM file, from here up
+TICK_CTX = ADS_CTX       # the ADS context
+TICK_SCRIPT = ADS_SCRIPT
+
+
+def ttm_leaf(name):
+    """One `.TTM` record's script, or None."""
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for rec, body, _ in recs:
+        if rec != name:
+            continue
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'TT3:':
+                return dgds.decompress(payload)
+    return None
+
+
+def ads_leaf(name):
+    """One `.ADS` record's script and its `RES:` file table."""
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for rec, body, _ in recs:
+        if rec != name:
+            continue
+        parts = dict((path[-1], payload)
+                     for path, payload in dgds.flatten(dgds.parse_chunks(body)))
+        return dgds.decompress(parts['SCR:']), dgds.parse_id_table(parts['RES:'])
+    raise RuntimeError('no ADS record %s' % name)
+
+
+class World(Interpreter):
+    """Everything a tick needs: an ADS context, its loaded TTMs, and the
+    instance records `seg11:0x04D6` makes for them."""
+
+    def __init__(self, record, sequence):
+        Interpreter.__init__(self)
+        self.rec = 0
+        self.acts = []
+        m = self.m
+        m.limit = 20_000_000
+        m.watch_at(10, 0x1C3C, self._visit)
+        m.watch_at(12, 0x040C, self._run)
+        for off, (label, argc) in ADS_ACTIONS.items():
+            m.watch(10, off, self._act(label, argc))
+        self._build(record, sequence)
+
+    def _act(self, label, argc):
+        def watcher(mm):
+            args = [mm.read16(mm.ss, mm.sp + 2 + k * 2) for k in range(argc)]
+            self.acts.append('%s %s' % (label, ' '.join(str(a) for a in args)))
+        return watcher
+
+    def _visit(self, m):
+        """The top of the instance body, where `ds:0x263E` is the one about to
+        be looked at."""
+        bx = m.read16(m.ds, 0x263E)
+        self.here = (m.read16(m.ds, bx), m.read16(m.ds, bx + 2))
+
+    def _run(self, m):
+        """`seg12:0x040C` is entered once per live instance per tick -- the
+        engine draws a held frame again rather than keeping the picture, and
+        `seg10:0x1CD6` is what raises the flag that gates the side effects
+        off the second time."""
+        bx = m.read16(m.ds, 0x263E)
+        self.draws.append('run %d %d %d %d'
+                          % (m.read16(m.ds, bx), m.read16(m.ds, bx + 2),
+                             m.read16(m.ds, bx + 8), m.read8(m.ds, bx + 0x0E)))
+
+    def _instance(self, ttm, scene):
+        m = self.m
+        p = m.read16(m.ds, 0x263C)
+        while p:
+            if m.read16(m.ds, p) == ttm and m.read16(m.ds, p + 2) == scene:
+                return p
+            p = m.read16(m.ds, p + 0x3B)
+        return 0
+
+    def _plays(self, code, start):
+        """The instance records one sequence plays, first-appearance order,
+        null-terminated: what `seg10:0x040F` builds by walking the script for
+        the two opcodes at `ds:0x260A` -- `2000` and `2005` -- and resolving
+        each one's first two operands through `seg10:0x0BF4`."""
+        m = self.m
+        seen, out, p = set(), [], start
+        while p + 2 <= len(code):
+            op = struct.unpack_from('<H', code, p)[0]
+            if op == 0xFFFF and p > start:
+                break
+            if op in (0x2000, 0x2005):
+                ttm, scene = struct.unpack_from('<HH', code, p + 2)
+                at = self._instance(ttm, scene)
+                if at and at not in seen:
+                    seen.add(at)
+                    out.append(at)
+            p += _ads_len(op)
+        at = self.near
+        self.near += (len(out) + 1) * 2
+        for i, v in enumerate(out):
+            m.write16(m.ds, at + i * 2, v)
+        m.write16(m.ds, at + len(out) * 2, 0)
+        return at
+
+    def _load_ttm(self, ttm_id, code, seg):
+        """One loaded-TTM record, chained at the head the way `seg11:0x0304`
+        chains one, with the engine's own frame scan run over it."""
+        m = self.m
+        base = m._lin(seg, 0)
+        m.mem[base:base + len(code)] = code
+        at, self.rec = self.rec, self.rec + 0x100
+        tbl = self.rec
+        n = sum(1 for i in range(0, len(code) - 1, 2)
+                if struct.unpack_from('<H', code, i)[0] == 0x0FF0)
+        self.rec += (n + 1) * 4 + 16
+        r = m._lin(TICK_REC, at)
+        m.mem[r:r + 0xD4] = b'\0' * 0xD4
+        struct.pack_into('<HH', m.mem, r + 0x00, ttm_id, n)
+        struct.pack_into('<HH', m.mem, r + 0x04, 0, seg)
+        struct.pack_into('<HH', m.mem, r + 0x08, len(code) - 1, seg)
+        struct.pack_into('<HH', m.mem, r + 0xD0, tbl, TICK_REC)
+        t = m._lin(TICK_REC, tbl)
+        m.mem[t:t + (n + 1) * 4] = b'\0' * ((n + 1) * 4)
+        struct.pack_into('<HH', m.mem, r + 0xCC,
+                         m.read16(m.ds, 0x2634), m.read16(m.ds, 0x2636))
+        for off in (0x2634, 0x2638):
+            m.write16(m.ds, off, at)
+            m.write16(m.ds, off + 2, TICK_REC)
+        if m.call(11, 0x04D6, [ttm_id]) != 1:
+            raise RuntimeError('seg11:0x04D6 refused %d' % ttm_id)
+
+    def _build(self, record, sequence):
+        m = self.m
+        code, files = ads_leaf(record)
+        self.files = files
+        base = m._lin(m.ds, TICK_SCRIPT)
+        m.mem[base:base + len(code)] = code
+        seqs = ads_layout(code)
+        for off in (0x2634, 0x2636, 0x263C, 0x263E):
+            m.write16(m.ds, off, 0)
+        for n, (fid, name) in enumerate(sorted(files.items())):
+            body = ttm_leaf(name)
+            if body is not None:
+                self._load_ttm(fid, body, TICK_DATA + n)
+        m.write16(m.ds, ADS_CURCTX, 0)
+        m.write16(m.ds, ADS_CTXPTR, TICK_CTX)
+        m.write16(m.ds, ADS_CTXPTR + 2, m.ds)
+        m.write16(m.ds, TICK_CTX + 0x02, max(seqs) + 1)
+        m.write16(m.ds, TICK_CTX + 0x08, TICK_SCRIPT + len(code))
+        m.write16(m.ds, TICK_CTX + 0x0C, m.read16(m.ds, 0x2634))
+        m.write16(m.ds, TICK_CTX + 0x0E, m.read16(m.ds, 0x2636))
+        m.write16(m.ds, TICK_CTX + 0x10, m.read16(m.ds, 0x263C))
+        for sid, (off, _) in seqs.items():
+            m.write16(m.ds, TICK_CTX + 0x152 + sid * 4, TICK_SCRIPT + off)
+            m.write16(m.ds, TICK_CTX + 0x154 + sid * 4, m.ds)
+            # `seg4:0x07CE` starts a sequence by putting it in state 3.
+            m.write16(m.ds, TICK_CTX + 0x12 + sid * 2, 3 if sid == sequence else 0)
+            m.write16(m.ds, TICK_CTX + 0x292 + sid * 4, 0)
+            m.write16(m.ds, TICK_CTX + 0x294 + sid * 4, 0)
+            m.write16(m.ds, TICK_CTX + 0x0B2 + sid * 2, 0)
+            m.write16(m.ds, TICK_CTX + 0x3D2 + sid * 2, self._plays(code, off))
+        m.write16(m.ds, ADS_CURSEQ, sequence)
+
+    def tick(self):
+        """One call of `seg10:0x1ACB`, with the clock moved on first the way
+        `seg2:0x16D8` moves it -- every deadline on an instance record is
+        measured against it."""
+        m = self.m
+        lo = m.read16(m.ds, 0x2E72) + 1
+        m.write16(m.ds, 0x2E72, lo & 0xFFFF)
+        if lo > 0xFFFF:
+            m.write16(m.ds, 0x2E74, (m.read16(m.ds, 0x2E74) + 1) & 0xFFFF)
+        del self.acts[:]
+        del self.draws[:]
+        self.here = None
+        m.call(10, 0x1ACB)
+        return list(self.acts), list(self.draws)
+
+
+# What the query drives, and how far. Every scene the scheduler can pick --
+# the same list `tools/sweep.py` plays -- for long enough that each one gets
+# past its first few frames, several of them held, and in most cases to its
+# end and round again.
+# A tick is expensive -- the pass re-reads the whole script and the walk
+# visits every instance of every file the script loads -- so the default takes
+# the first scene of each of the ten `.ADS` files and runs each far enough to
+# get past the first frames, through several held ones and into the second.
+# `JC_DEEP=1` runs all sixty-five, four times as far.
+def tick_cases():
+    import scenes
+    rows = scenes.scenes()
+    if os.environ.get('JC_DEEP'):
+        return [(name, int(seq), 120) for name, seq in rows]
+    first, out = set(), []
+    for name, seq in rows:
+        if name not in first:
+            first.add(name)
+            out.append((name, int(seq), 32))
+    return out
+
+
+def q_tick():
+    out = []
+    cases = tick_cases()
+    for record, sequence, ticks in cases:
+        w = World(record, sequence)
+        for n in range(ticks):
+            acts, draws = w.tick()
+            out.append('%s %d act %s' % (record, n, ' ; '.join(acts)))
+            out += ['%s %d %s' % (record, n, line) for line in draws]
+    out.append('total %d cases' % len(cases))
+    return out
+
+
+def p_tick():
+    lines = []
+    cases = tick_cases()
+    for record, sequence, ticks in cases:
+        lines += port('tick', record, sequence, ticks)
+    lines.append('total %d cases' % len(cases))
+    return lines
 
 
 def q_ttm():
@@ -1266,6 +1530,7 @@ QUERIES = {
     'seqrun': (q_seqrun, p_seqrun),
     'codec': (q_codec, p_codec),
     'ttm': (q_ttm, lambda: port('ttm')),
+    'tick': (q_tick, p_tick),
 }
 
 

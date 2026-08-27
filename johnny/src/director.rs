@@ -230,6 +230,12 @@ pub struct Active {
     pub scene: u16,
     pub inst: Instance,
     /// Tick at which this instance's next frame is due.
+    ///
+    /// `seg10:0x196E` keeps the same thing as an absolute deadline at
+    /// `+0x37`, set to `now + delay` each time it steps the instance on --
+    /// and it steps on `now >= deadline`, *after* the frame has been drawn.
+    /// So a frame asking for a delay of `d` is drawn `d + 1` times and this
+    /// is one past the last of them.
     pub wake: u32,
     /// The run state, which is what the `If` predicates read.
     pub state: SceneState,
@@ -473,8 +479,12 @@ pub fn advance_scenes(
         // straight out of its own scene and into whatever follows it in the
         // file.
         if a.wake > now || a.ending {
+            let (t, sc, f) = (a.ttm, a.scene, a.inst.held_frame());
+            stage.say(|| format!("run {t} {sc} {f} 1"));
             a.inst.repaint(stage);
         } else {
+            let (t, sc, f) = (a.ttm, a.scene, a.inst.frame_index());
+            stage.say(|| format!("run {t} {sc} {f} 0"));
             match a.inst.run_frame(stage, archive) {
                 // `seg10:0x1DBA`: nothing ran. That is not a scene that has
                 // played out, it is a scene that cannot play, so it goes
@@ -483,7 +493,13 @@ pub fn advance_scenes(
                 // with nothing left in it would only do this again.
                 ttm::Step::Finished => a.cannot_run(),
                 ttm::Step::Frame(delay) => {
-                    a.wake = now + delay.max(1) as u32;
+                    // Not floored, and one past the last tick the frame is
+                    // drawn on: `seg10:0x196E` is asked *after* the frame has
+                    // been drawn and steps on `now >= deadline`, so the tick
+                    // the deadline falls on still shows this frame. A delay
+                    // of zero is a special case there -- it is always up --
+                    // and lands on the same answer.
+                    a.wake = now + delay as u32 + a.inst.rebased() as u32;
                     // The frame carried an `EndScene`, which is how a scene
                     // says it has reached its end -- it does not stop
                     // mid-frame, it sets a flag the runner reads afterwards
@@ -499,7 +515,10 @@ pub fn advance_scenes(
             }
         }
         // The held last frame's delay has run out, so now the scene is over.
-        if a.ending && now >= a.wake {
+        // The end and the step share one test in the engine -- `seg10:0x1D65`
+        // and `seg10:0x1DAD` both call `seg10:0x196E` -- so they share one
+        // here.
+        if a.ending && now + 1 >= a.wake {
             a.ending = false;
             if !a.program_ended() {
                 finished.push((a.ttm, a.scene));
@@ -1795,24 +1814,14 @@ impl Director {
         active: &mut Vec<Active>,
         done: &mut bool,
     ) -> bool {
-        // The instances move first and the script is interpreted after them.
-        // `seg10:0x1ACB` does it in that order and it is not incidental: a
-        // scene reaching its end sets state 4, which is cleared the next time
-        // that instance is stepped, so a script that ran first would be
-        // reading last pass's answers and would miss half of them.
-        self.stage.restore_background();
-        advance_scenes(active, seq, &mut self.stage, archive, self.tick);
-
-        // The picture for this tick is complete: everything live has been
-        // painted onto a fresh backdrop. If the repaint model is sound, the
-        // same picture comes back out of the retained frames alone.
-        if self.checking {
-            for what in check_repaint(active, &mut self.stage) {
-                let tick = self.tick;
-                self.complaints.push(format!("[tick {tick}] {what}"));
-            }
-        }
-
+        // The script is interpreted first and the instances move after it.
+        // `seg10:0x1ACB` does it in that order -- the pass at `seg10:0x1B6B`,
+        // then the walk at `seg10:0x1C32` -- and it is not incidental: a
+        // scene the pass starts draws its first frame on the same tick rather
+        // than sixteen milliseconds later, and a scene that reached its end
+        // last tick is still in state 4 when this pass reads it, because it
+        // is the walk that clears it (`seg10:0x1DDC`).
+        //
         // One pass of the sequencer, not one instruction: `seg10:0x1925`
         // interprets until a `Step` and only then returns, so everything a
         // guarded block starts happens on the same tick. The bound is a
@@ -1899,6 +1908,19 @@ impl Director {
                         .unwrap_or(active.len());
                     active.insert(at, Active::start(ttm_id, scene, inst, repeat, self.tick));
                 }
+            }
+        }
+
+        self.stage.restore_background();
+        advance_scenes(active, seq, &mut self.stage, archive, self.tick);
+
+        // The picture for this tick is complete: everything live has been
+        // painted onto a fresh backdrop. If the repaint model is sound, the
+        // same picture comes back out of the retained frames alone.
+        if self.checking {
+            for what in check_repaint(active, &mut self.stage) {
+                let tick = self.tick;
+                self.complaints.push(format!("[tick {tick}] {what}"));
             }
         }
 
