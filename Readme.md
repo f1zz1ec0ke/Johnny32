@@ -56,6 +56,15 @@ Check the decoder against every record and chunk:
 python3 tools/verify.py
 ```
 
+Or check everything at once — the tests, the decoder, the 65 scenes, three
+long soaks of the whole island, every story day and holiday and both halves of
+the clock, what the scenes actually draw, and the nineteen questions the
+oracle puts to the 1992 binary:
+
+```sh
+bash tools/check.sh
+```
+
 Export every asset to PNG and dump the scripts:
 
 ```sh
@@ -358,6 +367,17 @@ paints the wrong sprite or none at all for as long as the frame is held. So an
 instance now keeps what its frame drew rather than where it drew it from: a
 list of resolved marks, artwork and colour and clip already worked out.
 Replaying that cannot load, cannot make a noise and cannot read a slot.
+
+That check answers "can this tick be painted again", which an empty picture
+passes perfectly. Two more ask the questions it cannot. `tools/framecheck.py`
+renders a sample of frames from all sixty-five scenes and complains about a
+frame that is one flat colour or a run in which nothing moves — that is how
+the standing sequences were caught drawing an empty island, and the raft
+caught being clipped down to three pixels. `tools/coverage.py` walks the parts
+a soak from a fixed seed never reaches: all eleven story days, all seven
+holidays, and both halves of the clock, twenty-five short runs in all.
+`bash tools/check.sh` runs everything in this section and everything in the
+last one.
 
 Porting the engine's own generator is what made this possible. It is a
 fifty-six entry additive lagged Fibonacci with a constant table in the data

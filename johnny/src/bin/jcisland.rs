@@ -190,6 +190,7 @@ fn main() -> ExitCode {
         if d.is_night() { "night" } else { "day" },
         d.position
     );
+    let mut ok = true;
     if std::env::var_os("JC_CHECK").is_some() {
         if d.complaints.is_empty() {
             println!("repaint check: clean");
@@ -198,6 +199,7 @@ fn main() -> ExitCode {
             for line in d.complaints.iter().take(20) {
                 println!("  {line}");
             }
+            ok = false;
         }
     }
     if !d.ads_todo.is_empty() {
@@ -212,5 +214,11 @@ fn main() -> ExitCode {
             println!("  {op:04X}  x{n}");
         }
     }
-    ExitCode::SUCCESS
+    // A check that cannot fail the run is not a check: `tools/check.sh` reads
+    // the exit status.
+    if ok && d.ads_todo.is_empty() && d.stage.todo_seen.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
