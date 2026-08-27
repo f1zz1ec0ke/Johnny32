@@ -403,6 +403,94 @@ fn main() -> ExitCode {
             // mistaken for one that compared everything.
             println!("total {leaves} leaves {bytes} bytes");
         }
+        // Every frame of every `.TTM` in the archive, twice over: the
+        // instructions the frame is made of, and what running it left on the
+        // instance record. `tools/oracle.py ttm` drives `seg12:0x040C` -- the
+        // 1992 interpreter itself -- over the same frames with nothing
+        // outside segment 12 allowed to run, and diffs.
+        //
+        // Nothing is loaded on either side. The engine's resource layer is
+        // behind the wall and answers every load with "not there", so its
+        // bitmap slots stay empty; this runs against an empty archive for the
+        // same reason, so the two agree about what artwork exists rather than
+        // one of them having some.
+        "ttm" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let Ok(records) = johnny::dgds::read_archive(&data) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let Ok(nothing) = johnny::dgds::Archive::load(&[], None) else {
+                eprintln!("empty archive");
+                return ExitCode::FAILURE;
+            };
+            let (w, h) = (640i32, 480i32);
+            let (mut files, mut frames, mut instrs) = (0usize, 0usize, 0usize);
+            // One stage for the whole run, because the engine has one: its
+            // generator, its colours and its screen are globals that no
+            // amount of loading a new script puts back. Only the instance
+            // record is per file.
+            let mut stage = johnny::ttm::Stage::new();
+            // `2022` draws its delay from the engine's own generator, and the
+            // engine's is where a fresh process leaves it -- which is what
+            // `Rng::new(0)` is, as the `rand` query has already had out of
+            // the binary. Both sides then consume in lockstep.
+            stage.rng = Rng::new(0);
+            for rec in records {
+                if !rec.name.ends_with(".TTM") {
+                    continue;
+                }
+                let Some(tt3) = johnny::dgds::leaf(rec.body, b"TT3:") else {
+                    continue;
+                };
+                let Ok(code) = johnny::dgds::decompress(tt3.payload) else {
+                    continue;
+                };
+                let (walk, _) = johnny::ttm::walk(&code);
+                let (ops, _) = johnny::ttm::decode(&code);
+                let scenes = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        johnny::ttm::Op::SceneMarker { scene, playable: true } => Some(*scene),
+                        _ => None,
+                    })
+                    .collect();
+                let program = std::rc::Rc::new(johnny::ttm::Program { ops, scenes });
+                let starts = program.frame_starts();
+                let mut inst = johnny::ttm::Instance::new(program.clone());
+                files += 1;
+                println!("{} frames {}", rec.name, starts.len());
+                for (k, &start) in starts.iter().enumerate() {
+                    let mut i = start;
+                    while i < walk.len()
+                        && !matches!(program.ops[i], johnny::ttm::Op::EndFrame)
+                    {
+                        let ins = &walk[i];
+                        instrs += 1;
+                        let line = match &ins.text {
+                            Some(t) => format!("op {:04X} \"{t}\"", ins.opcode),
+                            None => {
+                                let a: Vec<String> =
+                                    ins.args.iter().map(|v| v.to_string()).collect();
+                                format!("op {:04X} {}", ins.opcode, a.join(" "))
+                            }
+                        };
+                        println!("{} {k} {}", rec.name, line.trim_end());
+                        i += 1;
+                    }
+                    inst.pc = start;
+                    inst.run_frame(&mut stage, &nothing);
+                    frames += 1;
+                    println!("{} {k} = {}", rec.name, inst.record(w, h));
+                }
+            }
+            // Covered, as a line both sides have to agree on.
+            println!("total {files} files {frames} frames {instrs} instructions");
+        }
         // Where each guarded block ends. `seg10:0x106B` answers this in the
         // engine, and it is the thing that decides which instructions a
         // refused guard swallows -- stopping short leaves the tail of the

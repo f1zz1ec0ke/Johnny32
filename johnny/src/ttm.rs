@@ -176,8 +176,25 @@ pub enum Op {
     },
 }
 
-/// Decode a TTM program. Stops at the first word that is not a known opcode.
-pub fn decode(code: &[u8]) -> (Vec<Op>, usize) {
+/// One instruction as it comes off the wire, before it is given a meaning.
+///
+/// This is what `seg12:0x0458` fetches and what `seg12:0x0620` hands to a
+/// handler: an opcode and the operands its low nibble asks for. `walk` stops
+/// where the engine's own loader stops, which is what makes the two
+/// comparable instruction for instruction -- see the `ttm` oracle query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instr {
+    pub opcode: u16,
+    pub args: Vec<i16>,
+    pub text: Option<String>,
+}
+
+/// Split a TTM program into instructions, without interpreting any of them.
+///
+/// Stops at the first word that is not a known opcode. Kept apart from
+/// `build` so `jcoracle ttm` can put this beside the 1992 interpreter's own
+/// fetch rather than beside a second reading of it.
+pub fn walk(code: &[u8]) -> (Vec<Instr>, usize) {
     let mut out = Vec::new();
     let mut p = 0usize;
     while p + 2 <= code.len() {
@@ -207,14 +224,37 @@ pub fn decode(code: &[u8]) -> (Vec<Op>, usize) {
                 .collect();
             (args, None, p + 2 + count * 2)
         };
-        out.push(build(w, args, text));
+        out.push(Instr {
+            opcode: w,
+            args,
+            text,
+        });
         p = next;
     }
     (out, p)
 }
 
+/// Decode a TTM program. Stops at the first word that is not a known opcode.
+pub fn decode(code: &[u8]) -> (Vec<Op>, usize) {
+    let (instrs, p) = walk(code);
+    let ops = instrs
+        .into_iter()
+        .map(|i| build(i.opcode, i.args, i.text))
+        .collect();
+    (ops, p)
+}
+
 fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
     let a = |i: usize| args.get(i).copied().unwrap_or(0);
+    // `seg12:0x0467` rewrites two opcodes into the sound family before it
+    // looks at anything else, so `1301` *is* `C051` and `1311` *is* `C061`.
+    // Neither spelling appears in `RESOURCE.001` -- all 535 sound cues are
+    // written `C051` -- but the rewrite is in the interpreter, so it is here.
+    let opcode = match opcode {
+        0x1301 => 0xC051,
+        0x1311 => 0xC061,
+        other => other,
+    };
     match opcode {
         0x0FF0 => Op::EndFrame,
         0xF01F => Op::LoadScreen(text.unwrap_or_default()),
@@ -705,6 +745,30 @@ impl Program {
         }
     }
 
+    /// Where each frame starts, as an index into `ops`.
+    ///
+    /// `seg11:0x04D6` builds the same list by walking the file and counting
+    /// `0FF0`s, and `seg12:0x040C` is handed an index into it. Frame *n* runs
+    /// from `starts[n]` to the `EndFrame` that closes it.
+    pub fn frame_starts(&self) -> Vec<usize> {
+        let mut out = vec![0usize];
+        for (i, op) in self.ops.iter().enumerate() {
+            if matches!(op, Op::EndFrame) {
+                out.push(i + 1);
+            }
+        }
+        out.pop();
+        out
+    }
+
+    /// Which frame an instruction is in.
+    pub fn frame_of(&self, at: usize) -> usize {
+        self.ops[..at.min(self.ops.len())]
+            .iter()
+            .filter(|op| matches!(op, Op::EndFrame))
+            .count()
+    }
+
     /// The instruction index just after a scene marker.
     pub fn scene_start(&self, scene: u16) -> Option<usize> {
         self.ops
@@ -836,6 +900,41 @@ impl Instance {
     /// What the frame on screen is made of, for the tools.
     pub fn marks(&self) -> usize {
         self.painted.len()
+    }
+
+    /// The instance record, as `seg11:0x042A` lays it out and `seg10:0x0B3E`
+    /// resets it, for `jcoracle ttm` to put beside the engine's own.
+    ///
+    /// Every field here is one the 1992 interpreter writes into the record at
+    /// `ds:0x263E` while a frame runs, at the offset named beside it. The
+    /// clip is the one exception: the engine always has one and starts it at
+    /// the whole screen (`seg10:0x0BA6`), where this keeps `None` and means
+    /// the same thing, so it is rendered as the full screen to match.
+    pub fn record(&self, width: i32, height: i32) -> String {
+        let c = self
+            .clip
+            .unwrap_or(Clip { x1: 0, y1: 0, x2: width - 1, y2: height - 1 });
+        format!(
+            "pal{} bm{} fg{} bg{} clip{},{},{},{} delay{} end{} goto{}",
+            self.palette_slot,   // +0x12
+            self.bitmap_slot,    // +0x14
+            self.fg,             // +0x1E
+            self.bg,             // +0x1F
+            c.x1,                // +0x21
+            c.x2,                // +0x23
+            c.y1,                // +0x25
+            c.y2,                // +0x27
+            self.delay.max(1),   // +0x29, floored the way the director does
+            self.ended as u8,    // ds:0x4644
+            // ds:0x4646, which the engine writes as a *frame* index.
+            match self.last_goto {
+                Some(n) => self
+                    .program
+                    .scene_start(n)
+                    .map_or(-1, |i| self.program.frame_of(i) as i32),
+                None => -1,
+            },
+        )
     }
 
     /// Where the instance stands: everything a repaint saves and puts back.

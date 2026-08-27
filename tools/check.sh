@@ -17,9 +17,10 @@
 #   soaks       three long runs of the whole island, with the repaint check
 #   coverage    every story day, every holiday, both halves of the clock
 #   framecheck  a look at what the scenes actually draw (slow)
-#   oracle      twenty questions put to the 1992 binary itself and to the
-#               port, and diffed -- including its own LZW and RLE run over
-#               every compressed leaf in the archive
+#   oracle      twenty-one questions put to the 1992 binary itself and to
+#               the port, and diffed -- including its own LZW and RLE run
+#               over every compressed leaf in the archive, and its own TTM
+#               interpreter run over every frame of every script
 #
 # The last one needs `original/scrantic.exe` and capstone; the rest need
 # `original/RESOURCE.001`. Nothing here needs a network.

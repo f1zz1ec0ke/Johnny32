@@ -23,6 +23,7 @@ import zlib
 
 sys.path.insert(0, 'tools')
 import x86
+from x86 import _s16
 
 EXE = 'original/scrantic.exe'
 PORT = './johnny/target/release/jcoracle'
@@ -879,6 +880,194 @@ def p_codec():
     return port(*args)
 
 
+# ---- the TTM interpreter -------------------------------------------------
+
+# The last large thing this port reimplements rather than drives is the TTM
+# frame runner itself -- `seg12:0x040C`, the loop that fetches an opcode,
+# collects its operands and dispatches. Running it means standing a loaded
+# TTM up in memory and then keeping the rest of the program out of the way:
+#
+#   ds:0x2634/0x2636   the head of the loaded-TTM list
+#   ds:0x2638/0x263A   the one in play; +2 is its frame count, +4/+6 its
+#                      bytes, +8/+0xA their last byte, +0xD0/0xD2 the frame
+#                      table `seg11:0x04D6` fills by counting `0FF0`s
+#   ds:0x263E          the instance record the frame runs against, laid out
+#                      by `seg11:0x042A` and reset by `seg10:0x0B3E`
+#   ds:0x2562/0x2564   the screen, 640x480 (`seg2:0x1483`)
+#
+# and then a wall around segments 1 and 12: while the interpreter is running,
+# any call that leaves them -- the blitter, the pager, the resource loader,
+# the sound -- is answered here with zero instead of running. That is what
+# makes this possible at all, and it is also what it costs: with the loader
+# walled off the engine's bitmap slots stay empty, so the sprite handler at
+# `seg12:0x025B` finds no shape and draws nothing. The port is pointed at an
+# empty archive for the same reason, so both sides agree about what artwork
+# exists rather than one of them having some.
+#
+# What is compared is every instruction of every frame -- the opcode as the
+# dispatcher sees it, with the operands as the handler receives them -- and
+# what the frame left on the instance record afterwards.
+
+TTM_REC = 30             # segments the NE does not use, one 64K each
+TTM_DATA = 31
+TTM_RECOFF = 0x0000      # the 0xD4-byte loaded-TTM record
+TTM_TABLE = 0x0400       # its frame table, just after it
+TTM_INST = 0x9800        # the instance record, in free DGROUP
+TTM_HEAP = 0xA000        # the records seg11:0x042A makes while it scans
+TTM_W, TTM_H = 640, 480
+
+
+def ttm_scripts():
+    """Every shipped `.TTM`, decompressed, in the order both sides walk."""
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for name, body, _ in recs:
+        if not name.endswith('.TTM'):
+            continue
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'TT3:':
+                yield name, dgds.decompress(payload)
+                break
+
+
+class Interpreter:
+    """`SCRANTIC.EXE`'s own TTM frame runner, with the rest of it walled off."""
+
+    def __init__(self):
+        self.m = fresh()
+        self.m.limit = 4_000_000
+        self.near = TTM_HEAP
+        self.ops = []
+        m = self.m
+        m.hook(8, 0x0619, self._malloc)      # the instance-record allocator
+        m.hook(1, 0x229C, self._malloc)
+        m.hook(1, 0x22E1, lambda mm: mm.regs.__setitem__('ax', 0))   # free
+        m.hook(1, 0x121A, self._memset)
+        m.wall({1, 12}, self._outside,
+               # Two functions outside that are arithmetic on their arguments
+               # and reach no further: the string-length rule the fetch needs
+               # to step over a filename, and the generator `2022` draws from.
+               allow={(11, 0x04A8), (4, 0x1E86)})
+        m.watch_at(12, 0x0620, self._dispatch)
+        m.write16(m.ds, 0x2562, TTM_W)
+        m.write16(m.ds, 0x2564, TTM_H)
+
+    # ---- what stands in for the rest of the program -----------------------
+
+    def _malloc(self, m):
+        n = m.read16(m.ds, m.regs['sp'])
+        at = self.near
+        self.near = (self.near + n + 3) & ~3
+        m.regs['ax'] = at
+
+    def _memset(self, m):
+        at = m.read16(m.ds, m.regs['sp'])
+        c = m.read16(m.ds, m.regs['sp'] + 2) & 0xFF
+        n = m.read16(m.ds, m.regs['sp'] + 4)
+        base = m._lin(m.ds, 0)
+        m.mem[base + at:base + at + n] = bytes([c]) * n
+        m.regs['ax'] = at
+
+    def _outside(self, m, seg, off):
+        m.regs['ax'] = 0
+
+    # ---- the instruction stream -------------------------------------------
+
+    def _dispatch(self, m):
+        """`seg12:0x0620`, where the opcode and its operands are complete and
+        no handler has run yet. `ds:0x46DC` is the opcode after the two
+        rewrites at `seg12:0x0467`; `[bp-0x26]` is the operand count off its
+        low nibble; the operands are at `[bp-4]` downward, already shifted by
+        the island's offset; `[bp-0x1A]` is the string, when the count is
+        `0x0F`."""
+        bp = m.regs['bp']
+        op = m.read16(m.ds, 0x46DC)
+        count = m.read16(m.ds, (bp - 0x26) & 0xFFFF)
+        if count == 0x0F:
+            at = m.read16(m.ds, (bp - 0x1A) & 0xFFFF)
+            base = m._lin(m.ds, at)
+            end = m.mem.index(0, base)
+            text = m.mem[base:end].decode('latin-1')
+            self.ops.append('op %04X "%s"' % (op, text))
+            return
+        args = [_s16(m.read16(m.ds, (bp - 4 - k * 2) & 0xFFFF)) for k in range(count)]
+        self.ops.append(('op %04X %s' % (op, ' '.join(str(a) for a in args))).rstrip())
+
+    # ---- one file ---------------------------------------------------------
+
+    def load(self, code):
+        """Put a script where a loaded TTM lives and let `seg11:0x04D6` build
+        its frame table, the same walk that decides what a frame even is."""
+        m = self.m
+        base = m._lin(TTM_DATA, 0)
+        m.mem[base:base + len(code)] = code
+        n = sum(1 for i in range(0, len(code) - 1, 2)
+                if struct.unpack_from('<H', code, i)[0] == 0x0FF0)
+        rec = m._lin(TTM_REC, TTM_RECOFF)
+        m.mem[rec:rec + 0xD4] = b'\0' * 0xD4
+        struct.pack_into('<HH', m.mem, rec + 0x00, 0, n)
+        struct.pack_into('<HH', m.mem, rec + 0x04, 0, TTM_DATA)
+        struct.pack_into('<HH', m.mem, rec + 0x08, len(code) - 1, TTM_DATA)
+        struct.pack_into('<HH', m.mem, rec + 0xD0, TTM_TABLE, TTM_REC)
+        tbl = m._lin(TTM_REC, TTM_TABLE)
+        m.mem[tbl:tbl + (n + 1) * 4] = b'\0' * ((n + 1) * 4)
+        for off in (0x2634, 0x2638):
+            m.write16(m.ds, off, TTM_RECOFF)
+            m.write16(m.ds, off + 2, TTM_REC)
+        m.write16(m.ds, 0x263C, 0)      # the instance list starts empty
+        m.write16(m.ds, 0x263E, 0)
+        self.near = TTM_HEAP
+        if m.call(11, 0x04D6, [0]) != 1:
+            raise RuntimeError('seg11:0x04D6 refused the script')
+        # One instance record, reset the way `seg10:0x0B3E` resets one.
+        m.mem[m._lin(m.ds, TTM_INST):m._lin(m.ds, TTM_INST) + 0x3D] = b'\0' * 0x3D
+        m.write16(m.ds, TTM_INST + 0x0A, 0xFFFF)
+        m.call(10, 0x0B3E, [TTM_INST])
+        m.write16(m.ds, 0x263E, TTM_INST)
+        self.delay = m.read16(m.ds, TTM_INST + 0x29)
+        return n
+
+    def frame(self, k):
+        """Run frame `k` and say what it did, the way `seg10:0x1C81` does."""
+        m = self.m
+        m.write16(m.ds, TTM_INST + 0x08, k)
+        m.write16(m.ds, 0x4644, 0)          # seg10:0x1CAE
+        m.write16(m.ds, 0x46E8, 0xFFFF)     # seg10:0x1CB4
+        del self.ops[:]
+        m.call(11, 0x074A, [k])
+        # seg10:0x1CE6: a frame that asked for no delay leaves the last one.
+        asked = m.read16(m.ds, 0x46E8)
+        if asked != 0xFFFF:
+            self.delay = asked
+        r = lambda off: m.read16(m.ds, TTM_INST + off)
+        record = ('pal%d bm%d fg%d bg%d clip%d,%d,%d,%d delay%d end%d goto%d'
+                  % (r(0x12), r(0x14),
+                     m.read8(m.ds, TTM_INST + 0x1E), m.read8(m.ds, TTM_INST + 0x1F),
+                     _s16(r(0x21)), _s16(r(0x23)), _s16(r(0x25)), _s16(r(0x27)),
+                     max(self.delay, 1),
+                     1 if m.read16(m.ds, 0x4644) else 0,
+                     _s16(m.read16(m.ds, 0x4646))))
+        return list(self.ops), record
+
+
+def q_ttm():
+    out = []
+    files = frames = instrs = 0
+    e = Interpreter()
+    for name, code in ttm_scripts():
+        n = e.load(code)
+        files += 1
+        out.append('%s frames %d' % (name, n))
+        for k in range(n):
+            ops, record = e.frame(k)
+            instrs += len(ops)
+            frames += 1
+            out += ['%s %d %s' % (name, k, line) for line in ops]
+            out.append('%s %d = %s' % (name, k, record))
+    out.append('total %d files %d frames %d instructions' % (files, frames, instrs))
+    return out
+
+
 QUERIES = {
     'rand': (q_rand, lambda: port('rand', 256)),
     'weighted': (q_weighted, lambda: port('weighted', '10,20,30,20,10,10', 256)),
@@ -900,6 +1089,7 @@ QUERIES = {
     'seqpass': (q_seqpass, p_seqpass),
     'seqrun': (q_seqrun, p_seqrun),
     'codec': (q_codec, p_codec),
+    'ttm': (q_ttm, lambda: port('ttm')),
 }
 
 

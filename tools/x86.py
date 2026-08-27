@@ -97,6 +97,7 @@ class Machine:
         self.hooked = {}
         self.watches = {}
         self.breaks = {}
+        self.walls = []
         self.steps = 0
         self.limit = 5_000_000
 
@@ -376,10 +377,39 @@ class Machine:
         """
         self.watches.setdefault((seg, off), []).append(fn)
 
+    def wall(self, inside, fn, allow=()):
+        """Answer every call that leaves a set of segments.
+
+        `hook` is per address, which is fine for a handful of leaves and no
+        good at all for "run the TTM interpreter, and let nothing outside
+        segment 12 happen". A wall states the boundary instead of the list:
+        while the instruction pointer is in `inside`, any far call to
+        something that is not -- another segment of the program, or an
+        import -- is handed to `fn(machine, seg, off)`, which records it and
+        leaves a result in `ax`.
+
+        Stating the boundary rather than enumerating what crosses it is the
+        point: a target that was missed from a list would run for real, and
+        the first sign of it would be a wrong answer somewhere downstream.
+
+        `allow` names the exceptions -- functions outside that are pure
+        arithmetic on their arguments and so cannot reach any further.
+        `hook` still wins over a wall, which is how an allocator gets to be
+        answered by something other than zero.
+        """
+        self.walls.append((frozenset(inside), fn, frozenset(allow)))
+
     def call_far(self, seg, off):
         for fn in self.watches.get((seg, off), ()):
             fn(self)
         hooked = self.hooks.get((seg, off))
+        if hooked is None:
+            for inside, fn, allow in self.walls:
+                if (self.sregs['cs'] in inside and seg not in inside
+                        and (seg, off) not in allow):
+                    self.hooked[(seg, off)] = self.hooked.get((seg, off), 0) + 1
+                    fn(self, seg, off)
+                    return
         if hooked is not None:
             self.hooked[(seg, off)] = self.hooked.get((seg, off), 0) + 1
             hooked(self)
