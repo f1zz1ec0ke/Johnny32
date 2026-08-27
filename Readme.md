@@ -171,7 +171,7 @@ python3 tools/oracle.py
   repeat       12 answers, all identical
   backdrop     64 answers, all identical
   holiday     366 answers, all identical
-  codec       180 answers, all identical
+  codec       181 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
