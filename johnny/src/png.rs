@@ -178,7 +178,11 @@ pub fn read(data: &[u8]) -> Result<Image, String> {
     if interlace != 0 {
         return Err("interlaced".into());
     }
-    if w == 0 || h == 0 || w > 8192 || h > 8192 {
+    // A size bound, because this reads files somebody else made. The largest
+    // thing in the archive is 640x480, so sixteen million pixels leaves room
+    // for artwork drawn several times over and still refuses a header that
+    // claims a gigabyte.
+    if w == 0 || h == 0 || w > 8192 || h > 8192 || (w as u64) * (h as u64) > 16_000_000 {
         return Err(format!("{w}x{h} is not a size"));
     }
     let channels = match kind {

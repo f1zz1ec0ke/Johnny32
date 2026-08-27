@@ -973,9 +973,12 @@ impl Director {
 
         // The opening scene, which is also the one that says where Johnny is
         // standing when the queue starts.
-        if mate_pending && mate.is_some_and(|m| m.mask & category::PRIMARY != 0) && self.coin(50)
-        {
-            self.queue.push(mate.unwrap());
+        let opener = mate
+            .filter(|_| mate_pending)
+            .filter(|m| m.mask & category::PRIMARY != 0)
+            .filter(|_| self.coin(50));
+        if let Some(m) = opener {
+            self.queue.push(m);
             mate_pending = false;
         } else if let Some(first) = self.choose(category::PRIMARY, budget) {
             budget -= first.cost as i32;
@@ -995,8 +998,8 @@ impl Director {
         // here instead; the rest is whatever the second category offers, and
         // the repeatable ones go in several times over.
         while budget != 0 && self.queue.len() < QUEUE_CAP {
-            if mate_pending && self.coin(5) {
-                self.queue.push(mate.unwrap());
+            if let Some(m) = mate.filter(|_| mate_pending).filter(|_| self.coin(5)) {
+                self.queue.push(m);
                 mate_pending = false;
                 continue;
             }
@@ -1802,6 +1805,12 @@ impl Director {
         }
         self.story_state = 0;
         self.queue_spent = false;
+    }
+
+    /// Run the story's per-queue settling once, for the tests. The
+    /// screensaver reaches this through `next_queue`.
+    pub fn settle_story_for_test(&mut self) {
+        self.advance_story();
     }
 
     /// Forget which calendar day the story last moved on, so a test that

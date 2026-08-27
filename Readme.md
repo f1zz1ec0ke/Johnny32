@@ -268,6 +268,28 @@ eleven days long rather than eleven days *per session* — and a port that keeps
 them in memory starts Johnny's story again every time the screen goes blank.
 This one writes them back too.
 
+## What is still not checked against the binary
+
+Two things, and it is worth being plain about them.
+
+**The codecs.** `RESOURCE.001`'s LZW and RLE are reimplemented from reading
+`seg6`, not driven inside it. The engine's decompressor pulls its input
+through a stream layer with a file mode and a memory mode, and reaching the
+memory one means standing up enough of the C runtime's `FILE` machinery to
+satisfy the seek in front of it. What stands in for it: 180 records decode and
+consume exactly, 2,392 sprite frames come out at the sizes the headers
+declare, and `tools/difftest.sh` compares two independent implementations over
+3,096 lines. That is cross-checking, not oracling.
+
+**The TTM interpreter's own execution.** `seg12:0x040C` will run a script in
+the interpreter — it decodes the header of `MJFIRE.TTM` correctly — but every
+frame calls out to the pager and the blitter, and stubbing those changes the
+control flow enough that it stops walking. What stands in for it: every one of
+the 6,631 frames in the data disassembles end to end, the 65 scenes all run to
+completion, the repaint check is clean on all of them, and the pieces of the
+interpreter that *are* pure data — the instruction lengths, the pre-shift
+tables, the opcode census — have been read out and compared.
+
 ## Checking the port against itself, where the binary cannot reach
 
 The oracle covers the deciding: which scene, when, where. It cannot reach the

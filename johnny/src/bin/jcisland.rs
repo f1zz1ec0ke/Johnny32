@@ -71,10 +71,12 @@ fn main() -> ExitCode {
     let mut d = Director::new(seed);
     d.configure(settings.clone());
     d.faithful_router = std::env::var("JC_FAITHFUL").is_ok();
-    // `JC_DAY` (through the settings) starts on a given story day, to see the
-    // island as it is by then -- mostly, to watch the raft get built.
-    if settings.story_reached > 0 {
-        d.day = settings.story_offered;
+    // `JC_DAY` starts on a given story day, to see the island as it is by
+    // then -- mostly, to watch the raft get built. It has to be read here
+    // rather than inferred from the settings: a real settings file sets the
+    // story too, and taking that as "the user asked for a day" would clear
+    // the calendar it came with.
+    if std::env::var_os("JC_DAY").is_some() {
         d.date = 0;
     }
     // `JC_DATE=YYYY-MM-DD` pins the calendar, which is how you get a holiday

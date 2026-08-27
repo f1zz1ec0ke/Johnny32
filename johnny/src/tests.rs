@@ -420,8 +420,74 @@ fn the_two_story_days_leapfrog() {
 }
 
 #[test]
+fn the_calendar_gates_the_story() {
+    // The reached day catches up to the offer only when a real day has gone
+    // by (`seg4:0x0BC9` compares the stored date with today's). Stored as
+    // today, nothing moves; stored long ago, it moves by exactly one.
+    let today = director::civil_from_days(director::today());
+    for (date, want) in [(today, 5u8), ((2020, 1, 1), 6)] {
+        let mut s = settings::Settings::default();
+        s.story_offered = 6;
+        s.story_reached = 5;
+        s.story_date = date;
+        let mut d = director::Director::new(0);
+        d.configure(s);
+        d.settle_story_for_test();
+        assert_eq!(d.day, want, "stored {date:?}");
+    }
+}
+
+#[test]
 fn a_fresh_settings_file_does_not_start_the_story_mid_way() {
     let mut d = director::Director::new(0);
     d.configure(settings::Settings::default());
     assert_eq!(d.day, 1);
+}
+
+#[test]
+fn a_broken_png_is_refused_rather_than_fatal() {
+    // The reader is handed whatever is in an art pack, and a screensaver that
+    // panics on a truncated file is worse than one that draws the original.
+    // Every prefix of a real PNG, every single-byte corruption of its header,
+    // and a spread of nonsense.
+    let mut palette = [[0u8; 3]; 256];
+    for (i, slot) in palette.iter_mut().enumerate() {
+        *slot = [i as u8, 255 - i as u8, 0];
+    }
+    let dir = std::env::temp_dir().join("johnny-png-fuzz");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("seed.png");
+    let px: Vec<u8> = (0..24 * 9).map(|i| (i % 251) as u8).collect();
+    png::write_indexed(&path, 24, 9, &px, &palette, Some(0)).expect("write");
+    let good = std::fs::read(&path).expect("read");
+    let _ = std::fs::remove_file(&path);
+
+    for n in 0..good.len() {
+        let _ = png::read(&good[..n]);
+    }
+    for at in 0..good.len().min(120) {
+        let mut bad = good.clone();
+        bad[at] ^= 0xFF;
+        let _ = png::read(&bad);
+    }
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    for _ in 0..300 {
+        let mut noise = good.clone();
+        for _ in 0..8 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let at = (seed as usize) % noise.len();
+            noise[at] = (seed >> 32) as u8;
+        }
+        let _ = png::read(&noise);
+    }
+    // And the degenerate cases, which are the ones a real tool produces.
+    for junk in [
+        &b""[..],
+        &b"\x89PNG\r\n\x1a\n"[..],
+        &b"\x89PNG\r\n\x1a\nIHDR"[..],
+    ] {
+        assert!(png::read(junk).is_err());
+    }
 }
