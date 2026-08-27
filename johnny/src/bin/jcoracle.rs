@@ -440,7 +440,6 @@ fn main() -> ExitCode {
             let mut stage = johnny::ttm::Stage::new();
             stage.rng = Rng::new(0);
             stage.trace = Some(Vec::new());
-            let mut rng = Rng::new(0);
             let mut programs: std::collections::HashMap<String, std::rc::Rc<johnny::ttm::Program>> =
                 std::collections::HashMap::new();
             let mut active: Vec<director::Active> = Vec::new();
@@ -467,7 +466,7 @@ fn main() -> ExitCode {
                 // therefore draws its first frame on the same tick.
                 seq.begin_pass();
                 for _ in 0..johnny::ads::PASS_BUDGET {
-                    match seq.next_action(&mut rng) {
+                    match seq.next_action(&mut stage.rng) {
                         johnny::ads::Action::PassOver => break,
                         johnny::ads::Action::Reorder { ttm, scene, to_front } => {
                             if let Some(i) = order.iter().position(|e| *e == (ttm, scene)) {

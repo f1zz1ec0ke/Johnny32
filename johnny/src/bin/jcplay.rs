@@ -84,8 +84,10 @@ fn main() -> ExitCode {
     let check = std::env::var("JC_CHECK").is_ok();
     let mut complaints = 0usize;
 
-    let mut rng = ads::Rng::new(seed);
+    // One generator, on the stage, because that is what a TTM frame can
+    // reach and because the engine only has one. See `ttm::Stage::rng`.
     let mut stage = ttm::Stage::new();
+    stage.rng = ads::Rng::new(seed);
     let mut programs: HashMap<String, Rc<ttm::Program>> = HashMap::new();
     let mut active: Vec<Active> = Vec::new();
     // The instance list: one entry per `1111` marker, file by file in `RES:`
@@ -107,25 +109,13 @@ fn main() -> ExitCode {
     // background produces no frames, and without this the loop spins.
     let tick_limit = (cap as u32).saturating_mul(50).max(1000);
     while frame < cap && tick < tick_limit {
-        // The instances move first, then the whole script is re-read from the
-        // top -- the order `seg10:0x1ACB` uses, and the order that lets a
-        // guard see the scene that ended this pass.
-        stage.restore_background();
-        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
-            println!("[tick {tick:5}] scene {scene} finished");
-        }
-        // Before the script runs: it can start scenes that have not been
-        // painted yet, and those are not part of this tick's picture.
-        if check && stage.has_background() {
-            for what in johnny::director::check_repaint(&mut active, &mut stage) {
-                println!("[tick {tick:5}] {what}");
-                complaints += 1;
-            }
-        }
-
+        // The script is re-read from the top first and the instances move
+        // after it -- the order `seg10:0x1ACB` has, the pass at
+        // `seg10:0x1B6B` and then the walk at `seg10:0x1C32`, so a scene the
+        // pass starts draws its first frame on the same tick.
         seq.begin_pass();
         for _ in 0..johnny::ads::PASS_BUDGET {
-            match seq.next_action(&mut rng) {
+            match seq.next_action(&mut stage.rng) {
                 Action::PassOver => break,
                 Action::Reorder {
                     ttm,
@@ -212,6 +202,17 @@ fn main() -> ExitCode {
                 }
             }
         }
+        stage.restore_background();
+        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
+            println!("[tick {tick:5}] scene {scene} finished");
+        }
+        if check && stage.has_background() {
+            for what in johnny::director::check_repaint(&mut active, &mut stage) {
+                println!("[tick {tick:5}] {what}");
+                complaints += 1;
+            }
+        }
+
         if !sequence_done && !seq.running() {
             sequence_done = true;
             println!("[tick {tick:5}] sequence finished");

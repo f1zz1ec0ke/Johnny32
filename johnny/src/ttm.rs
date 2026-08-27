@@ -465,6 +465,20 @@ pub struct Stage {
     pub fg: u8,
     pub bg: u8,
     /// Drives `SetRandomDelay`.
+    /// The generator, and there is only one of it.
+    ///
+    /// `seg4:0x1E86` is a single static state that everything in the engine
+    /// draws from: the queue builder, where the island lands, which way
+    /// Johnny turns, the sky -- and the TTM opcode `2022`. Two generators
+    /// seeded the same are not the same thing as one, because each then gets
+    /// the sequence the other should have had, and the `tick` oracle is what
+    /// showed it: a random delay came out 19 in the engine and something
+    /// else here, so a scene ended several ticks off and the block waiting on
+    /// it fired late.
+    ///
+    /// It lives here because this is what `Instance::run_frame` can reach;
+    /// `director::Director` draws from this one too rather than keeping its
+    /// own.
     pub rng: crate::ads::Rng,
     /// Opcodes decoded but not implemented, tallied so they stay visible.
     pub todo_seen: std::collections::BTreeMap<u16, usize>,

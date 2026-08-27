@@ -686,7 +686,6 @@ pub struct Director {
     /// routing a walk. The original uses 100, which makes one route's last
     /// two options unreachable; see `docs/SCHEDULER.md`.
     pub faithful_router: bool,
-    pub rng: Rng,
     pub stage: Stage,
     activity: Activity,
     programs: HashMap<String, Rc<Program>>,
@@ -778,6 +777,10 @@ pub struct Director {
 
 impl Director {
     pub fn new(seed: u64) -> Self {
+        // One generator for the whole screensaver, on the stage, because that
+        // is what a TTM frame can reach. See `ttm::Stage::rng`.
+        let mut stage = Stage::new();
+        stage.rng = Rng::new(seed);
         Director {
             // `seg4:0x002C`: area 1, facing 0, and heading nowhere.
             position: (1, 0),
@@ -785,8 +788,7 @@ impl Director {
             day: 1,
             holiday: None,
             faithful_router: false,
-            rng: Rng::new(seed),
-            stage: Stage::new(),
+            stage,
             activity: Activity::Intro { until: INTRO_TICKS },
             programs: HashMap::new(),
             order: Vec::new(),
@@ -893,7 +895,7 @@ impl Director {
             budget
         };
         if category == category::STORY {
-            if self.rng.below(10) != 0 {
+            if self.stage.rng.below(10) != 0 {
                 return None;
             }
             // `seg4:0x0DB9`: the day on offer catches up to the day reached.
@@ -923,7 +925,7 @@ impl Director {
         if total == 0 {
             return None;
         }
-        let mut roll = self.rng.below(total) as i64 + 1;
+        let mut roll = self.stage.rng.below(total) as i64 + 1;
         for scene in candidates {
             roll -= scene.weight as i64;
             if roll <= 0 {
@@ -1149,7 +1151,7 @@ impl Director {
     /// percentages scaled by 655, returning the 1-based position it lands on
     /// or 0 if it runs off the end.
     fn weighted(&mut self, weights: &[u32]) -> usize {
-        let mut roll = self.rng.next_u16() as u32;
+        let mut roll = self.stage.rng.next_u16() as u32;
         for (i, &w) in weights.iter().enumerate() {
             if w == 0 {
                 break;
@@ -1230,7 +1232,7 @@ impl Director {
         // the next option whenever the draw lands exactly on a boundary --
         // twenty-seven times in the oracle's 4,736 rolls, which is a wrong
         // turn about once every two hundred walks.
-        let mut roll = self.rng.below(span) as i64;
+        let mut roll = self.stage.rng.below(span) as i64;
         let mut chosen = None;
         for opt in options {
             roll -= opt.weight as i64;
@@ -1336,7 +1338,7 @@ impl Director {
         // `to` the same place: Johnny stands there and does nothing for a
         // moment. That is the scene, not a gap in it.
         let Some(file) = file else {
-            let ticks = IDLE_LEAST + self.rng.below(IDLE_SPAN);
+            let ticks = IDLE_LEAST + self.stage.rng.below(IDLE_SPAN);
             self.note(format!("idle at {:?} for {ticks} ticks", self.position));
             self.activity = Activity::Idling {
                 until: self.tick + ticks,
@@ -1406,7 +1408,7 @@ impl Director {
     /// waits it out rather than flickering underneath.
     fn step_surf(&mut self) -> bool {
         let now = self.tick;
-        let rng = &mut self.rng;
+        let rng = &mut self.stage.rng;
         let Some(scenery) = self.scenery.as_mut() else {
             return false;
         };
@@ -1471,19 +1473,19 @@ impl Director {
         let sea = if self.scenery_night {
             scenery::NIGHT_SEA
         } else {
-            scenery::SEAS[self.rng.below(3) as usize]
+            scenery::SEAS[self.stage.rng.below(3) as usize]
         };
-        let extras = !self.backdrop.no_rock && self.rng.next_u16() & 1 == 1;
+        let extras = !self.backdrop.no_rock && self.stage.rng.next_u16() & 1 == 1;
         match Scenery::build(archive, sea, extras, self.tick, self.day) {
             Some(s) => {
                 let mut s = s;
                 s.set_palette(*self.stage.palette());
                 s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
-                s.start_sky(&mut self.rng);
+                s.start_sky(&mut self.stage.rng);
                 // `seg3:0x0233`: the island is dropped where this queue's
                 // scenes are willing to have it, and everything drawn against
                 // it moves with it.
-                s.place(self.island_state, &mut self.rng);
+                s.place(self.island_state, &mut self.stage.rng);
                 self.note(format!(
                     "scenery: {}{} at {:?}",
                     s.sea,
@@ -1715,7 +1717,7 @@ impl Director {
 
         // `seg4:0x01CA`: an eighth of a turn, and the pose that goes with it.
         if self.position.1 != j.turn_goal {
-            self.position.1 = turn_toward(self.position.1, j.turn_goal, &mut self.rng);
+            self.position.1 = turn_toward(self.position.1, j.turn_goal, &mut self.stage.rng);
             self.stand(archive, self.position.0 == j.target);
             j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
             self.activity = Activity::Moving(Box::new(j));
@@ -1830,7 +1832,7 @@ impl Director {
         // bounds it in case this port has misread one.
         seq.begin_pass();
         for _ in 0..crate::ads::PASS_BUDGET {
-            match seq.next_action(&mut self.rng) {
+            match seq.next_action(&mut self.stage.rng) {
                 Action::PassOver => break,
                 Action::Reorder {
                     ttm,
@@ -1938,12 +1940,12 @@ impl Director {
     /// anywhere leaves him somewhere new.
     fn landing(&mut self, ends_at: (u8, u8)) -> (u8, u8) {
         let major = if ends_at.0 == 0 {
-            (self.rng.below(6) + 1) as u8
+            (self.stage.rng.below(6) + 1) as u8
         } else {
             ends_at.0
         };
         let minor = if ends_at.1 == 0 {
-            (self.rng.next_u16() & 7) as u8
+            (self.stage.rng.next_u16() & 7) as u8
         } else {
             ends_at.1
         };
