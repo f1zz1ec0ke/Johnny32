@@ -41,7 +41,7 @@ step tests
 tests=$(cargo test --release --manifest-path johnny/Cargo.toml 2>&1) || fail=1
 echo "$tests" | grep -E "^test result: ok\. [1-9][0-9]* passed|FAILED|^error" | head -2
 step verify
-run 12 python3 tools/verify.py
+run 14 python3 tools/verify.py
 step difftest
 run 1 bash tools/difftest.sh
 step sweep
