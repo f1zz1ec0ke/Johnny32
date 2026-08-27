@@ -17,6 +17,9 @@
 #   soaks       three long runs of the whole island, with the repaint check
 #   coverage    every story day, every holiday, both halves of the clock
 #   framecheck  a look at what the scenes actually draw (slow)
+#   island      the composed island against `ISLETEMP.SCR`, which is the
+#               1992 engine's own render of it -- the one place in the data
+#               where pixels can be compared rather than decisions
 #   oracle      twenty-two questions put to the 1992 binary itself and to
 #               the port, and diffed -- including its own LZW and RLE run
 #               over every compressed leaf in the archive, its own TTM
@@ -61,6 +64,8 @@ step coverage
 run 8 python3 tools/coverage.py
 step framecheck
 run 8 python3 tools/framecheck.py
+step island
+run 9 ./johnny/target/release/jcisle
 step oracle
 run 2 python3 tools/oracle.py
 

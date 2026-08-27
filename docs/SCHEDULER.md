@@ -472,6 +472,40 @@ The rock and sandbar score 0-15%, which is the coin flip having come up the
 other way, and the low surf (frames 30-41) sits below row 350 where the
 picture stops.
 
+`jcisle` is this measurement made standing rather than one-off, and
+`tools/check.sh` runs it. Scoring each piece where the composition actually
+puts it — rather than searching for its best offset, which is how the −1 was
+found in the first place — gives:
+
+| Piece | Score | Floor |
+| --- | --- | --- |
+| frame 0, the island | 96.5% | 90% |
+| frame 13, the palm trunk | 95.2% | 90% |
+| frame 12, the fronds | 90.5% | 85% |
+| surf at `0x10F` | 75.2% | 60% |
+| surf at `0x16D` | 75.3% | 60% |
+| surf at `0x207` | 34.0% | not checked |
+| the whole composition | 92.3% | 80% |
+
+The floors are not decoration: a piece one pixel out of place drops from the
+nineties into single figures, because the artwork is hard-edged sixteen-colour
+pixel art and a shifted copy of it agrees with almost nothing.
+
+### The third patch of surf is two pixels out, and the code is not
+
+`seg3:0x13F2` puts it at `0x207`, and the port draws what the binary says. The
+reference's best match for it is at `0x209` — two pixels right — and even there
+only 54.7%, where its two neighbours peak at 75%. Scored where the code puts
+it, it comes out at 34%, which is *below* several positions around it: the
+match surface there is flat enough that no floor would tell right from wrong.
+
+That is the same shape of disagreement as the shells above — the code says one
+thing and the game's own picture of its island says another — but with much
+weaker evidence. The shells are provably nowhere in the reference; this is a
+soft peak two pixels away. So the port stays with the binary, `jcisle` reports
+the number and asserts nothing about it, and the two patches either side
+confirm the island's own −1 correction at 75% apiece.
+
 ### The shells the picture does not have
 
 `seg3:0x02EA` draws frame 14 — a starfish and two shells — at (397, 279),

@@ -34,7 +34,7 @@ pub const SURF_TICKS: u32 = 4;
 /// offshore, and four more patches of surf come with them; the placement
 /// rectangle is different (`seg3:0x1B56`) and so is where the raft ties up
 /// (`seg3:0x1DCB`). `ISLETEMP.SCR` is the other layout, and has none of it.
-const ISLAND: [(usize, i32, i32, bool); 6] = [
+pub const ISLAND: [(usize, i32, i32, bool); 6] = [
     // frame,  x,   y,   always
     (0, 0x121, 0x117, true),  // seg3:0x0270 -- the island itself, 280x52
     (1, 0x0FA, 0x12F, false), // seg3:0x0293 -- 384x69
@@ -57,7 +57,7 @@ const ISLAND: [(usize, i32, i32, bool); 6] = [
 /// `ISLETEMP.SCR` is the bare-island layout, and the split is exactly what it
 /// shows: the first three match it at 54-75% and it contains no trace of the
 /// other four.
-const SURF: [(i32, i32, usize, usize, bool); 7] = [
+pub const SURF: [(i32, i32, usize, usize, bool); 7] = [
     // the bare island's waterline
     (0x10F, 0x132, 3, 0, false), // seg3:0x13A0
     (0x16D, 0x13F, 6, 1, false), // seg3:0x13C9
@@ -354,7 +354,7 @@ pub const NIGHT_SEA: &str = "NIGHT.SCR";
 /// matching each piece against it finds the island at 96%, the palm trunk at
 /// 95% and the fronds at 90% -- each one pixel to the left of the nominal
 /// anchor, all three agreeing.
-const ORIGIN: (i32, i32) = (-1, 0);
+pub const ORIGIN: (i32, i32) = (-1, 0);
 
 /// Whether the shells go on the beach.
 ///
@@ -626,6 +626,24 @@ impl Scenery {
         } else {
             GLINTS
         }
+    }
+
+    /// The sea with nothing on it, and the sea with the island composed onto
+    /// it. `jcisle` scores the difference between them against
+    /// `ISLETEMP.SCR`, which is the 1992 engine's own render of this
+    /// composition.
+    pub fn sea_only(&self) -> &Frame {
+        &self.sea_only
+    }
+
+    pub fn base(&self) -> &Frame {
+        &self.base
+    }
+
+    /// `BACKGRND.BMP`, which every static piece and every patch of surf comes
+    /// out of.
+    pub fn pieces(&self) -> &[Frame] {
+        &self.pieces
     }
 
     /// Where a piece of the island actually goes, once the island has moved.

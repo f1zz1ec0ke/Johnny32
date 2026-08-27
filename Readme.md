@@ -368,7 +368,17 @@ what order, and everything they drew. What it found is below.
 
 That leaves one, and it is worth being plain about it.
 
-**The blitter.** `seg8:0x0AE4` is where a sprite lands, three thunks below the
+**The blitter.** And one small thing can be, which is worth saying first:
+`ISLETEMP.SCR` is the 1992 engine's own render of the island this port
+composes, so `jcisle` holds the composition up against it and scores each
+piece. The island comes out at 96.5%, the palm trunk 95.2%, the fronds 90.5%,
+two of the three patches of surf 75%, and the whole composition 92.3% over
+18,248 painted pixels. That is the *only* place in the data where the
+original's pixels can be compared with this port's, and it now runs in
+`tools/check.sh`. A piece one pixel out drops into single figures, so it is a
+sharp check rather than a reassuring one.
+
+Which leaves the blit itself. `seg8:0x0AE4` is where a sprite lands, three thunks below the
 opcode handler — and the pixels are not Sierra's. It builds device contexts
 and hands the work to GDI, so there is no inner loop of the original's to
 compare a port against: any port writes its own, and this one does.
@@ -434,6 +444,12 @@ Three things, all of them in the port:
   GDI `Ellipse(cx - r, cy - r, cx + r, cy + r)`, whose right and bottom edges
   are excluded. All 437 in the data are square, so the width has never
   mattered; the far edge being one pixel out did.
+* **The third patch of surf is two pixels out, and the code is not.**
+  `seg3:0x13F2` puts it at `0x207` and the port draws what the binary says,
+  but the reference's best match for it is at `0x209` and even there only
+  54.7%, where its neighbours peak at 75%. The port stays with the binary and
+  `jcisle` reports the number without asserting anything about it; the
+  reasoning is in `docs/SCHEDULER.md`.
 * **`1301` *is* `C051`.** `seg12:0x0467` rewrites it, and `1311` into `C061`,
   before it looks at anything else. Neither spelling appears in
   `RESOURCE.001` — all 535 sound cues are written `C051` — but the rewrite is
@@ -659,6 +675,7 @@ tools/oracle.py             twenty-two questions put to the 1992 binary and
 tools/scenes.py             the 65 scenes, derived from the scene table
 tools/sweep.py              play all of them with the repaint check on
 tools/framecheck.py         look at what they actually draw
+johnny/src/bin/jcisle.rs    the island against the engine's own render of it
 tools/coverage.py           every story day, every holiday, day and night
 
 johnny/                     the Rust port
