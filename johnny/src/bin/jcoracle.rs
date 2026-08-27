@@ -298,6 +298,9 @@ fn main() -> ExitCode {
                 })
                 .collect();
             let passes: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(8);
+            // The generator's only kind of seeding is to discard values, so
+            // this is the same starting place as `n` calls of `seg4:0x1E86`.
+            let seed: u64 = args.get(5).and_then(|v| v.parse().ok()).unwrap_or(0);
             let Some(mut s) = johnny::ads::Sequencer::from_record(&archive, &record) else {
                 eprintln!("no ADS record {record}");
                 return ExitCode::FAILURE;
@@ -307,7 +310,7 @@ fn main() -> ExitCode {
                 eprintln!("{record} has no sequence {seq}");
                 return ExitCode::FAILURE;
             }
-            let mut rng = Rng::new(0);
+            let mut rng = Rng::new(seed);
             for turn in 0..passes {
                 s.trace.clear();
                 // The driver walks every pass, whatever state the sequence it

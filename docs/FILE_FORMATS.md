@@ -226,7 +226,11 @@ them.
 ADS does **not** use the low-nibble rule. Each handler advances the script
 pointer itself, and the lengths come from a dedicated function at
 `seg10:0x0303` with its own 35-entry table. The opcodes are at `seg10:0x1875`
-with handlers at `0x18CD`.
+with handlers at `0x18CD` — so the table is 0x58 bytes of words, forty-four
+of them, and an opcode outside it walks off the end of the search at
+`seg10:0x152C` and does nothing at all. Seventy-seven words in the shipped
+scripts are of that kind; `tools/reach.py` sets them aside, along with the
+headers, terminators and joiners, when it counts what a run reached.
 
 An `.ADS` record holds numbered sequences, and **several run at once**. Each
 has a state word: 1 means the interpreter runs it this pass, 2 means it has

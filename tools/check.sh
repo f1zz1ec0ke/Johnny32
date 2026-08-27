@@ -25,9 +25,17 @@
 #               over every compressed leaf in the archive, its own TTM
 #               interpreter run over every frame of every script, and its
 #               own per-tick pass driven a scene at a time
+#   reach       and where those questions went: how much of the scripts the
+#               oracle actually ran, which is the half `oracle` cannot
+#               report on itself
 #
-# The last one needs `original/scrantic.exe` and capstone; the rest need
+# The last two need `original/scrantic.exe` and capstone; the rest need
 # `original/RESOURCE.001`. Nothing here needs a network.
+#
+# `JC_DEEP=1 bash tools/check.sh` runs the exhaustive case lists throughout --
+# every byte of every compressed leaf, every sequence from every starting
+# position, sixty passes from eight draws -- and is the tier `reach` holds to
+# its 95% floor. It takes about two hours.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 fail=0
@@ -68,6 +76,8 @@ step island
 run 9 ./johnny/target/release/jcisle
 step oracle
 run 2 python3 tools/oracle.py
+step reach
+run 7 python3 tools/reach.py
 
 echo
 [ "$fail" = 0 ] && echo "all clean" || echo "SOMETHING FAILED"

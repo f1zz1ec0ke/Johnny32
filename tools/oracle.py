@@ -691,29 +691,73 @@ def ads_all_pairs(layout):
     return sorted(seen)
 
 
-def q_seqrun(passes=8):
+def seqrun_shape():
+    """How far to run the sequencer, and from how many starting draws.
+
+    Both numbers are coverage, not taste, and `tools/reach.py` is where they
+    come from. Passes matter because a scene has to end and start again
+    before the guards waiting on it mean anything; draws matter because a
+    random block picks one branch and the others are only reachable by
+    drawing differently. Neither knob substitutes for the other.
+
+    `Rng::new(n)` on the port and `n` calls of `seg4:0x1E86` here are the same
+    thing -- the engine's only kind of seeding is to discard values -- so the
+    two sides start from the same place.
+
+    Both can be overridden, so what each one is worth can be measured rather
+    than argued about: `JC_PASSES=8 JC_SEEDS=1 python3 tools/reach.py seqrun`
+    against `JC_PASSES=60 JC_SEEDS=1` is the passes knob on its own.
+    """
+    passes, seeds = (60, 8) if os.environ.get('JC_DEEP') else (8, 2)
+    return (int(os.environ.get('JC_PASSES') or passes),
+            int(os.environ.get('JC_SEEDS') or seeds))
+
+
+def q_seqrun():
     """seg10:0x1925 run over and over, which is the only way to see the parts
     of the sequencer that live between passes."""
+    passes, seeds = seqrun_shape()
     out = []
     for name, code in ads_scripts():
         layout = ads_layout(code)
         pairs = ads_all_pairs(layout)
         for seq in sorted(layout):
-            got = ads_run(fresh(), code, layout, seq, pairs, passes)
-            for line in got:
-                out.append('seqrun %s %d %s' % (name, seq, line))
+            for seed in range(seeds):
+                m = fresh()
+                for _ in range(seed):
+                    m.call(4, 0x1E86)
+                for line in ads_run(m, code, layout, seq, pairs, passes):
+                    out.append('seqrun %s %d %d %s' % (name, seq, seed, line))
     return out
 
 
-def p_seqrun(passes=8):
+def p_seqrun():
+    passes, seeds = seqrun_shape()
     out = []
     for name, code in ads_scripts():
         layout = ads_layout(code)
         pairs = ','.join('%d:%d' % p for p in ads_all_pairs(layout)) or '-'
         for seq in sorted(layout):
-            for line in port('seqrun', name, seq, pairs, passes):
-                out.append('seqrun %s %d %s' % (name, seq, line))
+            for seed in range(seeds):
+                for line in port('seqrun', name, seq, pairs, passes, seed):
+                    out.append('seqrun %s %d %d %s' % (name, seq, seed, line))
     return out
+
+
+def seqpass_shape():
+    """How many of a sequence's scenes to vary, and whether to try them all
+    at once.
+
+    `tools/reach.py` is where the numbers come from, and `JC_CAP=6` re-derives
+    the first of them: varying the first six scenes reaches a little over half
+    the ADS instructions the dispatcher can see, and varying all of them
+    reaches half as much again, because a guard on a scene the case list never
+    touched cannot fire. Setting every scene at once on top of that adds the
+    blocks whose guard is a conjunction -- `1420` joins two conditions and
+    `seg10:0x1402` wants both true.
+    """
+    cap, together = (99, (4, 1, 5)) if os.environ.get('JC_DEEP') else (6, ())
+    return int(os.environ.get('JC_CAP') or cap), together
 
 
 def _seqpass_cases():
@@ -722,20 +766,29 @@ def _seqpass_cases():
     One list, used by both sides, so the only thing being compared is what
     each does with the same starting position.
     """
+    cap, together = seqpass_shape()
     for name, code in ads_scripts():
         layout = ads_layout(code)
         for seq in sorted(layout):
             _, pairs = layout[seq]
             cases = [{}]
-            for pair in pairs[:6]:
+            for pair in pairs[:cap]:
                 for state in (4, 1, 5):
                     cases.append({pair: (1, state)})
+            for state in together:
+                cases.append(dict((p, (1, state)) for p in pairs))
             for n, states in enumerate(cases):
                 yield name, code, layout, seq, n, states
 
 
 def q_seqpass():
     """One pass of every shipped sequence, in every state that matters.
+
+    The instance records are the ones the *script* gets, not the ones this
+    sequence mentions. `seg11:0x0645` makes one per `1111` marker when the
+    file loads, so a guard in sequence 3 about a scene sequence 5 plays has
+    something to read -- and with the narrower set it had nothing, took its
+    absent path every time, and the other side of it was never compared.
 
     This is the sequencer's whole contract: given what is on screen, which
     scenes does a pass start, stop, finish or reorder, and in what order. It
@@ -751,7 +804,8 @@ def q_seqpass():
     """
     out = []
     for name, code, layout, seq, n, states in _seqpass_cases():
-        got = ads_pass(fresh(), code, layout, seq, states, layout[seq][1])
+        got = ads_pass(fresh(), code, layout, seq, states,
+                       ads_all_pairs(layout))
         out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(got)))
     return out
 
@@ -761,7 +815,7 @@ def p_seqpass():
     for name, _code, layout, seq, n, states in _seqpass_cases():
         arg = ','.join('%d:%d:%d:%d' % (t, s, p, st)
                        for (t, s), (p, st) in sorted(states.items())) or '-'
-        pairs = ','.join('%d:%d' % pair for pair in layout[seq][1]) or '-'
+        pairs = ','.join('%d:%d' % pair for pair in ads_all_pairs(layout)) or '-'
         mine = port('seqpass', name, seq, arg, 0, pairs)
         out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(mine)))
     return out

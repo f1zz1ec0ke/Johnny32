@@ -166,7 +166,7 @@ python3 tools/oracle.py
   turn        512 answers, all identical
   blocks     2688 answers, all identical
   seqpass    1143 answers, all identical
-  seqrun      528 answers, all identical
+  seqrun     1056 answers, all identical
   island     8320 answers, all identical
   repeat       12 answers, all identical
   backdrop     64 answers, all identical
