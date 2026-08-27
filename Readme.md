@@ -128,7 +128,7 @@ calm takes both away. Everything that drifts drifts the same way, because the
 wind is one variable rolled once when the sky is set up. In twenty-six minutes
 of simulated island — 54,000 frames — nothing is reached that the port does
 not implement: no TTM opcode, no ADS opcode. That claim is now stronger than a
-soak test: every one of the thirty TTM opcodes and nineteen ADS opcodes the
+soak test: every one of the thirty TTM opcodes and eighteen ADS opcodes the
 shipped scripts use has been walked back to its handler, and the ones the port
 treats as no-ops are ones the disassembly shows reaching their "done" label
 whichever way they branch. The audit table is in `docs/SCHEDULER.md`.

@@ -907,9 +907,74 @@ Things the port had to get right that are easy to get wrong:
   shows up the same way — two scenes animating over each other, or a cascade
   that stops after its first step.
 
+## The interpreter, driven
+
+`seg12:0x040C` is the frame runner: fetch an opcode, collect the operands its
+low nibble asks for, dispatch. It can be run in `tools/x86.py` — what makes
+that possible is stating a boundary rather than stubbing leaves one at a time.
+`x86.Machine.wall` answers every call that leaves segments 1 and 12 while the
+interpreter is running, so the blitter, the pager, the resource loader and the
+sound never run and the interpreter never notices they are missing. A target
+missed from a list would run for real and the first sign of it would be a
+wrong answer downstream; a boundary cannot be missed.
+
+Standing a loaded TTM up in front of it:
+
+| | |
+| --- | --- |
+| `ds:0x2634`/`0x2636` | the head of the loaded-TTM list, which `seg11:0x03E2` walks by file id |
+| `ds:0x2638`/`0x263A` | the one in play. `+0x00` is its id, `+0x02` the frame count, `+0x04`/`+0x06` its bytes, `+0x08`/`+0x0A` their last byte, `+0x0C`..`+0x2B` its sixteen bitmap slots, `+0xCC`/`+0xCE` the next in the list, `+0xD0`/`+0xD2` the frame table |
+| `ds:0x263E` | the instance record the frame runs against, made by `seg11:0x042A` and reset by `seg10:0x0B3E` |
+| `ds:0x2562`/`0x2564` | the screen, 640x480 (`seg2:0x1483`) |
+
+`seg11:0x04D6` fills the frame table itself by walking the file and counting
+`0FF0`s, and makes an instance record for every `1111` on the way — so what a
+frame *is* comes from the binary rather than from a second reading of the
+format. `seg11:0x074A(frame)` then checks the index against the count and the
+table entry against null and calls `seg12:0x040C`.
+
+Two places are worth watching from inside. `seg12:0x0620` is where the opcode
+and its operands are complete and no handler has run: `ds:0x46DC` holds the
+opcode after the two rewrites at `seg12:0x0467` (`1301` becomes `C051`, `1311`
+becomes `C061`), `[bp-0x26]` the operand count, `[bp-4]` downward the operands
+with the island's offset already added, and `[bp-0x1A]` the string when the
+count is `0x0F`. `seg12:0x0340` is reached only by a region rectangle that got
+past the guard at `seg12:0x0318`.
+
+Afterwards the frame has left its mark on the instance record — `+0x12`
+palette slot, `+0x14` bitmap slot, `+0x1E`/`+0x1F` colours, `+0x20`..`+0x27`
+clip — and on two globals: `ds:0x4644` for "the scene ended" and `ds:0x46E8`
+for "hold it this long", both set to their nothing-yet values by
+`seg10:0x1C81` before each frame and read back at `seg10:0x1CE6` and
+`seg10:0x1D1A`. A frame that asks for no delay leaves the last one standing.
+
+`tools/oracle.py ttm` runs all of it over every frame of every script and
+compares the three streams against the port's: 41 files, 6,631 frames, 28,150
+instructions, 16,652 drawing decisions, 51,475 lines, all identical. What it
+found:
+
+* **Bitmap slots are per file.** `seg12:0x0773` reads one out of the
+  loaded-TTM record, not out of anything global, and `seg10:0x1C71` selects
+  that record from the running instance's own file id before every frame. Two
+  scenes of one `.TTM` share their sixteen; two files on screen at once cannot
+  tread on each other's. The port had one set for everything, which meant a
+  scene could be handed another file's artwork — the shape of the glitch that
+  shows when several branches are animating at once. `GJVIS5.TTM` caught it:
+  it draws from a slot it never loads.
+* **`A404`'s width operand is read by nobody**, above.
+* **A frame index past the end of a sheet is not caught.**
+  `seg12:0x0281` indexes the shape table by the opcode's frame operand with no
+  bounds check, and eleven draws in the shipped scripts ask for a frame their
+  bitmap does not have — `GJNAT1.TTM` wants frame 27 of a 26-frame sheet,
+  `SMDATE.TTM` frame 31 of 24, `SBREAKUP.TTM` frame 8 of 2. What the 1992 code
+  reads there is whatever the heap holds next. The harness pads every table
+  past the largest index any script asks for, so the read lands on a zero and
+  `seg12:0x0291` takes the no-shape path — the one answer that is not garbage,
+  and the one the port gives.
+
 ## Every opcode, audited
 
-The shipped scripts use thirty TTM opcodes and nineteen ADS ones. Every one is
+The shipped scripts use thirty TTM opcodes and eighteen ADS ones. Every one is
 either implemented or a no-op the disassembly proves is a no-op:
 
 | TTM | Uses | What the port does |
@@ -918,7 +983,7 @@ either implemented or a no-op the disassembly proves is a no-op:
 | `F01F` `F02F` `F05F` `1051` `1061` `0080` | 40, 263, 41, 456, 41, 190 | load screen / bitmap / palette, slot select, free |
 | `A504` `A524` | 12546, 2822 | sprites, unmirrored and mirrored |
 | `A0A4` `A104` `A002` | 784, 111, 63 | line, filled rect, pixel |
-| `A404` | 437 | circle. `seg12:0x01C4` halves the **fourth** operand for a radius and ignores the third; all 437 uses have them equal, so a bounding-box reading agrees with every one |
+| `A404` | 437 | circle. `seg12:0x01C9` halves the **fourth** operand for a radius, centres it at `(x + r, y + r)` and reads the third operand not at all; `seg9:0x0688` then hands GDI `Ellipse(cx - r, cy - r, cx + r, cy + r)`, whose far edges are excluded. All 437 uses have the two equal, so only the far edge ever differed from a bounding-box reading — by one pixel, on all of them |
 | `2002` `4004` | 217, 52 | colours, clip |
 | `A054` `A064` `B606` | 1, 1, 6 | region save (nothing to do) and restore |
 | `C051` | 535 | sound, see below |
@@ -1014,7 +1079,8 @@ three red pixels on the sand.
   colour that is not there". Showing them as what is behind the transparency
   key — black, which is index 5 in this palette — was tried and turns the near
   water to mud, so the port still shows them as water.
-* The blitter's inner loop, because there is not one. `seg8:0x0AE4` builds
+* The blitter's inner loop, because there is not one. It is the last thing
+  here that is not driven out of the binary. `seg8:0x0AE4` builds
   device contexts and hands the blit to GDI, so the pixel work belongs to
   Windows and any port writes its own. What the function decides first is a
   scale and a mirror, and both are now read out rather than assumed. The scale
