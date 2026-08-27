@@ -1071,14 +1071,14 @@ impl Instance {
                 Op::LoadBitmap(name) => {
                     stage.loads += 1;
                     let slot = self.bitmap_slot;
-                    let file = self.program.name.clone();
+                    let file = &self.program.name;
                     if let Some(frames) = archive.bitmap(&name) {
                         // Shared, so a frame that drew from this slot keeps
                         // its artwork when the slot is loaded over.
-                        stage.slots(&file)[slot] =
+                        stage.slots(file)[slot] =
                             frames.into_iter().map(Rc::new).collect();
                     }
-                    let n = stage.slots(&file)[slot].len();
+                    let n = stage.slots(file)[slot].len();
                     stage.say(|| format!("shapes {slot} {n}"));
                 }
                 Op::LoadPalette(name) => {
@@ -1164,8 +1164,7 @@ impl Instance {
                 Op::FreeShapes => {
                     stage.loads += 1;
                     let slot = self.bitmap_slot;
-                    let file = self.program.name.clone();
-                    stage.slots(&file)[slot].clear();
+                    stage.slots(&self.program.name)[slot].clear();
                     stage.say(|| format!("shapes {slot} 0"));
                 }
                 Op::DrawSprite {
@@ -1177,9 +1176,9 @@ impl Instance {
                 } => {
                     let slot = (slot as usize).min(15);
                     let (x, y) = stage.at(x, y);
-                    let file = self.program.name.clone();
-                    let art = stage.slots(&file)[slot].get(frame as usize).cloned();
-                    let loaded = !stage.slots(&file)[slot].is_empty();
+                    let shapes = stage.slots(&self.program.name);
+                    let art = shapes[slot].get(frame as usize).cloned();
+                    let loaded = !shapes[slot].is_empty();
                     if let Some(art) = art {
                         // The mode back out of the mirror, which is how
                         // `seg12:0x025B` hands it to the blitter.
