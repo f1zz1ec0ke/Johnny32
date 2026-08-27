@@ -356,6 +356,46 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Every compressed leaf in the archive, named by a CRC of the first
+        // `limit` bytes it decodes to. `tools/oracle.py codec` asks
+        // `SCRANTIC.EXE`'s own decompressor the same question -- see
+        // `seg6:0x0A0D` -- and diffs.
+        "codec" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let limit: usize = args
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(usize::MAX);
+            let Ok(records) = johnny::dgds::read_archive(&data) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            for rec in records {
+                for leaf in johnny::dgds::leaves(rec.body) {
+                    if !johnny::dgds::is_compressed(&rec.name, &leaf.tag) {
+                        continue;
+                    }
+                    let Ok(out) = johnny::dgds::decompress(leaf.payload) else {
+                        println!("{} {} REFUSED", rec.name, leaf.tag_str());
+                        continue;
+                    };
+                    let n = out.len().min(limit);
+                    println!(
+                        "{} {} {} {} {} {:08x}",
+                        rec.name,
+                        leaf.tag_str(),
+                        leaf.payload[0],
+                        out.len(),
+                        n,
+                        johnny::dgds::crc32(&out[..n])
+                    );
+                }
+            }
+        }
         // Where each guarded block ends. `seg10:0x106B` answers this in the
         // engine, and it is the thing that decides which instructions a
         // refused guard swallows -- stopping short leaves the tail of the

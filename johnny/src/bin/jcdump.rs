@@ -12,22 +12,7 @@
 use johnny::{ads, dgds, ttm};
 use std::process::ExitCode;
 
-/// CRC-32 (IEEE), matching Python's `zlib.crc32`.
-fn crc32(data: &[u8]) -> u32 {
-    let mut table = [0u32; 256];
-    for (i, entry) in table.iter_mut().enumerate() {
-        let mut c = i as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
-        }
-        *entry = c;
-    }
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc = table[((crc ^ b as u32) & 0xff) as usize] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
-}
+use johnny::dgds::crc32;
 
 fn main() -> ExitCode {
     let path = std::env::args()

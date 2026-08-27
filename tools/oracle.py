@@ -15,8 +15,11 @@ Anything the interpreter cannot execute raises rather than guessing, so a gap
 shows up as a failure and not as a false pass.
 """
 
+import os
+import struct
 import subprocess
 import sys
+import zlib
 
 sys.path.insert(0, 'tools')
 import x86
@@ -763,6 +766,113 @@ def p_seqpass():
     return out
 
 
+# ---- the codecs ----------------------------------------------------------
+#
+# `RESOURCE.001`'s LZW and RLE are the last large thing this port reimplements
+# rather than drives, and for a long time the reason was that the engine's
+# decompressor pulls its input through a stream layer with a file mode, which
+# would mean standing up the C runtime's `FILE` machinery. It has a second
+# mode. `seg6:0x0185` picks between them on bit 5 of `ds:0x4030`, and with the
+# bit clear the input is a plain far memcpy from `ds:0x4040` -- so a
+# descriptor built by hand is enough, and none of the runtime has to exist.
+#
+#   ds:0x3F68[handle]            -> the descriptor
+#   seg6:0x0C92(handle)           open it compressed: run the method's init
+#                                 from the vtable at ds:0x1DC6 + method*14 + 6
+#                                 and step past the five-byte header
+#   seg6:0x0A0D(h, off, seg, n)   produce n decompressed bytes into off:seg
+#
+# The descriptor fields this needs are the source far pointer at +6, the
+# position and end at +0x0A and +0x0E, the decompressed length at +0x12, the
+# LZW work buffer at +2 (`seg6:0x0D4B` memsets 0x3AA1 bytes of it), and the
+# mode byte at +0x20 -- bit 6 for "compressed", bit 5 clear for memory, and
+# the method in the low five bits.
+
+CODEC_DESC = 0x9200      # free space in DGROUP for a stream descriptor
+CODEC_TABLE = 0x3F68     # ds:0x3F68[handle] -> descriptor
+CODEC_HANDLE = 1
+CODEC_WORK = 20          # three segments the NE does not use, 64K each
+CODEC_SRC = 21
+CODEC_DST = 22
+CODEC_BITE = 0x2000      # produced per call, so nothing has to cross 64K
+
+
+def codec_run(m, payload, usize, limit):
+    """Decompress one leaf inside the original, and hand back what it made."""
+    at = m._lin(CODEC_SRC, 0)
+    m.mem[at:at + len(payload)] = payload
+    for k in range(0, 0x24, 2):
+        m.write16(m.ds, CODEC_DESC + k, 0)
+    m.write16(m.ds, CODEC_DESC + 0x02, 0)                    # LZW work buffer
+    m.write16(m.ds, CODEC_DESC + 0x04, CODEC_WORK)
+    m.write16(m.ds, CODEC_DESC + 0x06, 0)                    # the input
+    m.write16(m.ds, CODEC_DESC + 0x08, CODEC_SRC)
+    m.write16(m.ds, CODEC_DESC + 0x0E, len(payload) & 0xFFFF)
+    m.write16(m.ds, CODEC_DESC + 0x10, len(payload) >> 16)
+    m.write16(m.ds, CODEC_DESC + 0x12, usize & 0xFFFF)
+    m.write16(m.ds, CODEC_DESC + 0x14, usize >> 16)
+    m.write8(m.ds, CODEC_DESC + 0x20, 0x40 | payload[0])
+    m.write16(m.ds, CODEC_TABLE + CODEC_HANDLE * 2, CODEC_DESC)
+    if m.call(6, 0x0C92, [CODEC_HANDLE]) == 0xFFFF:
+        raise RuntimeError('seg6:0x0C92 refused the stream')
+    want = min(usize, limit)
+    out = bytearray()
+    while len(out) < want:
+        n = min(CODEC_BITE, want - len(out))
+        got = m.call(6, 0x0A0D, [CODEC_HANDLE, 0, CODEC_DST, n])
+        if got == 0:
+            break
+        base = m._lin(CODEC_DST, 0)
+        out += m.mem[base:base + got]
+        if got < n:
+            break
+    return bytes(out)
+
+
+def codec_leaves():
+    """Every compressed leaf, in the order both sides walk the archive."""
+    import dgds
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for name, body, _ in recs:
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if dgds.is_compressed(name, path[-1]):
+                usize = struct.unpack_from('<I', payload, 1)[0]
+                yield name, path[-1], payload, usize
+
+
+def codec_limit():
+    """How much of each leaf to decode.
+
+    The whole archive is 5.2MB out and about twenty minutes of interpreter,
+    which is a fine thing to do deliberately and a poor thing to put in front
+    of every other check. The default reaches past the 9-to-10 and 10-to-11
+    bit widths on every LZW leaf -- the block-boundary rule that is the
+    easiest thing in this codec to get wrong -- and covers every RLE leaf
+    whole. `JC_DEEP=1` decodes every byte of all 180.
+    """
+    return None if os.environ.get('JC_DEEP') else 8192
+
+
+def q_codec():
+    m = fresh()
+    m.limit = 400_000_000
+    limit = codec_limit()
+    out = []
+    for name, tag, payload, usize in codec_leaves():
+        n = usize if limit is None else min(usize, limit)
+        got = codec_run(m, payload, usize, n)
+        out.append('%s %s %d %d %d %08x'
+                   % (name, tag, payload[0], usize, len(got),
+                      zlib.crc32(got) & 0xFFFFFFFF))
+    return out
+
+
+def p_codec():
+    limit = codec_limit()
+    args = ['codec'] if limit is None else ['codec', limit]
+    return port(*args)
+
+
 QUERIES = {
     'rand': (q_rand, lambda: port('rand', 256)),
     'weighted': (q_weighted, lambda: port('weighted', '10,20,30,20,10,10', 256)),
@@ -783,6 +893,7 @@ QUERIES = {
     'blocks': (q_blocks, lambda: port('blocks')),
     'seqpass': (q_seqpass, p_seqpass),
     'seqrun': (q_seqrun, p_seqrun),
+    'codec': (q_codec, p_codec),
 }
 
 

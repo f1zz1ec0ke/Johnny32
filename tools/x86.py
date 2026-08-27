@@ -91,7 +91,7 @@ class Machine:
         self._relocate(data)
         self.regs = dict(ax=0, bx=0, cx=0, dx=0, si=0, di=0, bp=0, sp=0)
         self.sregs = dict(cs=0, ds=self.ds, es=self.ds, ss=self.ds)
-        self.flags = dict(zf=0, sf=0, cf=0, of=0)
+        self.flags = dict(zf=0, sf=0, cf=0, of=0, df=0)
         self.stubs = {}
         self.hooks = {}
         self.hooked = {}
@@ -399,15 +399,61 @@ class Machine:
 
     # ---- one instruction -------------------------------------------------
 
+    def string_op(self, op, seg_override, rep):
+        """`movs`, `stos`, `lods`, `scas`, with or without a `rep` in front.
+
+        `si` walks the source in `ds` (a segment override moves it, which is
+        why one is passed in), `di` walks the destination in `es` -- never
+        overridable -- and both step by the operand size, backwards when the
+        direction flag is set. `rep` repeats while `cx` is non-zero; on the
+        two that compare, it also stops on the zero flag, `F3` while it is
+        set and `F2` while it is not.
+        """
+        w = 16 if op & 1 else 8
+        step = (2 if w == 16 else 1) * (-1 if self.flags['df'] else 1)
+        src = seg_override if seg_override is not None else self.sregs['ds']
+        dst = self.sregs['es']
+        read = self.read16 if w == 16 else self.read8
+        write = self.write16 if w == 16 else self.write8
+        get = self.get_w if w == 16 else self.get_b
+        setr = self.set_w if w == 16 else self.set_b
+        while True:
+            if rep is not None and self.regs['cx'] == 0:
+                return
+            if op in (0xA4, 0xA5):                          # movs
+                write(dst, self.regs['di'], read(src, self.regs['si']))
+                self.regs['si'] = (self.regs['si'] + step) & 0xFFFF
+                self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
+            elif op in (0xAA, 0xAB):                        # stos
+                write(dst, self.regs['di'], get(0))
+                self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
+            elif op in (0xAC, 0xAD):                        # lods
+                setr(0, read(src, self.regs['si']))
+                self.regs['si'] = (self.regs['si'] + step) & 0xFFFF
+            else:                                           # scas
+                self.sub_flags(get(0), read(dst, self.regs['di']), w)
+                self.regs['di'] = (self.regs['di'] + step) & 0xFFFF
+            if rep is None:
+                return
+            self.regs['cx'] = (self.regs['cx'] - 1) & 0xFFFF
+            if op in (0xAE, 0xAF):
+                if (rep == 0xF3) != bool(self.flags['zf']):
+                    return
+
     def step(self):
         start = self.ip
         if self.breaks:
             for fn in self.breaks.get((self.sregs['cs'], start), ()):
                 fn(self)
         seg_override = None
+        rep = None
         op = self.fetch8()
-        while op in (0x26, 0x2E, 0x36, 0x3E):
-            seg_override = self.sregs[{0x26: 'es', 0x2E: 'cs', 0x36: 'ss', 0x3E: 'ds'}[op]]
+        while op in (0x26, 0x2E, 0x36, 0x3E, 0xF2, 0xF3):
+            if op in (0xF2, 0xF3):
+                rep = op
+            else:
+                seg_override = self.sregs[{0x26: 'es', 0x2E: 'cs',
+                                           0x36: 'ss', 0x3E: 'ds'}[op]]
             op = self.fetch8()
 
         # --- mov ---------------------------------------------------------
@@ -558,15 +604,19 @@ class Machine:
             a = self.ax if w == 16 else self.get_b(0)
             self.set_flags(a & b, w, cf=0, of=0)
         elif op in (0x04, 0x05, 0x2C, 0x2D, 0x3C, 0x3D, 0x24, 0x25,
-                    0x0C, 0x0D, 0x34, 0x35):
+                    0x0C, 0x0D, 0x34, 0x35, 0x14, 0x15, 0x1C, 0x1D):
             w = 16 if op & 1 else 8
             b = self.fetch16() if w == 16 else self.fetch8()
             a = self.ax if w == 16 else self.get_b(0)
             kind = op & 0xF8
-            if kind == 0x00:
-                res = self.add_flags(a, b, w)
-            elif kind in (0x28, 0x38):
-                res = self.sub_flags(a, b, w)
+            # `adc ax, 0` and `sbb ax, 0` are how the 16-bit compiler carries
+            # the high half of a 32-bit add, so they turn up wherever a file
+            # offset is computed -- `seg6:0x043F` for one. Both have to take
+            # the carry with them.
+            if kind in (0x00, 0x10):
+                res = self.add_flags(a, b + (self.flags['cf'] if kind == 0x10 else 0), w)
+            elif kind in (0x28, 0x38, 0x18):
+                res = self.sub_flags(a, b + (self.flags['cf'] if kind == 0x18 else 0), w)
             elif kind == 0x20:
                 res = a & b
                 self.set_flags(res, w, cf=0, of=0)
@@ -642,10 +692,27 @@ class Machine:
                     v >>= 1
                 elif kind == 7:                              # sar
                     self.flags['cf'] = v & 1
-                    v = ((v ^ top) - top) >> 1 & mask if False else \
-                        ((_s16(v) if w == 16 else _s8(v)) >> 1) & mask
-                else:
-                    raise Unsupported('shift/%d at %04x' % (kind, start))
+                    v = ((_s16(v) if w == 16 else _s8(v)) >> 1) & mask
+                # The four rotates. `seg6:0x1149` uses `rcl` to carry a bit
+                # from one half of a word to the other while it unpacks a
+                # run, which is the sort of thing hand-written assembly does
+                # and compiled code never does.
+                elif kind == 0:                              # rol
+                    hi = 1 if v & top else 0
+                    v = ((v << 1) | hi) & mask
+                    self.flags['cf'] = hi
+                elif kind == 1:                              # ror
+                    lo = v & 1
+                    v = (v >> 1) | (top if lo else 0)
+                    self.flags['cf'] = lo
+                elif kind == 2:                              # rcl
+                    hi = 1 if v & top else 0
+                    v = ((v << 1) | self.flags['cf']) & mask
+                    self.flags['cf'] = hi
+                else:                                        # rcr
+                    lo = v & 1
+                    v = (v >> 1) | (top if self.flags['cf'] else 0)
+                    self.flags['cf'] = lo
             if n & 31:
                 self.set_flags(v, w)
             self.store(rm, v, w)
@@ -818,6 +885,18 @@ class Machine:
             self.flags['cf'] = 0
         elif op == 0xF9:
             self.flags['cf'] = 1
+        # --- string instructions -----------------------------------------
+        #
+        # The codecs in segment 6 are hand-written assembly and this is what
+        # they are written in: `seg6:0x110D` reads its RLE input with `lodsb`
+        # and lays runs down with `rep stosw`. Nothing else in this binary
+        # that the oracle has had to run needed them.
+        elif op in (0xA4, 0xA5, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF):
+            self.string_op(op, seg_override, rep)
+        elif op == 0xFC:                                     # cld
+            self.flags['df'] = 0
+        elif op == 0xFD:                                     # std
+            self.flags['df'] = 1
         elif op == 0xFA or op == 0xFB:                       # cli / sti
             pass
         else:

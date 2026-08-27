@@ -151,6 +151,25 @@ pub fn leaf<'a>(body: &'a [u8], tag: &[u8; 4]) -> Option<Leaf<'a>> {
 ///
 /// `VGA:` is the awkward one: inside a `.BMP` it is compressed, inside a
 /// `.PAL` the payload is the raw palette.
+/// CRC-32 (IEEE), matching Python's `zlib.crc32`. The differential test and
+/// the codec oracle both name chunks by it, so both sides have to agree on
+/// the polynomial as well as on the bytes.
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (i, entry) in table.iter_mut().enumerate() {
+        let mut c = i as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+        *entry = c;
+    }
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = table[((crc ^ b as u32) & 0xff) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
 pub fn is_compressed(record_name: &str, tag: &[u8; 4]) -> bool {
     match tag {
         b"BIN:" | b"SCR:" | b"TT3:" => true,
