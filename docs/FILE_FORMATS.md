@@ -238,7 +238,7 @@ and the pass moves on to the next rule.
 | `0x1420` / `0x1430` | join the previous condition to the next with AND / OR |
 | `0x3010` ... `0x30FF` | weighted random choice of one enclosed entry |
 | `0x2010` / `0x2015` | stop a scene (state 0) / finish it (state 5) |
-| `0x4000` / `0x4010` | move a scene in the draw order (`seg10:0x15FB`) |
+| `0x4000` / `0x4010` | move a scene in the draw order. `0x4000` is `seg10:0x15FB`, which calls `seg10:0x0F8C` and appends the record to the tail of the instance list; `0x4010` is `seg10:0x160C`, which calls `seg10:0x0EF2` and makes it the head. `seg10:0x1C35` walks head to tail, so the tail is drawn last: `0x4000` brings a scene to the front, `0x4010` sends it behind |
 | `0xF000` / `0xF200` / `0xF210` | set another sequence of this script running |
 | `0xF010` | put a sequence into state 2; an operand of -1 means this one |
 | `0xFFFF` | end of a sequence body |

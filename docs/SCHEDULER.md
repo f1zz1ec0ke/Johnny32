@@ -973,27 +973,36 @@ call `sndPlaySound` with flags 7 — `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`.
 Because `sndPlaySound` stops whatever is playing, the island only ever makes
 one noise at a time.
 
-The loader looks for twenty-five and finds twenty-three; the scripts ask for
-ids 1 to 24, so one of them is silent in the original too. `ds:0x00BC` is the
+The loader looks for twenty-five and finds twenty-three. The scripts ask for
+ids 1 to 24 and `seg4:0x0891` asks for 25 when the story gets told, so two of
+the twenty-five are silent in the original too — the engine wanted a noise
+there and the file it shipped with has not got one. `ds:0x00BC` is the
 `Sounds` switch from `SCRANTIC.INI`, and when it is off the loader does not
 even run.
 
-### The clip nobody takes off
+### The clip belongs to the instance
 
-`4004` sets a clip rectangle and nothing in the engine ever clears it. The live
-one is the globals at `ds:0x1EA3`-`ds:0x1EAA`, which is what the blitter reads
-(`seg8:0x1ADE`); `seg12:0x0F40` also writes a copy into the instance record at
-+0x20, and that copy is never read back by anything. `seg10:0x0BA6` fills it in
-with the whole screen when an instance is made, which says what was meant even
-though nothing acts on it — the same shape as `1121` writing a field only a
-dead opcode reads.
+`4004` sets a clip rectangle. The live one is the globals at
+`ds:0x1EA3`-`ds:0x1EAA`, which is what the blitter reads (`seg8:0x1ADE`), and
+`seg12:0x0F40` writes a copy into the instance record at +0x20 as well.
 
-Leaving it set costs the original almost nothing, because it keeps its work
-page between frames: a stale clip only limits where *new* drawing lands, and
-everything already on the page stays. This port repaints the backdrop every
-tick, so a stale clip means everything outside it stops being drawn at all —
-and thirty-seven scenes in a twenty-six minute run were ending with one set,
-which every scene after inherited. The port clears it when a scene starts.
+That copy is not decoration, which is what this said before. `seg10:0x1C81`
+reads seven fields back out of the record into those globals *before every
+frame that instance runs*: the two drawing colours at +0x1E and +0x1F, then
+the clip flag and the four rectangle words at +0x20 through +0x27.
+`seg12:0x06A9` puts `2002`'s colours in the record the same way, and
+`seg10:0x0B6E` fills both colours in with 15 when the record is made, so an
+unset colour is white rather than 0.
+
+So the clip and the colours belong to the scene that set them, however the
+scenes on screen interleave, and `seg10:0x1E2F` puts the globals back to the
+whole screen once the runner has walked the list — nothing drawn outside the
+runner is ever clipped. A port with one clip on the screen instead of one per
+instance gets this wrong in two ways: a scene inherits the clip of whatever
+drew before it in the same tick, and — because this port repaints from nothing
+every tick rather than keeping a work page — everything outside that rectangle
+stops being drawn at all. In `MARY.ADS` sequence 5 that left Johnny's raft as
+three red pixels on the sand.
 
 ## Still open
 
@@ -1005,11 +1014,12 @@ which every scene after inherited. The port clears it when a scene starts.
   colour that is not there". Showing them as what is behind the transparency
   key — black, which is index 5 in this palette — was tried and turns the near
   water to mud, so the port still shows them as water.
-* ADS `0x4000`: `seg10:0x15FB` unlinks a scene from the instance list and
-  puts it back somewhere else, so it and `0x4010` are "in front of" and
-  "behind". Which is which is not read out. Only `0x4000` is used, four times,
-  in `BUILDING.ADS`, always on the same scene.
-* The settings. `SCRANTIC.INI` keeps `Background`, `Clouds`, `Waves`, `Sounds`,
-  `Password` and `StartTime`, and the first four are switches the drawing code
-  already reads (`ds:0x00B6`-`ds:0x00BC`). The port has environment variables
-  and a message box where the original has three dialogs.
+* The blitter. `seg8:0x0AE4` is where a sprite lands, three thunks below the
+  opcode handler, and it carries two things nothing here has been able to
+  reach: a scale pair (`ds:0x2E76` against the shape's own `[si+1]`) that
+  halves or doubles a shape, and a choice of three origin pairs in the shape
+  header selected by the mirror bits — `[si+0x0A]`/`[si+0x0C]` when bit 1 is
+  set, (0,0) when bit 0 is, `[si+2]`/`[si+4]` otherwise, and back to
+  `[si+2]`/`[si+4]` if the chosen pair holds a zero. The art appears to be
+  authored at one scale with zero origins, so neither is reachable, but that
+  is an argument from the pictures coming out right.

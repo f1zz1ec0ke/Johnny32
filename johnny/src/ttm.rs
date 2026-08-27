@@ -73,9 +73,11 @@ pub enum Op {
     SetBackground(u16),
     /// Frames to wait at the next `EndFrame`.
     SetDelay(u16),
-    /// Marks the start of a numbered scene. The original jumps straight to its
-    /// "done" label for this, so it is a marker for the caller, not an action.
-    /// A scene marker. Both `1101` and `1111` name a frame -- `seg12:0x13AA`
+    /// Marks the start of a numbered scene, and does nothing when it is
+    /// reached: `seg12:0x1056` is the "done" label, and `1101`, `1111` and
+    /// `5005` all dispatch straight to it.
+    ///
+    /// Both `1101` and `1111` name a frame -- `seg12:0x13AA`
     /// looks a scene number up by walking the frame table and testing the
     /// first opcode of each frame against either -- but only `1111` gets an
     /// instance record at load time (`seg11:0x0645`), and a scene with no
@@ -219,6 +221,15 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         0xF02F => Op::LoadBitmap(text.unwrap_or_default()),
         0xF05F => Op::LoadPalette(text.unwrap_or_default()),
         0x1051 => Op::SelectBitmapSlot(a(0) as u16),
+        // In the engine these two are a slot *number* on the instance
+        // (`seg12:0x075C` and `seg12:0x0952` write +0x14 and +0x12), and the
+        // palette is applied by `1061`, not by the `F05F` that loads one --
+        // `seg12:0x099F` loads into whichever slot `1061` last chose and only
+        // records the pointer. This port has no slots and applies at load,
+        // which can only differ if a script loads a second palette or reaches
+        // back for an earlier one. `RESOURCE.001` holds exactly one palette
+        // and each of the 41 scripts loads that one, once, in its header;
+        // `verify.py` checks it.
         0x1061 => Op::SelectPaletteSlot(a(0) as u16),
         0x1121 => Op::SetBackground(a(0) as u16),
         0x1021 => Op::SetDelay(a(0) as u16),

@@ -950,6 +950,15 @@ impl Sequencer {
             match op {
                 // The end of this sequence's body. On to the next one that
                 // wants a pass, and when there is none the pass is over.
+                //
+                // Only `End` is reached. `seg10:0x195D` stops the interpreter
+                // at an `FFFF` and nowhere else -- a sequence header word
+                // dispatches to `seg10:0x1558`, which steps over it and reads
+                // on into the next sequence's body -- and every header in the
+                // ten shipped scripts has an `FFFF` in front of it, which
+                // `verify.py` checks. Ending the pass on one is what should
+                // happen if a script ever had a header the interpreter could
+                // walk into.
                 Op::Sequence(_) | Op::End => {
                     if self.next_sequence() {
                         continue;

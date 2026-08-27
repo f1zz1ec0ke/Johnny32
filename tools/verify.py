@@ -328,6 +328,50 @@ def _frames():
     return markers, late, first
 
 
+def _palettes():
+    """There is one palette in the archive and every script loads that one.
+
+    The engine keeps a palette per slot: `F05F` loads into the slot `1061`
+    last selected (`seg12:0x099F`) and records the pointer, and it is `1061`
+    that *applies* one (`seg12:0x098A`, when the display is 16 colours). The
+    port has no slots and applies at load. The two can only differ if a script
+    ever loads a second palette or reaches back for an earlier one, so this
+    counts what the data actually holds.
+    """
+    in_archive = [n for n, _, _ in records if n.endswith('.PAL')]
+    loaded, files = set(), 0
+    for name, body, _ in records:
+        if not name.endswith('.TTM'):
+            continue
+        code = _leaf(body, 'TT3:')
+        if not code:
+            continue
+        files += 1
+        p, seen = 0, 0
+        while p + 2 <= len(code):
+            op = int.from_bytes(code[p:p + 2], 'little')
+            n = op & 0x0F
+            if n == 0x0F:
+                e = code.find(b'\x00', p + 2)
+                if e < 0:
+                    break
+                if op == 0xF05F:
+                    loaded.add(code[p + 2:e].decode('latin-1'))
+                    seen += 1
+                size = (e + 1) - p
+                p += size + (size & 1)
+                continue
+            p += 2 + n * 2
+        if seen != 1:
+            loaded.add('%s loads %d palettes' % (name, seen))
+    bad = []
+    if len(in_archive) != 1:
+        bad.append('the archive holds %d palettes: %s' % (len(in_archive), in_archive))
+    if loaded != set(in_archive):
+        bad.append('the scripts load %s' % sorted(loaded))
+    return in_archive, files, bad
+
+
 def _references():
     """Does every scene the scripts name actually exist?
 
@@ -466,6 +510,14 @@ if _bad_headers:
 else:
     headers_note = '%d sequence headers, every one after an FFFF' % _headers
 
+_pals, _pal_files, _bad_pals = _palettes()
+if _bad_pals:
+    failures.extend('palettes: ' + line for line in _bad_pals[:5])
+    pal_note = 'not the one palette this port assumes'
+else:
+    pal_note = ('%s, and each of the %d scripts loads it once and nothing else'
+                % (_pals[0], _pal_files))
+
 _markers, _bad_frames, _headless = _frames()
 if _bad_frames:
     failures.extend('frames: ' + line for line in _bad_frames[:10])
@@ -494,6 +546,7 @@ print('tables       %s' % tables_note)
 print('references   %s' % refs_note)
 print('frames       %s' % frames_note)
 print('sequences    %s' % headers_note)
+print('palette      %s' % pal_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))
