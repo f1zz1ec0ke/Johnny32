@@ -194,6 +194,27 @@ terminator makes a refused guard stop swallowing its block halfway, and the
 rest of it then runs as though it were the next rule — several animations
 starting at the moment one ends.
 
+`seqrun` came later, and it is `seqpass`'s driver: `seg10:0x1B6B` walking
+every sequence in id order, pass after pass, with the world moved on between
+them by the same rule on both sides. It found the same symptom from the other
+end. The engine's interpreter is handed a pointer and a sequence, so a pass in
+which nothing wants to run interprets nothing; this port kept the pointer in a
+field, and `begin_pass` had no way to tell `next_action` that it had found
+nobody — so a finished scene's sequence went on reading, one instruction per
+pass, into the next sequence's body, and started its animations. `VISITOR.ADS`
+sequence 4 was drawing three Johnnys, two of them walking on the sea.
+
+The same reading settled a whole class of these. Several things the port kept
+on the screen belong to the **instance** in the engine, restored from its
+record before every frame it runs (`seg10:0x1C81`): the clip rectangle, the
+two drawing colours. Several things the port worked out when a scene started
+are fixed when a *file loads*: an instance record per `1111` marker,
+appended to one list, and that list is the draw order (`seg11:0x0645`,
+`seg10:0x1C35`). With up to seven scenes on screen at once, both show. Johnny
+was standing behind his own backdrop in `STAND.ADS`, and his raft in
+`MARY.ADS` was three red pixels on the sand — clipped out by a rectangle
+another scene had set.
+
 Two of these need more of the interpreter than a function call. The walk
 driver picks a route and then goes on to pivot Johnny and animate him, so
 `tools/x86.py` grew the ability to **answer a call to one of the program's own
@@ -246,7 +267,9 @@ twenty bitmaps are 634 frames and three fifths of every draw in the data.
 
 Settings live in `johnny.ini` beside the screensaver, in the section and under
 the key names the original used in `SCRANTIC.INI` — so somebody's 1992 file
-works as it is.
+works as it is. `Speed` is the one key that is not one of the original's
+eleven; everything else here is read and written by `seg2:0x0C90` and the
+`WritePrivateProfileString` calls after it.
 
 ```ini
 [ScreenSaver.ScreenAntics]

@@ -922,7 +922,7 @@ either implemented or a no-op the disassembly proves is a no-op:
 | `2002` `4004` | 217, 52 | colours, clip |
 | `A054` `A064` `B606` | 1, 1, 6 | region save (nothing to do) and restore |
 | `C051` | 535 | sound, see below |
-| `1101` `1111` `5005` | 5, 611, 0 | scene markers. `seg12` sends all three to its "done" label |
+| `1101` `1111` `5005` | 5, 611, 0 | scene markers. `seg12` sends all three to its "done" label. Only `1111` gets an instance record when the file loads (`seg11:0x0645`), and a scene without one cannot be played at all — `seg10:0x0DB6` looks one up and returns. `SASKDATE.TTM` holds the only five `1101`s; nothing plays them and only gotos inside that file reach them |
 | `4214` | 60 | `seg12:0x0860` reaches "done" whichever way its test goes |
 | `A601` | 6814 | so does `seg12:0x02D8`, and it is the most-used opcode in the data after the sprite draw |
 | `1121` | 61 | writes `[bx+0x16]` on the instance, which only opcode `00C0` reads, and nothing uses `00C0` |
