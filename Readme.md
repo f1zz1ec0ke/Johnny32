@@ -58,7 +58,7 @@ python3 tools/verify.py
 
 Or check everything at once — the tests, the decoder, the 65 scenes, three
 long soaks of the whole island, every story day and holiday and both halves of
-the clock, what the scenes actually draw, and the twenty questions the
+the clock, what the scenes actually draw, and the twenty-one questions the
 oracle puts to the 1992 binary:
 
 ```sh
@@ -172,6 +172,7 @@ python3 tools/oracle.py
   backdrop     64 answers, all identical
   holiday     366 answers, all identical
   codec       181 answers, all identical
+  ttm       51475 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
@@ -329,17 +330,31 @@ exist. `tools/oracle.py codec` builds one and drives the original's own LZW
 and RLE over every compressed leaf in the archive. See the query itself for
 the three entry points.
 
-That leaves two, and it is worth being plain about them.
+Not the TTM interpreter either. That note said `seg12:0x040C` would run a
+script but that stubbing the pager and the blitter changed the control flow
+enough that it stopped walking — which was true of stubbing them one at a
+time. Stating the *boundary* instead works: `x86.Machine.wall` answers every
+call that leaves segments 1 and 12 while the interpreter is running, so the
+blitter, the pager, the resource loader and the sound never run and the
+interpreter never notices they are missing. Standing a loaded TTM up in front
+of it is four pointers and a frame table, and `seg11:0x04D6` will build the
+frame table itself — so what a frame even *is* comes from the binary.
 
-**The TTM interpreter's own execution.** `seg12:0x040C` will run a script in
-the interpreter — it decodes the header of `MJFIRE.TTM` correctly — but every
-frame calls out to the pager and the blitter, and stubbing those changes the
-control flow enough that it stops walking. What stands in for it: every one of
-the 6,631 frames in the data disassembles end to end, the 65 scenes all run to
-completion, the repaint check is clean on all of them, and the pieces of the
-interpreter that *are* pure data — the instruction lengths, the pre-shift
-tables, both dispatch tables read out of the segment opcode by opcode, the
-opcode census — have been read out and compared.
+`tools/oracle.py ttm` drives it over every frame of every script and compares
+three things per frame: the instructions, as the dispatcher at `seg12:0x0620`
+sees them and with the operands as the handler receives them; every drawing
+decision, with the arguments the handler worked out; and what the frame left
+on the instance record afterwards — palette and bitmap slot, colours, clip,
+delay, end flag and goto target. 41 files, 6,631 frames, 28,150 instructions
+and 16,652 draws, and all 51,475 lines match.
+
+Sprites are in that number because the one thing the wall answers with more
+than zero is the shape loader: `seg6:0x17FA` gets back a table of the same
+length the real bitmap has, so `seg12:0x025B` finds artwork exactly where the
+port does and the two agree about which of the 15,368 sprite draws happen at
+all. What it found is below.
+
+That leaves one, and it is worth being plain about it.
 
 **The blitter.** `seg8:0x0AE4` is where a sprite lands, three thunks below the
 opcode handler — and the pixels are not Sierra's. It builds device contexts
@@ -363,11 +378,47 @@ in the data segment is for. This port flips at draw time instead, which is why
 `2012` has nothing to do here — and it is why only mirror modes 0 and 2 appear
 in 15,000 sprite draws.
 
+### What driving the interpreter found
+
+Three things, all of them in the port:
+
+* **Bitmap slots are per file, not global.** `seg12:0x0773` reads a slot out
+  of the *loaded TTM* record at `ds:0x2638 + 0x0C + slot*2`, and
+  `seg10:0x1C71` selects that record from the running instance's own file id
+  before every frame. So two scenes of one `.TTM` share their sixteen slots —
+  which is why a file can have several scenes live at once without reloading
+  anything — and two scenes from *different* files cannot tread on each
+  other's, however many are on screen and whatever numbers they pick. This
+  port had one set of sixteen for everything. `GJVIS5.TTM` is what showed it:
+  it draws from a slot it never loads, and with shared slots the port drew
+  whatever the file before it had left there.
+* **`A404` draws a circle, and the width operand is read by nobody.**
+  `seg12:0x01C9` turns the four operands into three before anything is drawn —
+  a radius of `h >> 1`, a centre at `(x + r, y + r)` — and `seg9:0x0688` hands
+  GDI `Ellipse(cx - r, cy - r, cx + r, cy + r)`, whose right and bottom edges
+  are excluded. All 437 in the data are square, so the width has never
+  mattered; the far edge being one pixel out did.
+* **`1301` *is* `C051`.** `seg12:0x0467` rewrites it, and `1311` into `C061`,
+  before it looks at anything else. Neither spelling appears in
+  `RESOURCE.001` — all 535 sound cues are written `C051` — but the rewrite is
+  in the interpreter, so it is in the decoder now.
+
+And one thing that is not in the port. `seg12:0x0281` indexes a shape table by
+the opcode's frame operand and does not bounds-check it. Eleven draws in the
+shipped scripts ask for a frame their bitmap does not have — `GJNAT1.TTM`
+wants frame 27 of a 26-frame sheet, `SMDATE.TTM` frame 31 of 24 — and what the
+1992 code reads there is whatever the heap holds next. Every table in the
+harness is padded past the largest index any script asks for, so the read
+lands on a zero and the handler takes its no-shape path: the one answer that
+is not garbage, and what the port does. They are the `blank` lines in the
+query's output.
+
 ## Checking the port against itself, where the binary cannot reach
 
-The oracle covers the deciding: which scene, when, where. It cannot reach the
-drawing, because getting the archive open inside the interpreter means running
-the Borland C runtime's startup. That half needs an invariant of its own.
+The oracle covers the deciding and now the drawing decisions too. What it
+still cannot reach is the pixels: the blitter is GDI's, and putting a frame
+*back* on screen is this port's own problem — the engine never has to. That
+half needs an invariant of its own.
 
 The engine leaves what a frame drew on the screen until something paints over
 it, so it runs each frame exactly once. This port instead repaints the backdrop
@@ -391,9 +442,9 @@ JC_CHECK=1 JC_NOWRITE=1 cargo run --release --manifest-path johnny/Cargo.toml \
 ```
 
 The first thing it said was that thirty-seven of the sixty-five scenes could
-not be repainted. Every scene on screen shares one set of sixteen bitmap slots,
-and the scripts load and free those from inside frames rather than from a
-header — sixty-six frames in the data load or free artwork *and* draw with it.
+not be repainted. Every scene of one `.TTM` file shares that file's sixteen
+bitmap slots, and the scripts load and free those from inside frames rather
+than from a header — sixty-six frames in the data load or free artwork *and* draw with it.
 Re-running such a frame reads a slot that now holds something else, so it
 paints the wrong sprite or none at all for as long as the frame is held. So an
 instance now keeps what its frame drew rather than where it drew it from: a
@@ -561,8 +612,8 @@ tools/verify.py             the archive, the scripts, the generated tables,
                             and the facts the port's simplifications rest on
 tools/dgds_digest.py        canonical digest, for differential testing
 tools/difftest.sh           run the Rust decoder against the Python reference
-tools/oracle.py             nineteen questions put to the 1992 binary and to
-                            the port, and diffed
+tools/oracle.py             twenty-one questions put to the 1992 binary and
+                            to the port, and diffed
 tools/scenes.py             the 65 scenes, derived from the scene table
 tools/sweep.py              play all of them with the repaint check on
 tools/framecheck.py         look at what they actually draw

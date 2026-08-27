@@ -409,11 +409,17 @@ fn main() -> ExitCode {
         // 1992 interpreter itself -- over the same frames with nothing
         // outside segment 12 allowed to run, and diffs.
         //
-        // Nothing is loaded on either side. The engine's resource layer is
-        // behind the wall and answers every load with "not there", so its
-        // bitmap slots stay empty; this runs against an empty archive for the
-        // same reason, so the two agree about what artwork exists rather than
-        // one of them having some.
+        // Two streams are compared per frame. The instructions come off
+        // `walk`, which is what the port's own decoder runs on. The drawing
+        // decisions come out of `run_frame` itself, through `Stage::trace`,
+        // so what is diffed is the code that ships rather than a second
+        // reading of it.
+        //
+        // The engine's blitter, pager and screen are behind the wall, but its
+        // *slots* are not: the harness answers `seg6:0x17FA` with a shape
+        // table of the same length the real bitmap has, so the sprite handler
+        // at `seg12:0x025B` finds artwork exactly where this does and the two
+        // agree about which of the 15,368 sprite draws happen at all.
         "ttm" => {
             let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
             let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
@@ -424,12 +430,14 @@ fn main() -> ExitCode {
                 eprintln!("archive");
                 return ExitCode::FAILURE;
             };
-            let Ok(nothing) = johnny::dgds::Archive::load(&[], None) else {
-                eprintln!("empty archive");
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
                 return ExitCode::FAILURE;
             };
             let (w, h) = (640i32, 480i32);
             let (mut files, mut frames, mut instrs) = (0usize, 0usize, 0usize);
+            let mut draws = 0usize;
             // One stage for the whole run, because the engine has one: its
             // generator, its colours and its screen are globals that no
             // amount of loading a new script puts back. Only the instance
@@ -440,6 +448,7 @@ fn main() -> ExitCode {
             // `Rng::new(0)` is, as the `rand` query has already had out of
             // the binary. Both sides then consume in lockstep.
             stage.rng = Rng::new(0);
+            stage.trace = Some(Vec::new());
             for rec in records {
                 if !rec.name.ends_with(".TTM") {
                     continue;
@@ -459,7 +468,11 @@ fn main() -> ExitCode {
                         _ => None,
                     })
                     .collect();
-                let program = std::rc::Rc::new(johnny::ttm::Program { ops, scenes });
+                let program = std::rc::Rc::new(johnny::ttm::Program {
+                    name: rec.name.clone(),
+                    ops,
+                    scenes,
+                });
                 let starts = program.frame_starts();
                 let mut inst = johnny::ttm::Instance::new(program.clone());
                 files += 1;
@@ -483,13 +496,20 @@ fn main() -> ExitCode {
                         i += 1;
                     }
                     inst.pc = start;
-                    inst.run_frame(&mut stage, &nothing);
+                    if let Some(t) = &mut stage.trace {
+                        t.clear();
+                    }
+                    inst.run_frame(&mut stage, &archive);
+                    for line in stage.trace.iter().flatten() {
+                        draws += 1;
+                        println!("{} {k} {line}", rec.name);
+                    }
                     frames += 1;
                     println!("{} {k} = {}", rec.name, inst.record(w, h));
                 }
             }
             // Covered, as a line both sides have to agree on.
-            println!("total {files} files {frames} frames {instrs} instructions");
+            println!("total {files} files {frames} frames {instrs} instructions {draws} draws");
         }
         // Where each guarded block ends. `seg10:0x106B` answers this in the
         // engine, and it is the thing that decides which instructions a

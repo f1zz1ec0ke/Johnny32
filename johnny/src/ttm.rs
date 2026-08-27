@@ -375,8 +375,8 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
 /// every tick and so has to put every held frame back on top of it -- and
 /// re-running the frame's instructions is *not* the same thing.
 ///
-/// One set of bitmap slots is shared by every scene on screen, and slots are
-/// loaded and freed from inside frames rather than from a header: 263
+/// A file's bitmap slots are shared by every scene of it on screen, and slots
+/// are loaded and freed from inside frames rather than from a header: 263
 /// `LOAD_BITMAP`s and 190 `FREE_SHAPES` in the shipped scripts, all of them
 /// inside scenes, and sixty-six frames that load or free artwork *and* draw
 /// with it. By the time such a frame is painted again the slot it drew from
@@ -417,11 +417,12 @@ enum Mark {
         colour: u8,
         filled: bool,
     },
-    Ellipse {
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
+    /// `seg12:0x01C9` turns the opcode's rectangle into a centre and a
+    /// radius before anything is drawn, so that is what is kept.
+    Circle {
+        cx: i32,
+        cy: i32,
+        r: i32,
         colour: u8,
         filled: bool,
     },
@@ -436,15 +437,19 @@ enum Mark {
     },
 }
 
-/// The resources a set of concurrently running scenes share: the loaded
-/// bitmap slots, the palette, the background and the surface they paint on.
+/// What a set of concurrently running scenes share: the palette, the
+/// background, the surface they paint on -- and the bitmap slots, sixteen per
+/// loaded `.TTM` file.
 ///
-/// The original keeps these per ADS context rather than per scene — the
-/// instance record carries only a cursor and some render state, and the
-/// slots are common. That is why one `.TTM` file can have several of its
-/// scenes live at once without reloading anything.
+/// The slots are not global. `seg12:0x0773` reads one out of the loaded-TTM
+/// record at `ds:0x2638 + 0x0C + slot*2`, and `seg10:0x1C71` selects that
+/// record from the running instance's own file id before every frame. So two
+/// scenes of one file share their slots -- which is why a file can have
+/// several scenes live at once without reloading anything -- and two scenes
+/// from *different* files cannot tread on each other's, however many of them
+/// are on screen and whatever numbers they pick.
 pub struct Stage {
-    slots: Vec<Vec<Rc<Frame>>>,
+    slots: std::collections::HashMap<String, Vec<Vec<Rc<Frame>>>>,
     background: Option<Frame>,
     /// Bumped every time the background is replaced. The director watches it
     /// to know whether the island it composed is still the one on show, or
@@ -473,6 +478,11 @@ pub struct Stage {
     /// reload that happens to produce byte-identical artwork, which comparing
     /// the artwork would not.
     pub loads: u64,
+    /// When this is set, every drawing decision a frame makes is appended
+    /// here in the order the engine's own handlers would have made the same
+    /// calls -- see the `ttm` oracle query, which is the only thing that
+    /// turns it on. Nothing else in the port reads it.
+    pub trace: Option<Vec<String>>,
     /// Where the island is standing, added to every drawing opcode.
     ///
     /// `seg12:0x05B9` shifts an opcode's first coordinate pair by
@@ -490,7 +500,7 @@ pub struct Stage {
 impl Default for Stage {
     fn default() -> Self {
         Stage {
-            slots: (0..16).map(|_| Vec::new()).collect(),
+            slots: std::collections::HashMap::new(),
             background: None,
             background_gen: 0,
             last_screen: None,
@@ -502,6 +512,7 @@ impl Default for Stage {
             todo_seen: Default::default(),
             sounds: Vec::new(),
             loads: 0,
+            trace: None,
             draw_offset: (0, 0),
         }
     }
@@ -510,6 +521,26 @@ impl Default for Stage {
 impl Stage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many files have bitmap slots of their own, for the tests.
+    pub fn slot_sets(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// One file's sixteen bitmap slots, made on first use.
+    fn slots(&mut self, file: &str) -> &mut Vec<Vec<Rc<Frame>>> {
+        self.slots
+            .entry(file.to_string())
+            .or_insert_with(|| (0..16).map(|_| Vec::new()).collect())
+    }
+
+    /// Note a drawing decision, when anything is listening. The line is not
+    /// built at all when nothing is.
+    fn say(&mut self, f: impl FnOnce() -> String) {
+        if let Some(t) = &mut self.trace {
+            t.push(f());
+        }
     }
 
     /// A drawing opcode's coordinates, once the island has moved.
@@ -629,8 +660,8 @@ impl Stage {
             Mark::Rect { x, y, w, h, colour, filled } => {
                 self.surface.draw_rect(*x, *y, *w, *h, *colour, *filled)
             }
-            Mark::Ellipse { x, y, w, h, colour, filled } => {
-                self.surface.draw_ellipse(*x, *y, *w, *h, *colour, *filled)
+            Mark::Circle { cx, cy, r, colour, filled } => {
+                self.surface.draw_circle(*cx, *cy, *r, *colour, *filled)
             }
             Mark::Restore { x, y, w, h } => {
                 self.surface.clip = None;
@@ -706,6 +737,13 @@ impl Untouched {
 
 /// A decoded `.TTM` program. Shared by every instance of the same file.
 pub struct Program {
+    /// The archive record this came from. It is the key the bitmap slots
+    /// hang off: `seg12:0x0773` reads a slot out of the *loaded TTM* record
+    /// at `ds:0x2638`, not out of anything global, and `seg10:0x1C71`
+    /// selects that record from the instance's own file id before every
+    /// frame -- so two files running at once cannot tread on each other's
+    /// slots, and two scenes of one file share them.
+    pub name: String,
     pub ops: Vec<Op>,
     /// The scenes that get an instance record when this file loads, in the
     /// order their `1111` markers appear in it.
@@ -732,7 +770,11 @@ impl Program {
                 _ => None,
             })
             .collect();
-        Some(Program { ops, scenes })
+        Some(Program {
+            name: name.to_string(),
+            ops,
+            scenes,
+        })
     }
 
     /// A program with nothing in it, for an instance of a scene whose TTM is
@@ -740,6 +782,7 @@ impl Program {
     /// loaded, so the scene cannot be run -- and `seg10:0x1DBA` acts on it.
     pub fn empty() -> Program {
         Program {
+            name: String::new(),
             ops: Vec::new(),
             scenes: Vec::new(),
         }
@@ -1027,12 +1070,16 @@ impl Instance {
                 }
                 Op::LoadBitmap(name) => {
                     stage.loads += 1;
+                    let slot = self.bitmap_slot;
+                    let file = self.program.name.clone();
                     if let Some(frames) = archive.bitmap(&name) {
                         // Shared, so a frame that drew from this slot keeps
                         // its artwork when the slot is loaded over.
-                        stage.slots[self.bitmap_slot] =
+                        stage.slots(&file)[slot] =
                             frames.into_iter().map(Rc::new).collect();
                     }
+                    let n = stage.slots(&file)[slot].len();
+                    stage.say(|| format!("shapes {slot} {n}"));
                 }
                 Op::LoadPalette(name) => {
                     stage.loads += 1;
@@ -1054,7 +1101,9 @@ impl Instance {
                 }
                 Op::DrawPixel { x, y } => {
                     let (x, y) = stage.at(x, y);
-                    self.mark(stage, Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: stage.fg });
+                    let fg = stage.fg;
+                    stage.say(|| format!("pixel {x} {y} {fg}"));
+                    self.mark(stage, Mark::Line { x1: x, y1: y, x2: x, y2: y, colour: fg });
                 }
                 Op::SetColors { fg, bg } => {
                     // `seg12:0x06A9` writes both: the instance keeps them,
@@ -1077,10 +1126,14 @@ impl Instance {
                 Op::DrawLine { x1, y1, x2, y2 } => {
                     let (x1, y1) = stage.at(x1, y1);
                     let (x2, y2) = stage.at(x2, y2);
-                    self.mark(stage, Mark::Line { x1, y1, x2, y2, colour: stage.fg });
+                    let fg = stage.fg;
+                    stage.say(|| format!("line {x1} {y1} {x2} {y2} {fg}"));
+                    self.mark(stage, Mark::Line { x1, y1, x2, y2, colour: fg });
                 }
                 Op::DrawRect { x, y, w, h, filled } => {
                     let (x, y) = stage.at(x, y);
+                    let fg = stage.fg;
+                    stage.say(|| format!("rect {x} {y} {w} {h} {fg} {}", filled as u8));
                     let mark = Mark::Rect {
                         x,
                         y,
@@ -1091,13 +1144,18 @@ impl Instance {
                     };
                     self.mark(stage, mark);
                 }
-                Op::DrawEllipse { x, y, w, h, filled } => {
+                Op::DrawEllipse { x, y, w: _, h, filled } => {
+                    // `seg12:0x01C9`: a radius of `h >> 1` and a centre at
+                    // `(x + r, y + r)`. The width operand is read by nobody.
                     let (x, y) = stage.at(x, y);
-                    let mark = Mark::Ellipse {
-                        x,
-                        y,
-                        w: w as i32,
-                        h: h as i32,
+                    let r = (h >> 1) as i32;
+                    let (cx, cy) = (x + r, y + r);
+                    let fg = stage.fg;
+                    stage.say(|| format!("circle {r} {cx} {cy} {fg} {}", filled as u8));
+                    let mark = Mark::Circle {
+                        cx,
+                        cy,
+                        r,
                         colour: stage.fg,
                         filled,
                     };
@@ -1105,7 +1163,10 @@ impl Instance {
                 }
                 Op::FreeShapes => {
                     stage.loads += 1;
-                    stage.slots[self.bitmap_slot].clear();
+                    let slot = self.bitmap_slot;
+                    let file = self.program.name.clone();
+                    stage.slots(&file)[slot].clear();
+                    stage.say(|| format!("shapes {slot} 0"));
                 }
                 Op::DrawSprite {
                     x,
@@ -1116,8 +1177,21 @@ impl Instance {
                 } => {
                     let slot = (slot as usize).min(15);
                     let (x, y) = stage.at(x, y);
-                    if let Some(art) = stage.slots[slot].get(frame as usize).cloned() {
+                    let file = self.program.name.clone();
+                    let art = stage.slots(&file)[slot].get(frame as usize).cloned();
+                    let loaded = !stage.slots(&file)[slot].is_empty();
+                    if let Some(art) = art {
+                        // The mode back out of the mirror, which is how
+                        // `seg12:0x025B` hands it to the blitter.
+                        let mode = (mirror.x as u16) << 1 | mirror.y as u16;
+                        stage.say(|| format!("sprite {slot} {frame} {x} {y} {mode}"));
                         self.mark(stage, Mark::Sprite { art, x, y, mirror });
+                    } else if loaded {
+                        // A frame the loaded bitmap does not have. Eleven
+                        // draws in the shipped scripts ask for one;
+                        // `seg12:0x0281` does not bounds-check, so what the
+                        // engine reads is whatever is past the table.
+                        stage.say(|| format!("blank {slot} {frame}"));
                     }
                 }
                 Op::GotoFrame(n) => self.pending_goto = Some(n),
@@ -1126,6 +1200,7 @@ impl Instance {
                 // `seg5:0x00BA`: one noise at a time, since `sndPlaySound`
                 // replaces whatever is already going.
                 Op::PlaySound(id) => {
+                    stage.say(|| format!("sound {id}"));
                     stage.sounds.push(id);
                     if stage.sounds.len() > 8 {
                         stage.sounds.remove(0);
@@ -1136,7 +1211,15 @@ impl Instance {
                 // silently skipped so they stay visible.
                 // The record half. Nothing to do: this port repaints the
                 // whole background every tick, so what it saves is never lost.
-                Op::RegionOp { opcode: 0xA054, .. } => {}
+                // It is still subject to the same guard as the restore half --
+                // `seg12:0x0318` is in front of the whole family -- which is
+                // the only part of it the `ttm` oracle can see.
+                Op::RegionOp { opcode: 0xA054, x, y, w, h } => {
+                    let (x, y) = stage.at(x, y);
+                    if fits(stage, x, y, w, h) {
+                        stage.say(|| format!("region A054 {x} {y} {w} {h}"));
+                    }
+                }
                 // The restore half. Put that rectangle of the backdrop back,
                 // the same as `B606`.
                 Op::RegionOp {
@@ -1154,6 +1237,7 @@ impl Instance {
                     // rectangle off the right-hand edge, so this has to be
                     // asked after the shift, not before it.
                     if fits(stage, x, y, w, h) {
+                        stage.say(|| format!("region A064 {x} {y} {w} {h}"));
                         let mark = Mark::Restore { x, y, w: w as i32, h: h as i32 };
                         self.mark(stage, mark);
                     }
@@ -1172,6 +1256,7 @@ impl Instance {
                     to,
                 } => {
                     if from == 2 && to == 1 {
+                        stage.say(|| format!("copy {x} {y} {w} {h}"));
                         let mark = Mark::Restore {
                             x: x as i32,
                             y: y as i32,

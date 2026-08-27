@@ -251,30 +251,38 @@ impl Surface {
     }
 
     /// Draw an ellipse in a bounding box. TTM `A404` fills, `A424` outlines.
-    pub fn draw_ellipse(&mut self, x: i32, y: i32, w: i32, h: i32, index: u8, filled: bool) {
-        if w <= 0 || h <= 0 {
+    /// A circle, centre and radius, the way the engine asks for one.
+    ///
+    /// `seg12:0x01C9` turns the opcode's four operands into three: a radius
+    /// of `h >> 1`, and a centre at `(x + r, y + r)`. The width operand is
+    /// read by nobody -- all 437 in `RESOURCE.001` are square, so this has
+    /// never shown, but it is the rule. `seg9:0x0688` then hands GDI
+    /// `Ellipse(cx - r, cy - r, cx + r, cy + r)`, whose right and bottom
+    /// edges are excluded, so what lands on screen is the 2r-by-2r box
+    /// `[cx - r, cx + r - 1]`.
+    pub fn draw_circle(&mut self, cx: i32, cy: i32, r: i32, index: u8, filled: bool) {
+        if r <= 0 {
             return;
         }
-        let (rx, ry) = (w / 2, h / 2);
-        let (cx, cy) = (x + rx, y + ry);
-        if rx == 0 || ry == 0 {
-            self.draw_line(x, y, x + w - 1, y + h - 1, index);
-            return;
-        }
-        for dy in -ry..=ry {
-            // Half-width of the ellipse at this row.
-            let t = 1.0 - (dy as f64 / ry as f64).powi(2);
+        // The box is even-sided, so the true centre falls between two
+        // pixels: half a pixel left of `cx` and half a pixel above `cy`.
+        let half = r as f64 - 0.5;
+        for row in 0..2 * r {
+            let dy = (cy - r + row) as f64 - (cy as f64 - 0.5);
+            let t = 1.0 - (dy / half).powi(2);
             if t < 0.0 {
                 continue;
             }
-            let dx = (rx as f64 * t.sqrt()).round() as i32;
+            let dx = (half * t.sqrt()).round() as i32;
+            let (a, b) = (cx - dx, cx + dx - 1);
+            let y = cy - r + row;
             if filled {
-                for px in (cx - dx)..=(cx + dx) {
-                    self.put(px, cy + dy, index);
+                for px in a..=b {
+                    self.put(px, y, index);
                 }
             } else {
-                self.put(cx - dx, cy + dy, index);
-                self.put(cx + dx, cy + dy, index);
+                self.put(a, y, index);
+                self.put(b, y, index);
             }
         }
     }

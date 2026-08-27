@@ -853,8 +853,8 @@ Things the port had to get right that are easy to get wrong:
   Johnny on screen one tick in seven, a strobe rather than an animation.
 
   Running the frame's instructions a second time is the obvious way to do
-  that and it is wrong. Every scene on screen shares one set of sixteen
-  bitmap slots, and slots are loaded and freed from inside frames: 263
+  that and it is wrong. Every scene of one `.TTM` file shares that file's
+  sixteen bitmap slots, and slots are loaded and freed from inside frames: 263
   `LOAD_BITMAP`s and 190 `FREE_SHAPES` in the shipped scripts, every one of
   them inside a scene rather than in a header, and **sixty-six frames that
   load or free artwork and also draw with it**. By the time such a frame is

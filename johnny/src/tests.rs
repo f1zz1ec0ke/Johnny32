@@ -583,7 +583,7 @@ fn only_the_playable_marker_makes_a_record() {
         .collect();
     assert_eq!(playable, vec![7], "1101 must not make a record");
     // Both are still findable, because a goto can name either.
-    let program = ttm::Program { ops, scenes: playable };
+    let program = ttm::Program { name: "T.TTM".into(), ops, scenes: playable };
     assert!(program.scene_start(5).is_some(), "1101 still names a frame");
     assert!(program.scene_start(7).is_some());
 }
@@ -600,6 +600,7 @@ fn the_clip_and_the_colours_belong_to_the_instance() {
     let mut stage = ttm::Stage::new();
 
     let setter = std::rc::Rc::new(ttm::Program {
+        name: "SETTER.TTM".into(),
         ops: vec![
             ttm::Op::SceneMarker { scene: 0, playable: true },
             ttm::Op::SetClip { x1: 10, y1: 20, x2: 30, y2: 40 },
@@ -609,6 +610,7 @@ fn the_clip_and_the_colours_belong_to_the_instance() {
         scenes: vec![0],
     });
     let plain = std::rc::Rc::new(ttm::Program {
+        name: "PLAIN.TTM".into(),
         ops: vec![ttm::Op::EndFrame],
         scenes: Vec::new(),
     });
@@ -649,6 +651,7 @@ fn a_region_that_runs_off_the_screen_is_not_drawn_at_all() {
     ];
     for (x, y, rw, rh, want) in cases {
         let program = std::rc::Rc::new(ttm::Program {
+            name: "REGION.TTM".into(),
             ops: vec![
                 ttm::Op::RegionOp { opcode: 0xA064, x, y, w: rw, h: rh },
                 ttm::Op::EndFrame,
@@ -712,4 +715,74 @@ fn a_pass_with_nothing_to_run_runs_nothing() {
         );
     }
     assert_eq!(s.raw_state(1, 7), 0, "sequence 2 played on its own");
+}
+
+#[test]
+fn two_files_do_not_share_bitmap_slots() {
+    // `seg12:0x0773` reads a bitmap slot out of the *loaded TTM* record at
+    // `ds:0x2638 + 0x0C + slot*2`, and `seg10:0x1C71` selects that record
+    // from the running instance's own file id before every frame. So the
+    // slots are per file, not global: two scenes of one file share them, and
+    // two files on screen at once cannot tread on each other's however many
+    // of them are live and whatever numbers they pick.
+    //
+    // The port had one set of sixteen for everything, which the `ttm` oracle
+    // caught: `GJVIS5.TTM` draws from a slot it never loads, and with shared
+    // slots the port drew whatever the file before it had left there.
+    let archive = dgds::Archive::load(&[], None).expect("an empty archive");
+    let mut stage = ttm::Stage::new();
+    let one = std::rc::Rc::new(ttm::Program {
+        name: "ONE.TTM".into(),
+        ops: vec![
+            ttm::Op::SelectBitmapSlot(3),
+            ttm::Op::FreeShapes,
+            ttm::Op::EndFrame,
+        ],
+        scenes: Vec::new(),
+    });
+    let two = std::rc::Rc::new(ttm::Program {
+        name: "TWO.TTM".into(),
+        ops: vec![
+            ttm::Op::SelectBitmapSlot(3),
+            ttm::Op::FreeShapes,
+            ttm::Op::EndFrame,
+        ],
+        scenes: Vec::new(),
+    });
+    stage.trace = Some(Vec::new());
+    for p in [&one, &two] {
+        let mut inst = ttm::Instance::new(std::rc::Rc::clone(p));
+        let _ = inst.run_frame(&mut stage, &archive);
+    }
+    // Two files, two slot threes. The trace names the slot each frame
+    // touched; what matters is that asking for one made a second set rather
+    // than finding the first.
+    assert_eq!(stage.slot_sets(), 2, "each file gets its own sixteen");
+}
+
+#[test]
+fn the_ellipse_opcode_draws_a_circle_the_height_decides() {
+    // `seg12:0x01C9` turns `A404`'s four operands into three before anything
+    // is drawn: a radius of `h >> 1` and a centre at `(x + r, y + r)`. The
+    // width operand is read by nobody. All 437 in `RESOURCE.001` are square,
+    // so this has never shown -- but a port that inscribed an ellipse in the
+    // rectangle would put the far edge one pixel out even on those.
+    let archive = dgds::Archive::load(&[], None).expect("an empty archive");
+    let mut stage = ttm::Stage::new();
+    stage.trace = Some(Vec::new());
+    let program = std::rc::Rc::new(ttm::Program {
+        name: "E.TTM".into(),
+        ops: vec![
+            ttm::Op::DrawEllipse { x: 100, y: 200, w: 999, h: 21, filled: true },
+            ttm::Op::EndFrame,
+        ],
+        scenes: Vec::new(),
+    });
+    let mut inst = ttm::Instance::new(program);
+    let _ = inst.run_frame(&mut stage, &archive);
+    assert_eq!(
+        stage.trace.as_deref().unwrap_or_default(),
+        ["circle 10 110 210 15 1"],
+        "radius h>>1, centre offset by it, width ignored"
+    );
 }

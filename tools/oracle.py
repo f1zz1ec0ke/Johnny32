@@ -896,25 +896,77 @@ def p_codec():
 #   ds:0x2562/0x2564   the screen, 640x480 (`seg2:0x1483`)
 #
 # and then a wall around segments 1 and 12: while the interpreter is running,
-# any call that leaves them -- the blitter, the pager, the resource loader,
-# the sound -- is answered here with zero instead of running. That is what
-# makes this possible at all, and it is also what it costs: with the loader
-# walled off the engine's bitmap slots stay empty, so the sprite handler at
-# `seg12:0x025B` finds no shape and draws nothing. The port is pointed at an
-# empty archive for the same reason, so both sides agree about what artwork
-# exists rather than one of them having some.
+# any call that leaves them -- the blitter, the pager, the sound -- is
+# answered here instead of running. Most are answered with zero; the ones a
+# frame's *decisions* are made of are recorded first, arguments and all, and
+# those recordings are the second half of what is compared.
 #
-# What is compared is every instruction of every frame -- the opcode as the
-# dispatcher sees it, with the operands as the handler receives them -- and
-# what the frame left on the instance record afterwards.
+# The one that has to do more than record is the shape loader. Left at zero
+# the bitmap slots would stay empty and the sprite handler at `seg12:0x025B`
+# would find nothing to draw, taking 15,368 of the 16,000-odd drawing
+# decisions in the data out of reach. So `seg6:0x17FA` is answered with a
+# table of the same length the real bitmap has, and `ds:0x30D4` -- the
+# `JOHNWALK.BMP` the engine loads once and hands out again at
+# `seg12:0x0792` -- is filled in the same way. The port runs against the real
+# archive, so both sides agree about which draws happen at all.
+#
+# What is compared, per frame: every instruction, as the dispatcher sees it
+# and with the operands as the handler receives them; every drawing decision,
+# with the arguments the handler worked out; and what the frame left on the
+# instance record afterwards.
 
 TTM_REC = 30             # segments the NE does not use, one 64K each
 TTM_DATA = 31
 TTM_RECOFF = 0x0000      # the 0xD4-byte loaded-TTM record
 TTM_TABLE = 0x0400       # its frame table, just after it
 TTM_INST = 0x9800        # the instance record, in free DGROUP
-TTM_HEAP = 0xA000        # the records seg11:0x042A makes while it scans
+TTM_WALK = 0x9000        # the cached JOHNWALK.BMP shapes at ds:0x30D4
+TTM_HEAP = 0xA000        # the records seg11:0x042A makes, and shape tables
+TTM_TOP = 0xEC00         # ... and where they must stop, short of the stack
+# `seg12:0x0281` indexes a shape table by the opcode's frame operand and does
+# not bounds-check it: eleven draws in the shipped scripts ask for a frame
+# their bitmap does not have, and what the engine reads there is whatever the
+# heap holds next. Every table here is padded past the largest index any
+# script asks for, so the read lands on a zero and the handler takes its
+# no-shape path -- which is the one answer that is not garbage, and is what
+# the port does. The `blank` lines in the output are those draws.
+TTM_FRAMES = 102         # the largest frame operand in the data, plus one
 TTM_W, TTM_H = 640, 480
+
+# The far calls a frame's decisions are made of, and how many words each
+# takes. Everything else that leaves segments 1 and 12 is answered with zero
+# and not recorded: the pager, the dirty-rectangle bookkeeping at
+# `seg11:0x0A85`, the screen and palette loaders, the "could not load that"
+# report at `seg5:0x081C`. None of them is a decision the port makes too.
+TTM_LEAVES = {
+    (7, 0x02EF): ('line', 4),      # seg12:0x0179, A0A4
+    (8, 0x1BD8): ('rect', 4),      # seg12:0x0199 and 0x01B6, A104 and A114
+    (9, 0x0688): ('circle', 3),    # seg12:0x01E8, A404 and A424
+    (9, 0x0D54): ('pixel', 3),     # seg12:0x0233, A002
+    (6, 0x17D8): ('sprite', 4),    # seg12:0x02CD, the A5 family
+    (8, 0x06CE): ('copy', 4),      # seg12:0x0EE2, B606
+    (5, 0x00BA): ('sound', 1),     # seg12:0x0064, C051
+}
+
+
+def ttm_bitmaps():
+    """How many frames each `.BMP` in the archive holds.
+
+    The count is `INF:`'s first word, so nothing has to be decompressed --
+    and it is the same number the port's `Archive::bitmap` hands back, which
+    `verify.py` counts at 2,392 across the archive.
+    """
+    import dgds
+    out = {}
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for name, body, _ in recs:
+        if not name.endswith('.BMP'):
+            continue
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'INF:':
+                out[name] = struct.unpack_from('<H', payload, 0)[0]
+                break
+    return out
 
 
 def ttm_scripts():
@@ -938,6 +990,7 @@ class Interpreter:
         self.m.limit = 4_000_000
         self.near = TTM_HEAP
         self.ops = []
+        self.draws = []
         m = self.m
         m.hook(8, 0x0619, self._malloc)      # the instance-record allocator
         m.hook(1, 0x229C, self._malloc)
@@ -949,8 +1002,34 @@ class Interpreter:
                # to step over a filename, and the generator `2022` draws from.
                allow={(11, 0x04A8), (4, 0x1E86)})
         m.watch_at(12, 0x0620, self._dispatch)
+        # Where a load, a free and the region family finish, so what they
+        # settled on can be read out of the record the same way for both of
+        # the two paths `F02F` has.
+        m.watch_at(12, 0x07F8, self._loaded)
+        m.watch_at(12, 0x084D, self._freed)
+        m.watch_at(12, 0x0340, self._region)
+        m.watch_at(12, 0x0291, self._blank)
         m.write16(m.ds, 0x2562, TTM_W)
         m.write16(m.ds, 0x2564, TTM_H)
+        self.bitmaps = ttm_bitmaps()
+        self.tables = {}
+        # `seg12:0x0792` hands out a cached `JOHNWALK.BMP` rather than
+        # loading it again -- `ds:0x27D2` holds the name and `ds:0x30D4` the
+        # shapes -- so 36 of the 263 loads in the data never reach the loader
+        # at all. Fill it the same way the rest are filled.
+        walk = self.bitmaps.get('JOHNWALK.BMP', 0)
+        self._table(TTM_WALK, walk)
+        m.write16(m.ds, 0x30D4, TTM_WALK)
+
+    def _table(self, at, n):
+        """A shape table: `n` non-zero near words -- which is all the sprite
+        handler asks of one before it hands the entry to the blitter -- and
+        then zeros as far as any script can index."""
+        m = self.m
+        for i in range(TTM_FRAMES):
+            m.write16(m.ds, at + i * 2, at + i * 2 if i < n else 0)
+        self.tables[at] = n
+        return at
 
     # ---- what stands in for the rest of the program -----------------------
 
@@ -970,6 +1049,82 @@ class Interpreter:
 
     def _outside(self, m, seg, off):
         m.regs['ax'] = 0
+        if (seg, off) == (6, 0x17FA):
+            return self._load_shapes(m)
+        what = TTM_LEAVES.get((seg, off))
+        if what is None:
+            return
+        name, argc = what
+        a = [_s16(m.read16(m.ds, (m.regs['sp'] + k * 2) & 0xFFFF)) for k in range(argc)]
+        fg = m.read8(m.ds, 0x1EAE)
+        if name == 'sprite':
+            # The slot and the frame are the A-family handler's own third and
+            # fourth operands, which is where `seg12:0x025B` reads them; the
+            # blitter is handed the shape, not where it came from.
+            bp = m.regs['bp']
+            slot = m.read16(m.ds, (bp + 0x0C) & 0xFFFF)
+            frame = m.read16(m.ds, (bp + 0x0A) & 0xFFFF)
+            self.draws.append('sprite %d %d %d %d %d' % (slot, frame, a[1], a[2], a[3]))
+        elif name == 'line':
+            self.draws.append('line %d %d %d %d %d' % (a[0], a[1], a[2], a[3], fg))
+        elif name == 'rect':
+            self.draws.append('rect %d %d %d %d %d %d'
+                              % (a[0], a[1], a[2], a[3], fg, m.read8(m.ds, 0x1EAC)))
+        elif name == 'circle':
+            self.draws.append('circle %d %d %d %d %d'
+                              % (a[0], a[1], a[2], fg, m.read8(m.ds, 0x1EAC)))
+        elif name == 'pixel':
+            self.draws.append('pixel %d %d %d' % (a[0], a[1], a[2]))
+        elif name == 'copy':
+            self.draws.append('copy %d %d %d %d' % (a[0], a[1], a[2], a[3]))
+        elif name == 'sound':
+            self.draws.append('sound %d' % a[0])
+
+    def _load_shapes(self, m):
+        """`seg6:0x17FA`, the shape loader. Answers with a table of the same
+        length the real bitmap has, so the sprite handler agrees with the
+        port about which draws can happen."""
+        at = m.read16(m.ds, m.regs['sp'])
+        base = m._lin(m.ds, at)
+        name = m.mem[base:m.mem.index(0, base)].decode('latin-1')
+        n = self.bitmaps.get(name)
+        if n is None:
+            return                       # not in the archive: the slot clears
+        table = self.near
+        self.near += TTM_FRAMES * 2
+        if self.near > TTM_TOP:
+            raise RuntimeError('the shape tables have run into the stack')
+        m.regs['ax'] = self._table(table, n)
+
+    def _slot(self):
+        """The shape table the instance's current bitmap slot holds, and how
+        long it is. `seg12:0x0785` reads it out of the loaded-TTM record at
+        `+0x0C + slot*2`."""
+        m = self.m
+        slot = m.read16(m.ds, TTM_INST + 0x14)
+        at = m.read16(TTM_REC, TTM_RECOFF + 0x0C + (slot & 0x0F) * 2)
+        return slot, self.tables.get(at, 0)
+
+    def _loaded(self, m):
+        self.draws.append('shapes %d %d' % self._slot())
+
+    def _freed(self, m):
+        self.draws.append('shapes %d 0' % m.read16(m.ds, TTM_INST + 0x14))
+
+    def _blank(self, m):
+        """`seg12:0x0291`: the slot has a table, and the frame the opcode
+        asked for is not in it."""
+        bp = m.regs['bp']
+        self.draws.append('blank %d %d' % (m.read16(m.ds, (bp + 0x0C) & 0xFFFF),
+                                           m.read16(m.ds, (bp + 0x0A) & 0xFFFF)))
+
+    def _region(self, m):
+        """`seg12:0x0340`, reached only by a rectangle that got past the
+        guard at `seg12:0x0318`."""
+        bp = m.regs['bp']
+        r = lambda k: _s16(m.read16(m.ds, (bp + k) & 0xFFFF))
+        self.draws.append('region %04X %d %d %d %d'
+                          % (m.read16(m.ds, 0x46DC), r(6), r(8), r(0x0A), r(0x0C)))
 
     # ---- the instruction stream -------------------------------------------
 
@@ -1017,6 +1172,7 @@ class Interpreter:
         m.write16(m.ds, 0x263C, 0)      # the instance list starts empty
         m.write16(m.ds, 0x263E, 0)
         self.near = TTM_HEAP
+        self.tables = {TTM_WALK: self.tables[TTM_WALK]}
         if m.call(11, 0x04D6, [0]) != 1:
             raise RuntimeError('seg11:0x04D6 refused the script')
         # One instance record, reset the way `seg10:0x0B3E` resets one.
@@ -1027,13 +1183,31 @@ class Interpreter:
         self.delay = m.read16(m.ds, TTM_INST + 0x29)
         return n
 
+    def _before(self):
+        """`seg10:0x1C81`, the step the ADS runner takes in front of every
+        frame: the instance's own colours and clip into the globals the
+        drawing handlers read, and the two channels the frame reports back
+        through -- `ds:0x4644` for "the scene ended" and `ds:0x46E8` for "and
+        hold it this long" -- set to their nothing-yet values.
+
+        Run rather than transcribed. It is fifteen instructions of
+        straight-line code with no calls in it, and running it means the
+        harness cannot be the thing that gets it wrong.
+        """
+        m = self.m
+        m.regs['bx'] = TTM_INST
+        m.sregs['cs'] = 10
+        m.ip = 0x1C81
+        while m.ip != 0x1CBA:
+            m.step()
+
     def frame(self, k):
-        """Run frame `k` and say what it did, the way `seg10:0x1C81` does."""
+        """Run frame `k`, the way `seg10:0x1C81` onward runs one."""
         m = self.m
         m.write16(m.ds, TTM_INST + 0x08, k)
-        m.write16(m.ds, 0x4644, 0)          # seg10:0x1CAE
-        m.write16(m.ds, 0x46E8, 0xFFFF)     # seg10:0x1CB4
+        self._before()
         del self.ops[:]
+        del self.draws[:]
         m.call(11, 0x074A, [k])
         # seg10:0x1CE6: a frame that asked for no delay leaves the last one.
         asked = m.read16(m.ds, 0x46E8)
@@ -1047,24 +1221,26 @@ class Interpreter:
                      max(self.delay, 1),
                      1 if m.read16(m.ds, 0x4644) else 0,
                      _s16(m.read16(m.ds, 0x4646))))
-        return list(self.ops), record
+        return list(self.ops), list(self.draws), record
 
 
 def q_ttm():
     out = []
-    files = frames = instrs = 0
+    files = frames = instrs = draws = 0
     e = Interpreter()
     for name, code in ttm_scripts():
         n = e.load(code)
         files += 1
         out.append('%s frames %d' % (name, n))
         for k in range(n):
-            ops, record = e.frame(k)
+            ops, drawn, record = e.frame(k)
             instrs += len(ops)
+            draws += len(drawn)
             frames += 1
-            out += ['%s %d %s' % (name, k, line) for line in ops]
+            out += ['%s %d %s' % (name, k, line) for line in ops + drawn]
             out.append('%s %d = %s' % (name, k, record))
-    out.append('total %d files %d frames %d instructions' % (files, frames, instrs))
+    out.append('total %d files %d frames %d instructions %d draws'
+               % (files, frames, instrs, draws))
     return out
 
 
