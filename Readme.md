@@ -304,7 +304,7 @@ StartTime=900        ; when Johnny's day begins, HHMM
 Sounds=1
 Clouds=1
 Waves=1
-Speed=60             ; percentage of the rate the data was authored at
+Speed=100            ; percentage of the rate the data was authored at
 Introduction=3       ; the story day on offer
 NumDays=3            ; the story day reached
 CurrentYear=1992     ; when those last moved on
@@ -573,9 +573,9 @@ itself uses the real clock. `JC_FAITHFUL=1` restores the 1992
 walk-router bug and draws the shells segment 3 puts on the beach that the
 game's own picture of the island does not have — the two places where the
 port and the binary disagree, both kept switchable. `JC_SPEED` is
-a percentage against the rate the data was authored at — **the default is 60**,
-which is where it looks like the thing people remember, and 100 runs the data
-exactly as written. It works on the screensaver too, along with `JC_DAWN` —
+a percentage against the rate the data was authored at, and **the default is
+100**: the data runs exactly as written. It works on the screensaver too,
+along with `JC_DAWN` —
 when Johnny's day starts, as HHMM, defaulting to the 0900 the original ships
 with.
 
@@ -586,6 +586,13 @@ its frame gate re-arms each deadline from *now* rather than from the one it
 missed, so a machine that falls behind runs the animation slower and never
 catches up. What people remember is this data on hardware that could not quite
 play it.
+
+It defaulted to 60 for a while on that reasoning, which was a guess at a
+machine rather than a measurement. The timing is measured now:
+`tools/oracle.py tick` compares this port's frame-by-frame scheduling against
+`seg10:0x1ACB` and they agree to the tick. Slowing everything to 60% of that
+is a preference about which decade to remember, so it is a setting and not a
+default.
 
 The time of day is not a clock in the ordinary sense. The phase is the number
 of **half hours** since a dawn the user set in the config dialog, counted

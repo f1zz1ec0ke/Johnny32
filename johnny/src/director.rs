@@ -52,10 +52,19 @@ pub const MS_PER_TICK: u32 = 16;
 /// exactly that reason, and skipped passes push each frame's deadline later --
 /// so the screensaver most people remember ran slower than its own data.
 ///
-/// `Speed` in the settings file is a percentage of the authored rate. The
-/// default is 60, which is where it looks like the thing people remember;
-/// 100 runs the data exactly as written.
-pub const DEFAULT_SPEED: u32 = 60;
+/// `Speed` in the settings file is a percentage of the authored rate, and the
+/// default is 100: the data runs exactly as written.
+///
+/// It was 60 for a while, on the reasoning that a 386 could not hold 62.5
+/// passes a second -- the engine has a speed index at `ds:0x30BE` for exactly
+/// that reason, and skipped passes push each frame's deadline later -- so the
+/// screensaver most people remember ran slower than its own data. That was a
+/// guess at a machine, made when much less of the timing was pinned down, and
+/// the timing is now pinned down: `tools/oracle.py tick` compares this port's
+/// frame-by-frame scheduling against `seg10:0x1ACB` itself and they agree to
+/// the tick. Slowing the whole thing to 60% of that is not fidelity to
+/// anything, it is a preference -- so it is a setting rather than a default.
+pub const DEFAULT_SPEED: u32 = 100;
 
 pub fn ms_per_tick_at(speed: u32) -> u32 {
     (MS_PER_TICK * 100 / speed.clamp(10, 400)).max(1)
