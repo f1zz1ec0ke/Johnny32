@@ -1517,15 +1517,23 @@ class World(Interpreter):
 # get past the first frames, through several held ones and into the second.
 # `JC_DEEP=1` runs all sixty-five, four times as far.
 def tick_cases():
+    """Every scheduler scene, driven for a while, or one per file for less.
+
+    The tick count is the third knob `tools/reach.py` reports on, and
+    `JC_TICKS` overrides it: a scene the story never gets round to starting
+    inside the window is one whose instructions nothing compared.
+    """
     import scenes
     rows = scenes.scenes()
-    if os.environ.get('JC_DEEP'):
-        return [(name, int(seq), 120) for name, seq in rows]
+    deep = bool(os.environ.get('JC_DEEP'))
+    ticks = int(os.environ.get('JC_TICKS') or (120 if deep else 32))
+    if deep:
+        return [(name, int(seq), ticks) for name, seq in rows]
     first, out = set(), []
     for name, seq in rows:
         if name not in first:
             first.add(name)
-            out.append((name, int(seq), 32))
+            out.append((name, int(seq), ticks))
     return out
 
 

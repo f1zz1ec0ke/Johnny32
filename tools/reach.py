@@ -311,6 +311,10 @@ def report(got, ads, frames, scenes):
     return worst
 
 
+# How short the residue has to be before it is worth listing one by one.
+DETAIL = 200
+
+
 def missing(got, ads):
     """The executable words nothing ran, by opcode.
 
@@ -333,6 +337,28 @@ def missing(got, ads):
         print('  %04X  %4d  in %d of the ten scripts'
               % (op, n, len(where[op])))
     print('  ----  %4d' % sum(by_op.values()))
+    # And each one with what leads into it, because a count does not say
+    # whether the gap is one unreachable rule or a hundred scattered ones.
+    # Only worth printing when there are few enough to read: a single source
+    # on its own leaves thousands, and a wall of them says less than the
+    # tally above.
+    total = sum(by_op.values())
+    if total > DETAIL:
+        print('  (%d is too many to list; run every source for the residue)'
+              % total)
+        return
+    print('\nand where, with the two instructions before each:')
+    for name, code in oracle.ads_scripts():
+        ops = list(oracle.ads_walk(code))
+        left = ads[name] - got['ads'][name]
+        before = {}
+        for n, (off, op, a) in enumerate(ops):
+            before[off] = ops[max(0, n - 2):n]
+        for off, op, _a in ops:
+            if off not in left:
+                continue
+            lead = ' '.join('%04X' % b[1] for b in before[off])
+            print('  %-12s +%04X  %04X  after %s' % (name, off, op, lead))
 
 
 def wrongly_aside(got):
