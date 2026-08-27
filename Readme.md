@@ -518,9 +518,24 @@ tools/extract_original.py   installer -> scrantic.exe + RESOURCE.001 + RESOURCE.
 tools/dgds.py               DGDS archive, chunks, LZW/RLE, images, PNG writer
 tools/export_assets.py      RESOURCE.001 -> PNGs and readable script dumps
 tools/ne_info.py            16-bit NE header dump, relocations and disassembler
+tools/x86.py                a 16-bit x86 interpreter that runs the original's
+                            own functions
 tools/scheduler.py          the scene/story tables from the executable
+tools/gen_tables.py         those tables again, as the Rust the port compiles
+tools/art_manifest.py       which bitmaps are worth redrawing first
+
+tools/check.sh              everything below, cheapest first
+tools/verify.py             the archive, the scripts, the generated tables,
+                            and the facts the port's simplifications rest on
 tools/dgds_digest.py        canonical digest, for differential testing
 tools/difftest.sh           run the Rust decoder against the Python reference
+tools/oracle.py             nineteen questions put to the 1992 binary and to
+                            the port, and diffed
+tools/scenes.py             the 65 scenes, derived from the scene table
+tools/sweep.py              play all of them with the repaint check on
+tools/framecheck.py         look at what they actually draw
+tools/coverage.py           every story day, every holiday, day and night
+
 johnny/                     the Rust port
 johnny/src/bin/johnny_scr.rs   the Windows .scr shell
 docs/                       what was found, and how the formats work
