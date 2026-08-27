@@ -1273,22 +1273,17 @@ impl Director {
             .iter()
             .find(|(id, _)| *id == scene.ads)
             .map(|(_, n)| *n);
-        let Some(file) = file else {
-            // ADS file 0xFF is the table's "no script". Fourteen entries carry
-            // it, one per position, all weight 1 and cost 5, all with `from`
-            // and `to` the same place: Johnny stays where he is and does
-            // nothing for a moment. That is the scene, not a gap in it.
-            if scene.ads == NO_ADS_FILE {
-                let ticks = IDLE_LEAST + self.rng.below(IDLE_SPAN);
-                self.note(format!("idle at {:?} for {ticks} ticks", self.position));
-                self.activity = Activity::Idling {
-                    until: self.tick + ticks,
-                };
-                return;
-            }
+        if file.is_none() && scene.ads != NO_ADS_FILE {
             self.note(format!("scene id {} has no ADS file", scene.id));
             return;
-        };
+        }
+        // `seg4:0x0716` asks where Johnny is *before* it asks what the entry
+        // is (`seg4:0x0740`), so an entry with no script is walked to like
+        // any other and only then pauses. The fourteen of them each name a
+        // spot -- (1,3), (2,7), (6,0) and so on -- and none says "anywhere",
+        // so this is the difference between Johnny strolling somewhere to
+        // stand and think for a few seconds and Johnny stopping dead
+        // wherever he was.
         if !self.position_ok(scene) {
             // `seg4:0x0B64` writes the scene's area into `ds:0x30E2` and its
             // facing into `ds:0x30DE` and reports whether Johnny is already
@@ -1301,7 +1296,10 @@ impl Director {
             };
             self.note(format!(
                 "walk {:?} -> {:?} for {} seq {}",
-                self.position, scene.from, file, scene.sequence
+                self.position,
+                scene.from,
+                file.unwrap_or("(no script)"),
+                scene.sequence
             ));
             self.activity = Activity::Moving(Box::new(Journey {
                 scene,
@@ -1314,6 +1312,18 @@ impl Director {
             }));
             return;
         }
+        // ADS file 0xFF is the table's "no script". Fourteen entries carry
+        // it, one per position, all weight 1 and cost 5, all with `from` and
+        // `to` the same place: Johnny stands there and does nothing for a
+        // moment. That is the scene, not a gap in it.
+        let Some(file) = file else {
+            let ticks = IDLE_LEAST + self.rng.below(IDLE_SPAN);
+            self.note(format!("idle at {:?} for {ticks} ticks", self.position));
+            self.activity = Activity::Idling {
+                until: self.tick + ticks,
+            };
+            return;
+        };
         let Some(mut seq) = Sequencer::from_record(archive, file) else {
             self.note(format!("no ADS record {file}"));
             return;
