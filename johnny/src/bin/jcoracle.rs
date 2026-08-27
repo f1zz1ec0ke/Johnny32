@@ -374,6 +374,7 @@ fn main() -> ExitCode {
                 eprintln!("archive");
                 return ExitCode::FAILURE;
             };
+            let (mut leaves, mut bytes) = (0usize, 0usize);
             for rec in records {
                 for leaf in johnny::dgds::leaves(rec.body) {
                     if !johnny::dgds::is_compressed(&rec.name, &leaf.tag) {
@@ -384,6 +385,8 @@ fn main() -> ExitCode {
                         continue;
                     };
                     let n = out.len().min(limit);
+                    leaves += 1;
+                    bytes += n;
                     println!(
                         "{} {} {} {} {} {:08x}",
                         rec.name,
@@ -395,6 +398,10 @@ fn main() -> ExitCode {
                     );
                 }
             }
+            // How much was actually covered, as a line both sides have to
+            // agree on -- so a run that quietly compared a prefix cannot be
+            // mistaken for one that compared everything.
+            println!("total {leaves} leaves {bytes} bytes");
         }
         // Where each guarded block ends. `seg10:0x106B` answers this in the
         // engine, and it is the thing that decides which instructions a

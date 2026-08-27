@@ -125,7 +125,8 @@ compressed chunks in `RESOURCE.001` decode to exactly their declared size with
 the block behaviour in place.
 
 None of that rests on the reading any more. `tools/oracle.py codec` runs the
-original's own decompressor over every compressed leaf and diffs, so each of
+original's own decompressor over every compressed leaf and diffs — with
+`JC_DEEP=1`, all 180 of them and all 5,225,880 bytes, identical — so each of
 these details is confirmed by the binary rather than by this page. The way in
 is the memory branch of the stream layer: `seg6:0x0185` picks between two
 input modes on bit 5 of `ds:0x4030`, and with the bit clear the input is a far

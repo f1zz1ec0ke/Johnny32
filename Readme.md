@@ -194,9 +194,14 @@ that is possible at all — and runs its LZW and RLE over every compressed leaf
 in `RESOURCE.001`, naming each by a CRC of what came out. It checks more than
 the two codecs: both sides have to agree on *which* leaves are compressed (the
 `VGA:`-inside-a-`.BMP` rule), on the order they come out of the archive, and
-on the size each one declares. `JC_DEEP=1` decodes all 5.2MB of it, twenty
-minutes of interpreter; the default stops at 8KB a leaf, which is past the
-9-to-10 and 10-to-11 code widths on every LZW leaf and every RLE leaf whole.
+on the size each one declares.
+
+`JC_DEEP=1` decodes every byte — all 180 leaves, 5,225,880 bytes, twenty-five
+minutes of interpreter — and all of it matches. The default stops at 8KB a
+leaf, 1,188,698 bytes, which is every RLE leaf whole and past the 9-to-10 and
+10-to-11 code widths on every LZW leaf. Both sides end on a line saying how
+much they covered, so a run that quietly compared a prefix cannot be mistaken
+for one that compared the lot.
 
 The last two are the whole ADS sequencer. `seqpass` runs one pass of every
 shipped sequence inside `seg10:0x1925` — the engine's own interpreter loop,

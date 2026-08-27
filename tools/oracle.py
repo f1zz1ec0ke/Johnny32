@@ -858,12 +858,18 @@ def q_codec():
     m.limit = 400_000_000
     limit = codec_limit()
     out = []
+    leaves = total = 0
     for name, tag, payload, usize in codec_leaves():
         n = usize if limit is None else min(usize, limit)
         got = codec_run(m, payload, usize, n)
+        leaves += 1
+        total += len(got)
         out.append('%s %s %d %d %d %08x'
                    % (name, tag, payload[0], usize, len(got),
                       zlib.crc32(got) & 0xFFFFFFFF))
+    # Covered, as a line both sides have to agree on -- so a run that quietly
+    # compared a prefix cannot be mistaken for one that compared everything.
+    out.append('total %d leaves %d bytes' % (leaves, total))
     return out
 
 
