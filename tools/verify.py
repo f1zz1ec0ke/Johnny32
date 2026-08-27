@@ -218,6 +218,37 @@ for _path, _found, _label in [
 census_note = ('%d TTM and %d ADS opcodes, matching what the port declares'
                % (len(_ttm_used), len(_ads_used)))
 
+# `tables.rs` is generated. This checks the file in the repository is still
+# the file the generator would write -- a hand edit, a stale regeneration, a
+# field quietly reordered. Everything the scheduler runs on is in there: the
+# eighty scene rows, the route matrix, the thirty-four walk paths and the
+# standing poses.
+
+def _generated_tables():
+    import subprocess
+    out = subprocess.run([sys.executable, 'tools/gen_tables.py'],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return None, out.stderr.strip().splitlines()[-1:] or ['gen_tables.py failed']
+    return out.stdout, None
+
+
+_fresh, _why = _generated_tables()
+if _fresh is None:
+    failures.append('tables: could not regenerate (%s)' % '; '.join(_why))
+    tables_note = 'not checked'
+else:
+    _have = open('johnny/src/tables.rs').read()
+    if _fresh != _have:
+        a, b = _fresh.splitlines(), _have.splitlines()
+        where = next((n for n, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        failures.append('tables: johnny/src/tables.rs is not what gen_tables.py '
+                        'writes; first difference at line %d' % (where + 1))
+        tables_note = 'STALE'
+    else:
+        tables_note = '%d lines, byte for byte what gen_tables.py writes' % len(
+            _fresh.splitlines())
+
 print('archive      %s, %d records, %d bytes, fully consumed'
       % (archive, len(records), len(data)))
 print('compressed   %d chunks' % chunks)
@@ -226,6 +257,7 @@ print('TTM scripts  %d/%d disassemble end to end' % (ttm_ok, ttm_total))
 print('ADS scripts  %d/%d consume exactly' % (ads_ok, ads_total))
 print('scheduler    %s' % sched_note)
 print('census       %s' % census_note)
+print('tables       %s' % tables_note)
 
 if failures:
     print('\nFAILURES (%d):' % len(failures))
