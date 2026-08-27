@@ -58,7 +58,7 @@ python3 tools/verify.py
 
 Or check everything at once — the tests, the decoder, the 65 scenes, three
 long soaks of the whole island, every story day and holiday and both halves of
-the clock, what the scenes actually draw, and the nineteen questions the
+the clock, what the scenes actually draw, and the twenty questions the
 oracle puts to the 1992 binary:
 
 ```sh
@@ -171,6 +171,7 @@ python3 tools/oracle.py
   repeat       12 answers, all identical
   backdrop     64 answers, all identical
   holiday     366 answers, all identical
+  codec       180 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
@@ -186,6 +187,16 @@ A disagreement here is a bug in the port with no interpretation involved —
 which is how the first run found that the island's placement rectangle was
 being narrowed in the one case `seg3:0x1B7F` skips the narrowing entirely,
 pinning the island to a quarter of the water it should have had all of.
+
+`codec` is the widest of them. It hands the original's own decompressor a
+stream descriptor built by hand — see "What is still not checked" for why
+that is possible at all — and runs its LZW and RLE over every compressed leaf
+in `RESOURCE.001`, naming each by a CRC of what came out. It checks more than
+the two codecs: both sides have to agree on *which* leaves are compressed (the
+`VGA:`-inside-a-`.BMP` rule), on the order they come out of the archive, and
+on the size each one declares. `JC_DEEP=1` decodes all 5.2MB of it, twenty
+minutes of interpreter; the default stops at 8KB a leaf, which is past the
+9-to-10 and 10-to-11 code widths on every LZW leaf and every RLE leaf whole.
 
 The last two are the whole ADS sequencer. `seqpass` runs one pass of every
 shipped sequence inside `seg10:0x1925` — the engine's own interpreter loop,
@@ -302,16 +313,18 @@ This one writes them back too.
 
 ## What is still not checked against the binary
 
-Two things, and it is worth being plain about them.
+Not the codecs, any more. They were the largest thing here that was
+cross-checked rather than oracled, and the note explaining why said the
+engine's decompressor pulls its input through a stream layer that would mean
+standing up the C runtime's `FILE` machinery. That is true of one branch of
+it. `seg6:0x0185` picks between two input modes on bit 5 of `ds:0x4030`, and
+with the bit clear the input is a plain far memcpy from `ds:0x4040` — so a
+stream descriptor built by hand is enough, and none of the runtime has to
+exist. `tools/oracle.py codec` builds one and drives the original's own LZW
+and RLE over every compressed leaf in the archive. See the query itself for
+the three entry points.
 
-**The codecs.** `RESOURCE.001`'s LZW and RLE are reimplemented from reading
-`seg6`, not driven inside it. The engine's decompressor pulls its input
-through a stream layer with a file mode and a memory mode, and reaching the
-memory one means standing up enough of the C runtime's `FILE` machinery to
-satisfy the seek in front of it. What stands in for it: 180 records decode and
-consume exactly, 2,392 sprite frames come out at the sizes the headers
-declare, and `tools/difftest.sh` compares two independent implementations over
-3,096 lines. That is cross-checking, not oracling.
+That leaves two, and it is worth being plain about them.
 
 **The TTM interpreter's own execution.** `seg12:0x040C` will run a script in
 the interpreter — it decodes the header of `MJFIRE.TTM` correctly — but every

@@ -124,6 +124,17 @@ first width change; large ones quietly come out a few percent short. All 139
 compressed chunks in `RESOURCE.001` decode to exactly their declared size with
 the block behaviour in place.
 
+None of that rests on the reading any more. `tools/oracle.py codec` runs the
+original's own decompressor over every compressed leaf and diffs, so each of
+these details is confirmed by the binary rather than by this page. The way in
+is the memory branch of the stream layer: `seg6:0x0185` picks between two
+input modes on bit 5 of `ds:0x4030`, and with the bit clear the input is a far
+memcpy from `ds:0x4040`, so a descriptor built by hand replaces the file
+machinery entirely. `seg6:0x0C92(handle)` opens a stream compressed — running
+the method's init out of the vtable at `ds:0x1DC6 + method*14 + 6` and
+stepping the position past the five-byte header — and
+`seg6:0x0A0D(handle, off, seg, n)` produces `n` decompressed bytes.
+
 ## Images
 
 Both sprites and backgrounds are **4bpp, two pixels per byte, high nibble

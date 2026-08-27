@@ -7,6 +7,8 @@
 #
 #   build       the port and its tools
 #   tests       what can be checked without the original data at all
+#   interpreter the few instructions in tools/x86.py that no oracle query
+#               reaches, and so nothing else would notice were wrong
 #   verify      the archive, the scripts, the generated tables, and the
 #               handful of facts about the data the port's simplifications
 #               rest on
@@ -15,8 +17,9 @@
 #   soaks       three long runs of the whole island, with the repaint check
 #   coverage    every story day, every holiday, both halves of the clock
 #   framecheck  a look at what the scenes actually draw (slow)
-#   oracle      nineteen questions put to the 1992 binary itself and to the
-#               port, and diffed
+#   oracle      twenty questions put to the 1992 binary itself and to the
+#               port, and diffed -- including its own LZW and RLE run over
+#               every compressed leaf in the archive
 #
 # The last one needs `original/scrantic.exe` and capstone; the rest need
 # `original/RESOURCE.001`. Nothing here needs a network.
@@ -40,6 +43,8 @@ run 1 cargo build --release --manifest-path johnny/Cargo.toml
 step tests
 tests=$(cargo test --release --manifest-path johnny/Cargo.toml 2>&1) || fail=1
 echo "$tests" | grep -E "^test result: ok\. [1-9][0-9]* passed|FAILED|^error" | head -2
+step interpreter
+run 3 python3 tools/x86.py --selftest
 step verify
 run 14 python3 tools/verify.py
 step difftest

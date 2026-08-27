@@ -901,3 +901,58 @@ class Machine:
             pass
         else:
             raise Unsupported('opcode %02x at %04x:%04x' % (op, self.sregs['cs'], start))
+
+
+# ---- self-test -----------------------------------------------------------
+#
+# The oracle is this interpreter's real test: nineteen of its twenty queries
+# run thousands of the original's own instructions and diff the answers, so
+# anything they touch is checked by the binary itself. What that leaves is
+# the handful of instructions the shipped code paths never reach. `movs` and
+# `scas` are the two -- they went in alongside `lods` and `stos`, which the
+# RLE decoder does use, and nothing here would notice if they were wrong.
+
+def selftest():
+    """Run a few planted instructions and check what they did.
+
+        python3 tools/x86.py --selftest
+    """
+    m = Machine('original/scrantic.exe')
+    code, data = 30, 31
+    prog = bytes([
+        0xFC,                    # cld
+        0xB9, 0x04, 0x00,        # mov cx, 4
+        0xBE, 0x00, 0x00,        # mov si, 0
+        0xBF, 0x20, 0x00,        # mov di, 0x20
+        0xF3, 0xA5,              # rep movsw
+        0xB0, 0x33,              # mov al, 0x33
+        0xBF, 0x00, 0x00,        # mov di, 0
+        0xB9, 0x08, 0x00,        # mov cx, 8
+        0xF2, 0xAE,              # repne scasb
+        0xCB,                    # retf
+    ])
+    m.mem[m._lin(code, 0):m._lin(code, 0) + len(prog)] = prog
+    src = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+    m.mem[m._lin(data, 0):m._lin(data, 0) + len(src)] = src
+    m.sregs['ds'] = m.sregs['es'] = data
+    m.call(code, 0)
+
+    bad = []
+    moved = bytes(m.mem[m._lin(data, 0x20):m._lin(data, 0x28)])
+    if moved != src:
+        bad.append('rep movsw copied %s, not %s' % (moved.hex(), src.hex()))
+    # 0x33 is the third byte, so the scan consumes three and stops with the
+    # zero flag set and five left in cx.
+    if (m.regs['di'], m.regs['cx'], m.flags['zf']) != (3, 5, 1):
+        bad.append('repne scasb left di=%d cx=%d zf=%d, not 3/5/1'
+                   % (m.regs['di'], m.regs['cx'], m.flags['zf']))
+    for line in bad:
+        print('  ' + line)
+    print('interpreter self-test: %s' % ('clean' if not bad else 'FAILED'))
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    import sys as _sys
+    raise SystemExit(selftest() if '--selftest' in _sys.argv else
+                     print(__doc__ or 'a 16-bit interpreter; see tools/oracle.py'))
