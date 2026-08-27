@@ -161,6 +161,7 @@ python3 tools/oracle.py
   island     8320 answers, all identical
   repeat       12 answers, all identical
   backdrop     64 answers, all identical
+  holiday     366 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,

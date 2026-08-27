@@ -245,6 +245,42 @@ def q_repeat():
     return out
 
 
+def q_holiday():
+    """seg4:0x05B5, over every date in a year.
+
+    Four decorations, on dates that between them cover eleven days out of
+    three hundred and sixty-five -- so nobody would ever notice this being
+    wrong. The engine reads the date through the C runtime's `getdate`, which
+    is hooked here so the day can be handed in.
+    """
+    m = fresh()
+    date = [0, 0]
+
+    def getdate(mm):
+        at = mm.read16(mm.ss, mm.sp)
+        mm.write8(mm.ds, at, date[1])          # day
+        mm.write8(mm.ds, at + 1, date[0])      # month
+        mm.write16(mm.ds, at + 2, 1992)
+
+    m.hook(1, 0x01F4, getdate)
+    m.hook(1, 0x020F, lambda mm: None)
+    # `seg4:0x054F` refreshes the screen before it looks at the date.
+    m.hook(4, 0x0673)
+    # `seg4:0x0540` goes on to refresh the whole screen, which is not what is
+    # being asked about. `seg4:0x062B` is where all five arms of the date
+    # check converge, so the answer exists there and the machine can stop.
+    m.watch_at(4, 0x062B, lambda mm: (_ for _ in ()).throw(
+        x86.Answer(mm.read16(mm.ds, 0x30BC))))
+    days = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    out = []
+    for month in range(1, 13):
+        for day in range(1, days[month - 1] + 1):
+            date[0], date[1] = month, day
+            m.write16(m.ds, 0x30BC, 0xFFFF)
+            out.append('holiday %d %d %d' % (month, day, m.call(4, 0x0540)))
+    return out
+
+
 def q_backdrop():
     """seg3:0x1C7C, over every combination of the six backdrop bits.
 
@@ -709,6 +745,7 @@ QUERIES = {
     'queue6': (lambda: q_queue(6, 16), lambda: port('queue', 6, 16)),
     'place': (q_place, lambda: port('place', 64)),
     'adslen': (q_adslen, lambda: port('adslen')),
+    'holiday': (q_holiday, lambda: port('holiday')),
     'backdrop': (q_backdrop, lambda: port('backdrop')),
     'repeat': (q_repeat, lambda: port('repeat')),
     'island': (q_island, lambda: port('island')),

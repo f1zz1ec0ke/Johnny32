@@ -464,6 +464,10 @@ class Machine:
             self.push(self.sregs['ds'])
         elif op == 0x1F:
             self.sregs['ds'] = self.pop()
+        elif op == 0x16:
+            self.push(self.sregs['ss'])
+        elif op == 0x17:
+            self.sregs['ss'] = self.pop()
         elif op == 0x68:
             self.push(self.fetch16())
         elif op == 0x6A:

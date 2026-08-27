@@ -115,6 +115,19 @@ fn main() -> ExitCode {
                 println!("{from},{to},{at}");
             }
         }
+        // Which decoration goes on the island on each day of the year.
+        // Eleven days out of 365, so nothing would ever notice this being
+        // wrong.
+        "holiday" => {
+            let days = [31u8, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            for month in 1..=12u8 {
+                for day in 1..=days[month as usize - 1] {
+                    let id = director::Holiday::for_date(month, day)
+                        .map_or(0, |h| h.index() as u32 + 1);
+                    println!("holiday {month} {day} {id}");
+                }
+            }
+        }
         // What a scene's backdrop bits ask for. Two of them share one
         // variable in the engine, so this is where that shows.
         "backdrop" => {
