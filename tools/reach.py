@@ -387,6 +387,14 @@ def wrongly_aside(got):
 def main():
     args = sys.argv[1:]
     show = '--missing' in args
+    # Where to leave the reached set. A deep run is the better part of an
+    # hour, and every question asked of the residue afterwards -- which rule
+    # is it in, what guards it, is it one block or ninety-seven -- is a
+    # question about the same set of offsets. Saving it makes those free.
+    save = None
+    for a in args:
+        if a.startswith('--save='):
+            save = a.split('=', 1)[1]
     wanted = [a for a in args if not a.startswith('-')] or SOURCES
     deep = bool(os.environ.get('JC_DEEP'))
     ads, frames, scenes = totals()
@@ -412,6 +420,16 @@ def main():
         # One source on its own is a diagnostic, not the claim, so it is
         # printed above and nothing is gated on it.
         worst = None
+    if save:
+        import json
+        with open(save, 'w') as fh:
+            json.dump({'ads': dict((n, sorted(v))
+                                   for n, v in total['ads'].items()),
+                       'frames': dict((n, sorted(v))
+                                      for n, v in total['frames'].items()),
+                       'scenes': sorted(total['scenes']),
+                       'played': sorted(total['played'])}, fh)
+        print('\nreached set written to %s' % save)
     if show:
         print('\nnever handed to `seg10:0x1519`:')
         missing(total, ads)
