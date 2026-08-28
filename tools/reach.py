@@ -82,16 +82,38 @@ def dispatch_table():
 JOINERS = (0x1420, 0x1430)
 
 
+def stops_the_pass(op, args, owner):
+    """Whether this `F010` ends the pass rather than advancing past itself.
+
+    `seg10:0x1669` resolves the operand -- `-1` means the sequence being
+    interpreted (`ds:0x2606`) -- writes state 2 into its slot, and then at
+    `0x16a9` compares it against the current sequence. Naming any other
+    sequence falls to `0x16bb`, which adds 4 to the script pointer and carries
+    on. Naming this one falls to `0x16af`, which zeroes *both* halves of the
+    pointer; the loop at `seg10:0x1958` then ors them together and leaves at
+    `0x195b` without fetching anything more.
+
+    So the word after such an `F010` is never handed to the dispatcher.
+    """
+    if op != 0xF010 or not args:
+        return False
+    arg = args[0] - 0x10000 if args[0] > 0x7FFF else args[0]
+    return arg == -1 or arg == owner
+
+
 def structural(code, table):
     """The words in one script that are structure rather than instructions."""
     out = {}
     ops = list(oracle.ads_walk(code))
+    # Which sequence each offset is in, by body offset -- the ids are not in
+    # offset order.
+    bodies = sorted((b, s) for s, (b, _p) in oracle.ads_layout(code).items())
     # The headers as `oracle.ads_layout` finds them, rather than by value
     # again here -- the two have to be the same set or the sequencer is being
     # measured against a layout it does not use.
     heads = set(off - 2 for off, _pairs in oracle.ads_layout(code).values())
     joined = False
-    for off, op, _a in ops:
+    for n, (off, op, _a) in enumerate(ops):
         why = None
         if off in heads:
             why = 'a sequence header; the interpreter is entered at the body'
@@ -106,6 +128,12 @@ def structural(code, table):
                    '`seg10:0x1402`')
         elif op == 0x3020:
             why = 'a random-block separator, consumed by `seg10:0x0CDA`'
+        elif op == 0x1510 and n and stops_the_pass(
+                ops[n - 1][1], ops[n - 1][2],
+                max((s for b, s in bodies if b <= off), default=None)):
+            why = ('after an `F010` that stops the pass; `seg10:0x16af` nulls '
+                   'the script pointer and `seg10:0x195b` leaves without '
+                   'fetching')
         joined = op in JOINERS
         if why:
             out[off] = why
