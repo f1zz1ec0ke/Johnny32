@@ -492,6 +492,33 @@ def ads_layout(code):
     return {k: (seqs[k], pairs[k]) for k in seqs}
 
 
+def ads_owner(bodies, off):
+    """The sequence an offset is in: the nearest body at or before it.
+
+    `bodies` is sorted by offset, so this is the last one starting before
+    `off` -- not the highest-numbered. Sequence ids are not in offset order,
+    and taking the largest puts a rule in whichever sequence happens to be
+    numbered highest, which has already been wrong twice.
+    """
+    owner = None
+    for start, seq in bodies:
+        if start <= off:
+            owner = seq
+    return owner
+
+
+def ads_bodies(layout):
+    return sorted((body, seq) for seq, (body, _p) in layout.items())
+
+
+def ads_random(code, layout):
+    """The sequences with a `30xx` in them, which are the only ones a draw
+    can change the behaviour of."""
+    bodies = ads_bodies(layout)
+    return set(ads_owner(bodies, off) for off, op, _a in ads_walk(code)
+               if 0x3010 <= op < 0x3100)
+
+
 def ads_pass(machine, code, seqs, seq, states, pairs, extra=None):
     """One pass of one sequence inside the original interpreter.
 
@@ -761,7 +788,9 @@ def seqpass_shape():
     `seg10:0x1402` wants both.
     """
     cap, together = (99, (4, 1, 5)) if os.environ.get('JC_DEEP') else (6, ())
-    return int(os.environ.get('JC_CAP') or cap), together
+    seeds = 8 if os.environ.get('JC_DEEP') else 2
+    return (int(os.environ.get('JC_CAP') or cap), together,
+            int(os.environ.get('JC_PASSSEEDS') or seeds))
 
 
 def _seqpass_cases():
@@ -770,9 +799,14 @@ def _seqpass_cases():
     One list, used by both sides, so the only thing being compared is what
     each does with the same starting position.
     """
-    cap, together = seqpass_shape()
+    cap, together, seeds = seqpass_shape()
     for name, code in ads_scripts():
         layout = ads_layout(code)
+        # A draw can only change what a pass does if the pass makes one, so
+        # the seeds go to the sequences with a `30xx` in them and nowhere
+        # else. Seeding the other thirty-six would be the same answer eight
+        # times over.
+        drawing = ads_random(code, layout)
         for seq in sorted(layout):
             _, pairs = layout[seq]
             cases = [{}]
@@ -782,7 +816,8 @@ def _seqpass_cases():
             for state in together:
                 cases.append(dict((p, (1, state)) for p in pairs))
             for n, states in enumerate(cases):
-                yield name, code, layout, seq, n, states
+                for seed in range(seeds if seq in drawing else 1):
+                    yield name, code, layout, seq, n, states, seed
 
 
 def q_seqpass():
@@ -807,21 +842,25 @@ def q_seqpass():
     sixty-odd) from both sides.
     """
     out = []
-    for name, code, layout, seq, n, states in _seqpass_cases():
-        got = ads_pass(fresh(), code, layout, seq, states,
-                       ads_all_pairs(layout))
-        out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(got)))
+    for name, code, layout, seq, n, states, seed in _seqpass_cases():
+        m = fresh()
+        for _ in range(seed):
+            m.call(4, 0x1E86)
+        got = ads_pass(m, code, layout, seq, states, ads_all_pairs(layout))
+        out.append('seqpass %s %d %d %d %s'
+                   % (name, seq, n, seed, ' ; '.join(got)))
     return out
 
 
 def p_seqpass():
     out = []
-    for name, _code, layout, seq, n, states in _seqpass_cases():
+    for name, _code, layout, seq, n, states, seed in _seqpass_cases():
         arg = ','.join('%d:%d:%d:%d' % (t, s, p, st)
                        for (t, s), (p, st) in sorted(states.items())) or '-'
         pairs = ','.join('%d:%d' % pair for pair in ads_all_pairs(layout)) or '-'
-        mine = port('seqpass', name, seq, arg, 0, pairs)
-        out.append('seqpass %s %d %d %s' % (name, seq, n, ' ; '.join(mine)))
+        mine = port('seqpass', name, seq, arg, seed, pairs)
+        out.append('seqpass %s %d %d %d %s'
+                   % (name, seq, n, seed, ' ; '.join(mine)))
     return out
 
 

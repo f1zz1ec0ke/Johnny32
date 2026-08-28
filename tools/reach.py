@@ -82,21 +82,6 @@ def dispatch_table():
 JOINERS = (0x1420, 0x1430)
 
 
-def owner_of(bodies, off):
-    """The sequence an offset is in: the nearest body at or before it.
-
-    `bodies` is sorted by offset, so this is the last one that starts before
-    `off` -- not the highest-numbered, which is a different sequence entirely.
-    The ids are not in offset order, and taking the largest of them puts a
-    rule in whichever sequence happens to be numbered highest.
-    """
-    owner = None
-    for start, seq in bodies:
-        if start <= off:
-            owner = seq
-    return owner
-
-
 def stops_the_pass(op, args, owner):
     """Whether this `F010` ends the pass rather than advancing past itself.
 
@@ -122,7 +107,7 @@ def structural(code, table):
     ops = list(oracle.ads_walk(code))
     # Which sequence each offset is in, by body offset -- the ids are not in
     # offset order.
-    bodies = sorted((b, s) for s, (b, _p) in oracle.ads_layout(code).items())
+    bodies = oracle.ads_bodies(oracle.ads_layout(code))
     # The headers as `oracle.ads_layout` finds them, rather than by value
     # again here -- the two have to be the same set or the sequencer is being
     # measured against a layout it does not use.
@@ -144,7 +129,7 @@ def structural(code, table):
         elif op == 0x3020:
             why = 'a random-block separator, consumed by `seg10:0x0CDA`'
         elif op == 0x1510 and n and stops_the_pass(
-                ops[n - 1][1], ops[n - 1][2], owner_of(bodies, ops[n - 1][0])):
+                ops[n - 1][1], ops[n - 1][2], oracle.ads_owner(bodies, ops[n - 1][0])):
             why = ('after an `F010` that stops the pass; `seg10:0x16af` nulls '
                    'the script pointer and `seg10:0x195b` leaves without '
                    'fetching')
@@ -223,11 +208,13 @@ def do_seqrun(item):
 
 def do_seqpass(item):
     """One pass of one sequence from one starting position, as `seqpass`."""
-    name, seq, states = item
+    name, seq, states, seed = item
     code = dict(oracle.ads_scripts())[name]
     layout = oracle.ads_layout(code)
     got = blank()
     m = oracle.fresh()
+    for _ in range(seed):
+        m.call(4, 0x1E86)
     m.watch_at(10, 0x1519, lambda mm: got['ads'][name].add(
         mm.read16(mm.ss, mm.regs['sp'] + AT_ENTRY) - oracle.ADS_SCRIPT))
     # The same pairs `q_seqpass` sets up, or this counts guards firing in a
@@ -303,8 +290,8 @@ def work(which):
                            for seq in sorted(oracle.ads_layout(code))
                            for seed in range(seeds)]
     if which == 'seqpass':
-        return do_seqpass, [(name, seq, states)
-                            for name, _c, _l, seq, _n, states
+        return do_seqpass, [(name, seq, states, seed)
+                            for name, _c, _l, seq, _n, states, seed
                             in oracle._seqpass_cases()]
     if which == 'ttm':
         return do_ttm, [(name,) for name, _code in oracle.ttm_scripts()]
