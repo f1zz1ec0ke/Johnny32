@@ -787,10 +787,18 @@ def seqpass_shape():
     moves one scene will ever open it -- `1420` joins two conditions and
     `seg10:0x1402` wants both.
     """
-    cap, together = (99, (4, 1, 5)) if os.environ.get('JC_DEEP') else (6, ())
-    seeds = 8 if os.environ.get('JC_DEEP') else 2
+    deep = bool(os.environ.get('JC_DEEP'))
+    cap, together = (99, (4, 1, 5)) if deep else (6, ())
+    # Two seed counts, because the two kinds of case are worth very different
+    # numbers of draws. A random block sits behind a guard, and the cases that
+    # set every scene at once are the ones that open the most of them -- so
+    # that is where varying the draw pays, and there are only three of them
+    # per sequence, which makes forty-eight of each affordable. The
+    # single-scene cases are the bulk of the list and get eight.
+    seeds, wide = (8, 48) if deep else (2, 6)
     return (int(os.environ.get('JC_CAP') or cap), together,
-            int(os.environ.get('JC_PASSSEEDS') or seeds))
+            int(os.environ.get('JC_PASSSEEDS') or seeds),
+            int(os.environ.get('JC_WIDESEEDS') or wide))
 
 
 def _seqpass_cases():
@@ -799,7 +807,7 @@ def _seqpass_cases():
     One list, used by both sides, so the only thing being compared is what
     each does with the same starting position.
     """
-    cap, together, seeds = seqpass_shape()
+    cap, together, seeds, wide = seqpass_shape()
     for name, code in ads_scripts():
         layout = ads_layout(code)
         # A draw can only change what a pass does if the pass makes one, so
@@ -809,14 +817,14 @@ def _seqpass_cases():
         drawing = ads_random(code, layout)
         for seq in sorted(layout):
             _, pairs = layout[seq]
-            cases = [{}]
+            cases = [({}, seeds)]
             for pair in pairs[:cap]:
                 for state in (4, 1, 5):
-                    cases.append({pair: (1, state)})
+                    cases.append(({pair: (1, state)}, seeds))
             for state in together:
-                cases.append(dict((p, (1, state)) for p in pairs))
-            for n, states in enumerate(cases):
-                for seed in range(seeds if seq in drawing else 1):
+                cases.append((dict((p, (1, state)) for p in pairs), wide))
+            for n, (states, draws) in enumerate(cases):
+                for seed in range(draws if seq in drawing else 1):
                     yield name, code, layout, seq, n, states, seed
 
 
