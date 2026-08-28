@@ -695,10 +695,13 @@ def seqrun_shape():
     """How far to run the sequencer, and from how many starting draws.
 
     Both numbers are coverage, not taste, and `tools/reach.py` is where they
-    come from. Passes matter because a scene has to end and start again
-    before the guards waiting on it mean anything; draws matter because a
-    random block picks one branch and the others are only reachable by
-    drawing differently. Neither knob substitutes for the other.
+    come from. Of the ADS instructions the dispatcher can see, eight passes
+    from one draw reaches 64.7%. Passes matter because a scene has to end and
+    start again before the guards waiting on it mean anything, so sixty of
+    them from one draw reaches 80.9%; draws matter because a random block
+    takes one branch and the rest are only reachable by drawing differently,
+    so eight passes from eight draws reaches 75.6%. Neither knob substitutes
+    for the other, and together they reach 88.7%.
 
     `Rng::new(n)` on the port and `n` calls of `seg4:0x1E86` here are the same
     thing -- the engine's only kind of seeding is to discard values -- so the
@@ -748,13 +751,13 @@ def seqpass_shape():
     """How many of a sequence's scenes to vary, and whether to try them all
     at once.
 
-    `tools/reach.py` is where the numbers come from, and `JC_CAP=6` re-derives
-    the first of them: varying the first six scenes reaches a little over half
-    the ADS instructions the dispatcher can see, and varying all of them
-    reaches half as much again, because a guard on a scene the case list never
-    touched cannot fire. Setting every scene at once on top of that adds the
-    blocks whose guard is a conjunction -- `1420` joins two conditions and
-    `seg10:0x1402` wants both true.
+    `tools/reach.py` is where the numbers come from and `JC_CAP` re-derives
+    them. Varying the first six scenes reaches 55.0% of the ADS instructions
+    the dispatcher can see; varying every scene and then setting them all at
+    once reaches 88.0%. A guard on a scene the case list never touched cannot
+    fire, and a block whose guard is a conjunction needs more than one of them
+    true at the same time -- `1420` joins two conditions and `seg10:0x1402`
+    wants both.
     """
     cap, together = (99, (4, 1, 5)) if os.environ.get('JC_DEEP') else (6, ())
     return int(os.environ.get('JC_CAP') or cap), together

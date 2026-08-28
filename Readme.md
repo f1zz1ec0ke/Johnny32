@@ -251,6 +251,121 @@ near it. Both found real bugs: the weighted pickers were taking the option
 after the one a boundary draw belongs to, and the pivot was tossing its coin
 even for a turn of nothing.
 
+### How much of it those questions actually saw
+
+Every line above says the port and the binary agree. They say it *wherever the
+run went* — and a harness can agree perfectly about four per cent of a
+program. `oracle` cannot report on that, because a query that never reaches an
+instruction has nothing to disagree about. So `tools/reach.py` measures the
+other half: the same interpreter, driven through the same queries, counting
+what each one touches.
+
+```sh
+python3 tools/reach.py            # a couple of minutes
+JC_DEEP=1 python3 tools/reach.py  # the tier the floor is set against
+```
+
+The denominator took as much care as the count. Of the 2,688 words in the ten
+ADS scripts, 380 can never reach the dispatcher at `seg10:0x1519` at all:
+
+| words | why they are not instructions |
+| --- | --- |
+| 77 | the opcode has no handler in the table at `cs:0x1875`, so the search at `seg10:0x152C` walks off the end and nothing happens |
+| 77 | `1420` and `1430`, the joiners, consumed inside `seg10:0x13E7` |
+| 77 | the second half of a joined condition, consumed inside `seg10:0x1402` |
+| 66 | sequence headers — the interpreter is entered at the body |
+| 66 | `FFFF` terminators; `seg10:0x195D` returns without dispatching |
+| 17 | `3020`, the random-block separator, consumed by `seg10:0x0CDA` |
+
+Counting those as unreached branches would invent a gap; quietly dropping
+whichever words a run happened to miss would invent a pass. So the table is
+read out of the binary rather than typed in — its length is the 0x58 bytes
+between `cs:0x1875` and the handlers at `0x18CD` — the sequence headers come
+from the same `ads_layout` the sequencer itself is driven by, and every word
+set aside carries the reason it was set aside. That leaves **2,308** the
+dispatcher can be handed.
+
+And the reading is checked rather than trusted. If a run ever dispatches a
+word the denominator excused, `reach` fails and names it: an excused word is
+in neither the numerator nor the denominator, so a wrong exclusion would not
+show up as a disagreement anywhere — it would silently make every percentage
+larger. Nothing in the scripts has tripped it.
+
+Against that denominator, with the deep case lists:
+
+```
+seqrun:
+  ADS instructions      2047 of  2308    88.7%
+seqpass:
+  ADS instructions      2030 of  2308    88.0%
+ttm:
+  TTM frames            6631 of  6631   100.0%
+  TTM scenes run         611 of   611   100.0%
+tick:
+  ADS instructions       873 of  2308    37.8%
+
+all of them together:
+  ADS instructions      2211 of  2308    95.8%
+  TTM frames            6631 of  6631   100.0%
+  TTM scenes run         611 of   611   100.0%
+  of those, scheduled    101 of   611    16.5%   (not gated)
+```
+
+Both of the rows that are not the branch number are observations rather than
+arithmetic. A frame counts when `seg12:0x040C` was actually entered for it and
+a scene when its `1111` reached the dispatcher at `seg12:0x0620`, so 6,631 and
+611 are what the engine did, not what a loop asked for. The last row is
+narrower and deliberately not a gate: it counts the scenes the *scheduler*
+picked inside the tick sweep, which measures the story's own dice rather than
+this port — every one of those 611 scenes has already been run and diffed
+frame by frame by the row above it.
+
+Coverage that nobody diffed is worth nothing, so raising the branch number
+meant changing the questions rather than the report. Every case counted here
+is a case `oracle` also compares, and both knobs behind them earn their place:
+
+| what is varied | reached |
+| --- | --- |
+| `seqrun`, 8 passes from 1 draw | 64.7% |
+| `seqrun`, 60 passes from 1 draw | 80.9% |
+| `seqrun`, 8 passes from 8 draws | 75.6% |
+| `seqrun`, 60 passes from 8 draws | **88.7%** |
+| `seqpass`, the first six scenes varied | 55.0% |
+| `seqpass`, every scene, then all of them at once | **88.0%** |
+
+Passes matter because a scene has to end and start again before the guards
+waiting on it mean anything; draws matter because a random block takes one
+branch and the rest are only reachable by drawing differently. Neither stands
+in for the other — which is why both are turned up rather than whichever was
+cheaper. `JC_PASSES`, `JC_SEEDS`, `JC_CAP` and `JC_TICKS` re-derive every row,
+so the table is a measurement and not a memory.
+
+`seqpass` had a subtler problem than either knob. It was putting up an
+instance record only for the scenes its own sequence mentions, but
+`seg11:0x0645` makes one per `1111` marker when the *file* loads — so a guard
+in one sequence about a scene another one plays had nothing to read, took its
+absent path every time, and the other side of it was never compared. Both
+sides now get the script's records, which is what `ads_pass` always said it
+was setting up.
+
+What is left is listed rather than rounded away. `--missing` prints it:
+
+```
+never handed to `seg10:0x1519`:
+  1510    67  in 10 of the ten scripts
+  2005    30  in 4 of the ten scripts
+  ----    97
+```
+
+Ninety-seven words, and only two opcodes: `1510`, which ends a guarded block,
+and `2005`, which plays a scene. They are the tails of rules whose guard no
+case in the harness makes true — the block never opens, so its contents and
+its ending are never handed to the dispatcher. They are not structural: 517 of
+the 584 `1510`s and 837 of the 867 `2005`s *are* reached, so both opcodes are
+plainly reachable and these particular ones are a gap rather than a category
+error — which is the distinction the denominator would otherwise be tempted
+to blur.
+
 ## Sixteen colours, and how to have more
 
 Everything in `RESOURCE.001` is four-bit. All 2,392 sprite frames and all ten
