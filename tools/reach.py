@@ -82,6 +82,21 @@ def dispatch_table():
 JOINERS = (0x1420, 0x1430)
 
 
+def owner_of(bodies, off):
+    """The sequence an offset is in: the nearest body at or before it.
+
+    `bodies` is sorted by offset, so this is the last one that starts before
+    `off` -- not the highest-numbered, which is a different sequence entirely.
+    The ids are not in offset order, and taking the largest of them puts a
+    rule in whichever sequence happens to be numbered highest.
+    """
+    owner = None
+    for start, seq in bodies:
+        if start <= off:
+            owner = seq
+    return owner
+
+
 def stops_the_pass(op, args, owner):
     """Whether this `F010` ends the pass rather than advancing past itself.
 
@@ -129,8 +144,7 @@ def structural(code, table):
         elif op == 0x3020:
             why = 'a random-block separator, consumed by `seg10:0x0CDA`'
         elif op == 0x1510 and n and stops_the_pass(
-                ops[n - 1][1], ops[n - 1][2],
-                max((s for b, s in bodies if b <= off), default=None)):
+                ops[n - 1][1], ops[n - 1][2], owner_of(bodies, ops[n - 1][0])):
             why = ('after an `F010` that stops the pass; `seg10:0x16af` nulls '
                    'the script pointer and `seg10:0x195b` leaves without '
                    'fetching')
