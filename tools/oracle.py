@@ -752,12 +752,13 @@ def seqpass_shape():
     at once.
 
     `tools/reach.py` is where the numbers come from and `JC_CAP` re-derives
-    them. Varying the first six scenes reaches 55.0% of the ADS instructions
-    the dispatcher can see; varying every scene and then setting them all at
-    once reaches 88.0%. A guard on a scene the case list never touched cannot
-    fire, and a block whose guard is a conjunction needs more than one of them
-    true at the same time -- `1420` joins two conditions and `seg10:0x1402`
-    wants both.
+    them. Of the ADS instructions the dispatcher can see, varying the first
+    six scenes reaches 55.0% and varying every scene reaches 84.3%, because a
+    guard on a scene the case list never touched cannot fire. Setting them all
+    at once as well reaches 88.0%: a block whose guard is a conjunction needs
+    more than one scene in the right state at the same time, and no case that
+    moves one scene will ever open it -- `1420` joins two conditions and
+    `seg10:0x1402` wants both.
     """
     cap, together = (99, (4, 1, 5)) if os.environ.get('JC_DEEP') else (6, ())
     return int(os.environ.get('JC_CAP') or cap), together

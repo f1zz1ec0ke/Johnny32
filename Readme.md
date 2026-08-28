@@ -322,7 +322,9 @@ frame by frame by the row above it.
 
 Coverage that nobody diffed is worth nothing, so raising the branch number
 meant changing the questions rather than the report. Every case counted here
-is a case `oracle` also compares, and both knobs behind them earn their place:
+is a case `oracle` also compares — at this tier that is 31,680 `seqrun`
+answers, 2,487 `seqpass`, 19,654 `tick` and 51,475 `ttm`, all identical to
+what the binary said — and both knobs behind them earn their place:
 
 | what is varied | reached |
 | --- | --- |
@@ -331,7 +333,8 @@ is a case `oracle` also compares, and both knobs behind them earn their place:
 | `seqrun`, 8 passes from 8 draws | 75.6% |
 | `seqrun`, 60 passes from 8 draws | **88.7%** |
 | `seqpass`, the first six scenes varied | 55.0% |
-| `seqpass`, every scene, then all of them at once | **88.0%** |
+| `seqpass`, every scene varied | 84.3% |
+| `seqpass`, every scene, and then all of them at once | **88.0%** |
 
 Passes matter because a scene has to end and start again before the guards
 waiting on it mean anything; draws matter because a random block takes one
