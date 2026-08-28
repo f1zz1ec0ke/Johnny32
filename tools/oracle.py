@@ -778,14 +778,16 @@ def seqpass_shape():
     """How many of a sequence's scenes to vary, and whether to try them all
     at once.
 
-    `tools/reach.py` is where the numbers come from and `JC_CAP` re-derives
-    them. Of the ADS instructions the dispatcher can see, varying the first
-    six scenes reaches 55.0% and varying every scene reaches 84.3%, because a
-    guard on a scene the case list never touched cannot fire. Setting them all
-    at once as well reaches 88.0%: a block whose guard is a conjunction needs
-    more than one scene in the right state at the same time, and no case that
-    moves one scene will ever open it -- `1420` joins two conditions and
-    `seg10:0x1402` wants both.
+    `tools/reach.py` is where the numbers come from and `JC_CAP`,
+    `JC_PASSSEEDS` and `JC_WIDESEEDS` re-derive them. Of the ADS instructions
+    the dispatcher can see, varying the first six scenes reaches 55.0% and
+    varying every scene reaches 84.3%, because a guard on a scene the case
+    list never touched cannot fire. Setting them all at once as well, and
+    varying the draw, reaches 99.4%: a block whose guard is a conjunction
+    needs more than one scene in the right state at the same time -- `1420`
+    joins two conditions and `seg10:0x1402` wants both -- and a weighted
+    random block behind an open guard still only runs the entry the draw
+    lands on.
     """
     deep = bool(os.environ.get('JC_DEEP'))
     cap, together = (99, (4, 1, 5)) if deep else (6, ())

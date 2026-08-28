@@ -37,7 +37,8 @@
 # `JC_DEEP=1 bash tools/check.sh` runs the exhaustive case lists throughout --
 # every byte of every compressed leaf, every sequence from every starting
 # position, sixty passes from eight draws -- and is the tier `reach` holds to
-# its 95% floor. It takes about two hours.
+# its floor, which is every executable word in the ten scripts. It takes about
+# three hours.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 fail=0

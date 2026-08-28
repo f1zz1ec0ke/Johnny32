@@ -165,7 +165,7 @@ python3 tools/oracle.py
   route      4736 answers, all identical
   turn        512 answers, all identical
   blocks     2688 answers, all identical
-  seqpass    1143 answers, all identical
+  seqpass    1662 answers, all identical
   seqrun     1056 answers, all identical
   island     8320 answers, all identical
   repeat       12 answers, all identical
@@ -266,7 +266,7 @@ JC_DEEP=1 python3 tools/reach.py  # the tier the floor is set against
 ```
 
 The denominator took as much care as the count. Of the 2,688 words in the ten
-ADS scripts, 380 can never reach the dispatcher at `seg10:0x1519` at all:
+ADS scripts, 446 can never reach the dispatcher at `seg10:0x1519` at all:
 
 | words | why they are not instructions |
 | --- | --- |
@@ -275,6 +275,7 @@ ADS scripts, 380 can never reach the dispatcher at `seg10:0x1519` at all:
 | 77 | the second half of a joined condition, consumed inside `seg10:0x1402` |
 | 66 | sequence headers — the interpreter is entered at the body |
 | 66 | `FFFF` terminators; `seg10:0x195D` returns without dispatching |
+| 66 | a `1510` after an `F010` that stops its own sequence: `seg10:0x16af` nulls the script pointer and the loop at `seg10:0x195b` leaves without fetching |
 | 17 | `3020`, the random-block separator, consumed by `seg10:0x0CDA` |
 
 Counting those as unreached branches would invent a gap; quietly dropping
@@ -282,8 +283,18 @@ whichever words a run happened to miss would invent a pass. So the table is
 read out of the binary rather than typed in — its length is the 0x58 bytes
 between `cs:0x1875` and the handlers at `0x18CD` — the sequence headers come
 from the same `ads_layout` the sequencer itself is driven by, and every word
-set aside carries the reason it was set aside. That leaves **2,308** the
+set aside carries the reason it was set aside. That leaves **2,242** the
 dispatcher can be handed.
+
+The `F010` row is the one that took real reading, and it is keyed on the
+*operand* rather than the opcode. `seg10:0x1669` resolves it — `-1` means the
+sequence being interpreted — writes state 2 into its slot, and then compares
+it against the current sequence. Naming another sequence falls to `0x16bb`,
+which adds 4 to the script pointer and carries on, so the word after it does
+run. Naming this one falls to `0x16af`, which zeroes both halves of the
+pointer; `seg10:0x1958` ors them together and leaves at `0x195b` without
+fetching. Excluding by opcode would have been wrong; excluding by operand
+predicts all sixty-six and finds no counter-example.
 
 And the reading is checked rather than trusted. If a run ever dispatches a
 word the denominator excused, `reach` fails and names it: an excused word is
@@ -295,21 +306,26 @@ Against that denominator, with the deep case lists:
 
 ```
 seqrun:
-  ADS instructions      2047 of  2308    88.7%
+  ADS instructions      2047 of  2242    91.3%
 seqpass:
-  ADS instructions      2030 of  2308    88.0%
+  ADS instructions      2228 of  2242    99.4%
 ttm:
   TTM frames            6631 of  6631   100.0%
   TTM scenes run         611 of   611   100.0%
 tick:
-  ADS instructions       873 of  2308    37.8%
+  ADS instructions       873 of  2242    38.9%
 
 all of them together:
-  ADS instructions      2211 of  2308    95.8%
+  ADS instructions      2242 of  2242   100.0%
   TTM frames            6631 of  6631   100.0%
   TTM scenes run         611 of   611   100.0%
   of those, scheduled    101 of   611    16.5%   (not gated)
 ```
+
+Every executable word in the ten scripts is handed to the interpreter, every
+frame of every script is run, and every scene marker reaches the dispatcher —
+and all of it is diffed against the binary, because the cases counted here are
+the cases `oracle` compares.
 
 Both of the rows that are not the branch number are observations rather than
 arithmetic. A frame counts when `seg12:0x040C` was actually entered for it and
@@ -323,25 +339,44 @@ frame by frame by the row above it.
 Coverage that nobody diffed is worth nothing, so raising the branch number
 meant changing the questions rather than the report. Every case counted here
 is a case `oracle` also compares — at this tier that is 31,680 `seqrun`
-answers, 2,487 `seqpass`, 19,654 `tick` and 51,475 `ttm`, all identical to
-what the binary said — and both knobs behind them earn their place:
+answers, 13,836 `seqpass`, 19,654 `tick` and 51,475 `ttm`, all identical to
+what the binary said — and every knob behind them earns its place:
 
-| what is varied | reached |
-| --- | --- |
-| `seqrun`, 8 passes from 1 draw | 64.7% |
-| `seqrun`, 60 passes from 1 draw | 80.9% |
-| `seqrun`, 8 passes from 8 draws | 75.6% |
-| `seqrun`, 60 passes from 8 draws | **88.7%** |
-| `seqpass`, the first six scenes varied | 55.0% |
-| `seqpass`, every scene varied | 84.3% |
-| `seqpass`, every scene, and then all of them at once | **88.0%** |
+| what is varied | of 2,242 | reached |
+| --- | --- | --- |
+| `seqrun`, 8 passes from 1 draw | 1,493 | 66.6% |
+| `seqrun`, 60 passes from 1 draw | 1,867 | 83.3% |
+| `seqrun`, 8 passes from 8 draws | 1,745 | 77.8% |
+| `seqrun`, 60 passes from 8 draws | 2,047 | **91.3%** |
+| `seqpass`, the first six scenes varied, one draw | 1,270 | 56.6% |
+| `seqpass`, every scene varied, one draw | 1,946 | 86.8% |
+| `seqpass`, every scene, all at once, and the draw varied | 2,228 | **99.4%** |
 
 Passes matter because a scene has to end and start again before the guards
-waiting on it mean anything; draws matter because a random block takes one
-branch and the rest are only reachable by drawing differently. Neither stands
-in for the other — which is why both are turned up rather than whichever was
-cheaper. `JC_PASSES`, `JC_SEEDS`, `JC_CAP` and `JC_TICKS` re-derive every row,
-so the table is a measurement and not a memory.
+waiting on it mean anything. Draws matter because a random block takes one
+branch and the rest are only reachable by drawing differently. Setting every
+scene at once matters because a guard that is a conjunction needs two scenes
+in the right state on the same pass. None of them stands in for the others,
+which is why all of them are turned up rather than whichever was cheapest.
+`JC_PASSES`, `JC_SEEDS`, `JC_CAP`, `JC_PASSSEEDS`, `JC_WIDESEEDS` and
+`JC_TICKS` re-derive every row, so the table is a measurement and not a
+memory.
+
+The last rung of that ladder was the one worth understanding. The words left
+over were all inside weighted random blocks, and the two queries were each
+missing half of what it takes to get into one: `seqrun` varies the draw but
+only rarely satisfies the guard that opens the block, while `seqpass` forces
+the guard and then always draws the same value. Three equally weighted
+entries, and the same one picked every time. `seqpass` now takes the seed
+`seqrun` already had — the port's arm had accepted one at argument 4 all
+along, and the harness was passing a literal zero.
+
+Where the draws go is chosen rather than uniform. Forty-eight seeds on every
+case would be a six-fold deep run for a dozen words; the cases that set every
+scene at once are the ones that open the most guards, and there are only three
+per sequence, so those get forty-eight and the single-scene cases keep eight.
+That is 13,836 cases against the 10,236 of eight-everywhere — 35% more, not
+600%.
 
 `seqpass` had a subtler problem than either knob. It was putting up an
 instance record only for the scenes its own sequence mentions, but
@@ -351,23 +386,27 @@ absent path every time, and the other side of it was never compared. Both
 sides now get the script's records, which is what `ads_pass` always said it
 was setting up.
 
-What is left is listed rather than rounded away. `--missing` prints it:
+Whatever is left is listed rather than rounded away — `--missing` prints the
+unreached words by opcode, and each one with the two instructions leading into
+it, so a shortfall can be read instead of guessed at. There is nothing left to
+print:
 
 ```
 never handed to `seg10:0x1519`:
-  1510    67  in 10 of the ten scripts
-  2005    30  in 4 of the ten scripts
-  ----    97
+  nothing -- every executable word ran
 ```
 
-Ninety-seven words, and only two opcodes: `1510`, which ends a guarded block,
-and `2005`, which plays a scene. They are the tails of rules whose guard no
-case in the harness makes true — the block never opens, so its contents and
-its ending are never handed to the dispatcher. They are not structural: 517 of
-the 584 `1510`s and 837 of the 867 `2005`s *are* reached, so both opcodes are
-plainly reachable and these particular ones are a gap rather than a category
-error — which is the distinction the denominator would otherwise be tempted
-to blur.
+Getting there was two findings rather than a bigger hammer. Sixty-six of the
+words that looked unreached were the `F010` case above, which is structure and
+belongs in the denominator's other half. The remaining thirty-one were all
+inside weighted random blocks, and needed the guard held open and the draw
+varied at the same time — which no single query was doing.
+
+The exclusions are checked rather than trusted, and that matters more at 100%
+than it did at 95%: a wrong exclusion is invisible, because an excused word
+sits in neither the numerator nor the denominator and quietly makes the
+fraction larger. So if a run ever dispatches a word the denominator excused,
+`reach` fails and names it. Nothing has.
 
 ## Sixteen colours, and how to have more
 

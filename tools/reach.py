@@ -303,16 +303,19 @@ def work(which):
 SOURCES = ['seqrun', 'seqpass', 'ttm', 'tick']
 
 # What the union has to reach before this passes. `JC_DEEP=1` runs the case
-# lists the deep oracle runs, and 95% is the claim made about those.
-FLOOR = 0.95
+# lists the deep oracle runs, and every executable word in the ten scripts is
+# reached by them -- so the floor is all of them. It is deliberately not set a
+# couple of points under: there is no longer a word whose absence would be
+# excusable, and one going missing is a query that stopped asking something.
+FLOOR = 1.0
 
 # The default tier runs a fraction of the cases, so its number is not a
 # coverage claim -- but it is still a number that should not fall. Set a
-# couple of points under the 70.5% it measures: far enough not to trip on a
+# couple of points under the 72.8% it measures: far enough not to trip on a
 # case list growing by one, close enough that a query quietly stopping
-# reaching a tenth of the scripts fails in two minutes rather than waiting
-# for someone to spend two hours on the deep tier.
-QUICK_FLOOR = 0.68
+# reaching a tenth of the scripts fails in three minutes rather than waiting
+# for someone to spend three hours on the deep tier.
+QUICK_FLOOR = 0.70
 
 
 def report(got, ads, frames, scenes):
