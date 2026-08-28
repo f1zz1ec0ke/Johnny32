@@ -273,12 +273,17 @@ def work(which):
 
 SOURCES = ['seqrun', 'seqpass', 'ttm', 'tick']
 
-# What the union has to reach before this passes, and the tier that number is
-# about. The default tier runs a fraction of the cases so the measurement
-# itself can be smoke-tested in a couple of minutes; it is not a coverage
-# claim and is not gated. `JC_DEEP=1` runs the case lists the deep oracle
-# runs, and that is the one the floor is set against.
+# What the union has to reach before this passes. `JC_DEEP=1` runs the case
+# lists the deep oracle runs, and 95% is the claim made about those.
 FLOOR = 0.95
+
+# The default tier runs a fraction of the cases, so its number is not a
+# coverage claim -- but it is still a number that should not fall. Set a
+# couple of points under the 70.5% it measures: far enough not to trip on a
+# case list growing by one, close enough that a query quietly stopping
+# reaching a tenth of the scripts fails in two minutes rather than waiting
+# for someone to spend two hours on the deep tier.
+QUICK_FLOOR = 0.68
 
 
 def report(got, ads, frames, scenes):
@@ -423,13 +428,13 @@ def main():
                 print('  %s +%04X  %04X  was called %s' % (name, off, op, why))
         return 1
     print()
+    if worst is None:
+        return 0
     if not deep:
         print('the default tier, which is a check of the measurement rather '
               'than of coverage;\nJC_DEEP=1 runs the cases the %.0f%% is '
               'claimed against.' % (FLOOR * 100))
-        return 0
-    if worst is None:
-        return 0
+        return 0 if worst >= QUICK_FLOOR else 1
     return 0 if worst >= FLOOR else 1
 
 

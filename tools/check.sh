@@ -27,7 +27,9 @@
 #               own per-tick pass driven a scene at a time
 #   reach       and where those questions went: how much of the scripts the
 #               oracle actually ran, which is the half `oracle` cannot
-#               report on itself
+#               report on itself. Held to its own tier's floor, so a query
+#               that quietly stops reaching a tenth of the scripts fails
+#               here in two minutes rather than waiting for the deep tier
 #
 # The last two need `original/scrantic.exe` and capstone; the rest need
 # `original/RESOURCE.001`. Nothing here needs a network.
