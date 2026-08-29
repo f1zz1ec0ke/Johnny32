@@ -169,9 +169,11 @@ convention) had been cancelling out just well enough to look like progress.
 
 **Open:**
 
-* **Geometry.** Positions are a (major, minor) pair, major 0-6 and minor 0-7.
-  What they mean on screen is inference from the table rather than read from
-  the code.
+* ~~**Geometry.**~~ Settled. The minor is one of eight **facings**, which
+  `seg4:0x01D6` pivots toward and `seg4:0x0258` indexes the standing poses by;
+  the major is an **area** 1-6, indexing the route matrix at `ds:0x0A94`.
+  Neither is a screen coordinate, because every waypoint and pose in the data
+  is already a `(frame, x, y)` triple. See `docs/SCHEDULER.md`.
 * **Sound.** This build ships silent, so there is nothing here to recover. The
   engine imports MMSYSTEM and the data segment holds `WAVESFX%d`, so a release
   with audio would have more to say.

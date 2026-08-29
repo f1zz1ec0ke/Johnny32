@@ -33,8 +33,21 @@ decoded:
 * the walking system — the route matrix, the weighted route blocks and the 34
   hand-authored walk paths in real screen coordinates
 
-Still open: what the position pairs mean geometrically, and the cadence of the
-outer scene loop.
+Both of the things that were open here have since been read out of the code
+rather than inferred from the tables. A position's **minor** is one of eight
+facings, not a spot inside an area — `seg4:0x0B64` writes it, `seg4:0x01D6`
+pivots an eighth of a turn at a time to reach it, and `seg4:0x0258` indexes
+the standing poses by it. The **major** is an area 1-6: the index into the 6x6
+route matrix at `ds:0x0A94` and into the per-area pose ids at `ds:0x0347` and
+`ds:0x034E`. Neither carries a screen coordinate, and does not need one —
+every walk waypoint and every standing pose in the data is already a
+`(frame, x, y)` triple, so an area *is* wherever its paths end. The outer loop
+is the queue: `seg4:0x08B9` builds one, `seg4:0x06D4` steps it, `seg4:0x0C28`
+closes it, and the clock only moves between queues.
+
+The one thing genuinely absent is **sound**. This build ships silent, so there
+is nothing in it to recover: the engine imports MMSYSTEM and the data segment
+holds `WAVESFX%d`, but a release with audio would be a different file.
 
 Details in [docs/ANALYSIS.md](docs/ANALYSIS.md),
 [docs/FILE_FORMATS.md](docs/FILE_FORMATS.md),
