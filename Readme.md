@@ -175,18 +175,18 @@ python3 tools/oracle.py
   queue6       16 answers, all identical
   place      1536 answers, all identical
   adslen     2688 answers, all identical
+  holiday     366 answers, all identical
+  backdrop     64 answers, all identical
+  repeat       12 answers, all identical
+  island     8320 answers, all identical
   route      4736 answers, all identical
   turn        512 answers, all identical
   blocks     2688 answers, all identical
   seqpass    1662 answers, all identical
   seqrun     1056 answers, all identical
-  island     8320 answers, all identical
-  repeat       12 answers, all identical
-  backdrop     64 answers, all identical
-  holiday     366 answers, all identical
   codec       181 answers, all identical
-  ttm       51475 answers, all identical
-  tick       1327 answers, all identical
+  ttm        51475 answers, all identical
+  tick        895 answers, all identical
 ```
 
 That covers the generator, the weighted chooser every decision is built on,
