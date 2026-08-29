@@ -820,3 +820,26 @@ fn a_comment_needs_whitespace_in_front_of_it() {
     assert_eq!(s.speed, 75);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_sprite_clipped_away_does_not_tint_the_surface() {
+    // `tinted` decides whether a composed frame keeps its own colours, and a
+    // frame that does is no longer recoloured by a later palette change. So
+    // it has to mean "something non-palette was drawn", not "something was
+    // attempted" -- otherwise an art-pack sprite that missed the clip
+    // rectangle entirely costs the whole composition its palette art.
+    use crate::dgds::Frame;
+    use crate::render::{Clip, Mirror, Surface};
+    let mut s = Surface::new(64, 64);
+    let sprite = Frame {
+        width: 4,
+        height: 4,
+        pixels: vec![1; 16],
+        colour: Some(vec![0xFF00_FF00; 16]),
+    };
+    s.clip = Some(Clip { x1: 0, y1: 0, x2: 8, y2: 8 });
+    s.draw_sprite(&sprite, 40, 40, Mirror::none());
+    assert!(!s.tinted, "nothing landed inside the clip");
+    s.draw_sprite(&sprite, 2, 2, Mirror::none());
+    assert!(s.tinted, "this one did");
+}

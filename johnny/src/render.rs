@@ -199,8 +199,13 @@ impl Surface {
     /// nearest index for the indexed buffer so everything built on that --
     /// the repaint check, the frame dumps -- still sees a picture.
     fn put_colour(&mut self, x: i32, y: i32, rgb: u32, index: u8) {
-        self.tinted = true;
         if self.visible(x, y) {
+            // Only once something is actually down. `tinted` is what decides
+            // whether a composed frame carries its own colours, and a frame
+            // that does is no longer recoloured by a later palette change --
+            // so a sprite clipped entirely away must not cost the surface
+            // its palette art.
+            self.tinted = true;
             let at = y as usize * self.width as usize + x as usize;
             self.pixels[at] = index;
             self.colour[at] = rgb;

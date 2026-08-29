@@ -802,11 +802,9 @@ impl Scenery {
             // Weights from `seg3:0x04EE`: a glint, then the three wave sizes.
             match weighted(rng, &[35, 5, 5, 5]) {
                 1 => {
-                    {
-                        if let Some(g) = self.spawn_glint(rng) {
-                            self.glints.push(g);
-                            moved = true;
-                        }
+                    if let Some(g) = self.spawn_glint(rng) {
+                        self.glints.push(g);
+                        moved = true;
                     }
                 }
                 pick @ 2..=4 => {

@@ -1509,8 +1509,7 @@ impl Director {
             None => {
                 // No sea in the archive. Fall back to the backdrop the scenes
                 // load themselves, so the island still appears.
-                if let Some(f) = archive.screen("ISLETEMP.SCR")
-                {
+                if let Some(f) = archive.screen("ISLETEMP.SCR") {
                     self.stage.set_background(f);
                 }
                 self.note("scenery: ISLETEMP.SCR (no sea found)".into());
