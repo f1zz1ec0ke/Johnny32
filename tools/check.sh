@@ -25,6 +25,9 @@
 #               over every compressed leaf in the archive, its own TTM
 #               interpreter run over every frame of every script, and its
 #               own per-tick pass driven a scene at a time
+#   listing     the oracle listing in the Readme against what the oracle just
+#               said -- quoted output can be checked like output, and twice
+#               a number in the prose has gone stale unnoticed
 #   reach       and where those questions went: how much of the scripts the
 #               oracle actually ran, which is the half `oracle` cannot
 #               report on itself. Held to its own tier's floor, so a query
@@ -78,7 +81,14 @@ run 8 python3 tools/framecheck.py
 step island
 run 9 ./johnny/target/release/jcisle
 step oracle
-run 2 python3 tools/oracle.py
+# Kept, because the listing step reads it rather than running the oracle
+# again -- twenty-odd minutes is too much to spend twice on the same answers.
+oracle_out=$(mktemp)
+run 2 env JC_ORACLE_OUT="$oracle_out" bash -c \
+    'set -o pipefail; python3 tools/oracle.py | tee "$JC_ORACLE_OUT"'
+step listing
+run 4 python3 tools/listing.py "$oracle_out"
+rm -f "$oracle_out"
 step reach
 run 7 python3 tools/reach.py
 
