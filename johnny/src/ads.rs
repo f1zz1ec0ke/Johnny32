@@ -1160,7 +1160,7 @@ impl Sequencer {
         self.states.insert(
             (ttm, scene),
             match state {
-                1 | 2 | 3 => SceneState::Queued(state as u8),
+                1..=3 => SceneState::Queued(state as u8),
                 4 => SceneState::Over,
                 5 => SceneState::Finished,
                 _ => SceneState::Idle,

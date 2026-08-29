@@ -35,7 +35,9 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
-    #![allow(non_snake_case, non_camel_case_types)]
+    // The names are the SDK's, deliberately, so that this file can be read
+    // next to the Win32 documentation.
+    #![allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms)]
 
     pub type HANDLE = *mut core::ffi::c_void;
     pub type HWND = HANDLE;
@@ -345,7 +347,6 @@ fn windows_main() {
         Config,
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let joined = args.join(" ");
     let flag = args
         .first()
         .map(|a| a.trim_start_matches(['/', '-']).to_ascii_lowercase())
@@ -356,10 +357,9 @@ fn windows_main() {
         digits.parse::<usize>().unwrap_or(0) as HWND
     };
     let mode = if flag.starts_with('p') {
-        let rest = if flag.len() > 1 {
-            flag[1..].to_string()
-        } else {
-            args.get(1).cloned().unwrap_or_default()
+        let rest = match flag.strip_prefix('p') {
+            Some(r) if !r.is_empty() => r.to_string(),
+            _ => args.get(1).cloned().unwrap_or_default(),
         };
         let parent = parent_hwnd(&rest);
         if parent.is_null() {
@@ -372,7 +372,6 @@ fn windows_main() {
     } else if flag.starts_with('c') || flag.is_empty() {
         Mode::Config
     } else {
-        let _ = joined;
         Mode::Saver
     };
 
@@ -390,7 +389,7 @@ fn windows_main() {
              Johnny's day begins as HHMM (default 0900) -- his day is eight \
              real hours, so nine puts dusk at three and the next dawn at \
              five. Speed is a percentage of the rate the data was authored \
-             at (default 60). Sounds, Clouds and Waves turn those off.\r\n\r\n\
+             at (default 100). Sounds, Clouds and Waves turn those off.\r\n\r\n\
              Introduction and NumDays are not settings: they are how far \
              Johnny's eleven-day story has got, written back when the \
              screensaver stops so it carries on where it left off.",

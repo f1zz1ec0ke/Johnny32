@@ -189,12 +189,30 @@ impl Settings {
 /// `key=value` lines under `[section]` headers, lower-cased keys, comments
 /// after `;` or `#`. Only the one section is read; anything else is skipped,
 /// so an original `SCRANTIC.INI` with other sections in it still works.
+/// Where a comment starts, if it does: the first `;` or `#` that begins the
+/// line or follows a space. Windows' own INI reader only honours one at the
+/// start of a line, but the file this port writes puts them after values too,
+/// and a hand-edited file is the whole reason to be lenient.
+fn comment(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    bytes.iter().enumerate().find_map(|(i, &c)| {
+        let marker = c == b';' || c == b'#';
+        let standalone = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        (marker && standalone).then_some(i)
+    })
+}
+
+
 fn parse(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut inside = false;
     for line in text.lines() {
         let line = line.trim();
-        let line = match line.find([';', '#']) {
+        // A comment starts the line, or follows whitespace. Cutting at every
+        // `;` and `#` instead would truncate a value that contains one --
+        // `SourceDir=/home/me/Games #1` is a legal path, and silently losing
+        // half of it sends the loader looking in the wrong place.
+        let line = match comment(line) {
             Some(i) => line[..i].trim(),
             None => line,
         };

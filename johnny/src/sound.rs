@@ -30,9 +30,8 @@ pub struct Sounds {
     waves: Vec<Option<Vec<u8>>>,
 }
 
-/// The first sound id, and the last the loader looks for (`seg5:0x0077`
-/// compares against 25).
-pub const FIRST: u16 = 1;
+/// The last sound id the loader looks for (`seg5:0x0077` compares against
+/// 25). Ids start at 1; slot 0 is never used.
 pub const LAST: u16 = 25;
 
 impl Sounds {

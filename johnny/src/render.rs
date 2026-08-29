@@ -315,14 +315,4 @@ impl Surface {
         }
     }
 
-    /// Expand to RGBA using a palette, for the PNG writer, which works from
-    /// the indexed buffer so its output is comparable run to run.
-    pub fn to_rgba(&self, palette: &[[u8; 3]; 256]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.pixels.len() * 4);
-        for &i in &self.pixels {
-            let c = palette[i as usize];
-            out.extend_from_slice(&[c[0], c[1], c[2], 0xff]);
-        }
-        out
-    }
 }

@@ -65,7 +65,15 @@ impl ArtPack {
                     let Some(stem) = p.file_stem().and_then(|n| n.to_str()) else {
                         continue;
                     };
-                    if p.extension().and_then(|e| e.to_str()) != Some("png") {
+                    // Case-insensitively, the way the top-level arm below
+                    // does it: an artist saving `000.PNG` out of a paint
+                    // program should not find it silently ignored in one
+                    // place and honoured in the other.
+                    let png = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+                    if !png {
                         continue;
                     }
                     let Ok(index) = stem.parse::<usize>() else {
@@ -97,13 +105,16 @@ impl ArtPack {
                     Frame {
                         width: img.width,
                         height: img.height,
-                        // A rough index for the buffer everything else is
-                        // built on. Nothing shows it; it keeps the repaint
-                        // check and the frame dumps from seeing holes.
+                        // `Frame` carries an indexed buffer as well as a
+                        // colour one, and this keeps the two the same length.
+                        // Only `colour` is ever read back out of a pack --
+                        // `apply` copies that and leaves the original's
+                        // indices alone -- so this is the invariant and not
+                        // a picture of anything.
                         pixels: img
                             .pixels
                             .iter()
-                            .map(|p| if p >> 24 == 0 { 0 } else { 15 })
+                            .map(|p| if p >> 24 == 0 { crate::render::TRANSPARENT } else { 15 })
                             .collect(),
                         colour: Some(img.pixels),
                     },

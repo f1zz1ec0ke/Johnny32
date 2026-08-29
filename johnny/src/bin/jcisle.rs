@@ -24,6 +24,7 @@
 
 use johnny::dgds::{Archive, Frame};
 use johnny::render::TRANSPARENT;
+use johnny::director;
 use johnny::scenery::{Scenery, ISLAND, ORIGIN, SURF};
 use johnny::{png, scenery};
 use std::process::ExitCode;
@@ -186,7 +187,10 @@ fn main() -> ExitCode {
     // The correction from the nominal anchor the offsets in segment 3 are
     // written against. A piece one pixel out takes its score from the
     // nineties into single figures, so this number is not a preference.
-    println!("anchor       {ORIGIN:?} from the nominal (0x121, 0x117)");
+    println!(
+        "anchor       {ORIGIN:?} from the nominal ({:#05X}, {:#05X})",
+        director::ISLAND_X, director::ISLAND_Y
+    );
     if bad.is_empty() {
         println!("\nthe island is where the engine's own render says it is");
         return ExitCode::SUCCESS;

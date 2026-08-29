@@ -218,13 +218,15 @@ fn every_shipped_opcode_decodes() {
 
 #[test]
 fn settings_round_trip() {
-    let mut s = settings::Settings::default();
-    s.start_time = 1830;
-    s.sounds = false;
-    s.story_offered = 4;
-    s.story_reached = 7;
-    s.story_date = (1992, 12, 25);
-    s.speed = 85;
+    let s = settings::Settings {
+        start_time: 1830,
+        sounds: false,
+        story_offered: 4,
+        story_reached: 7,
+        story_date: (1992, 12, 25),
+        speed: 85,
+        ..Default::default()
+    };
     let dir = std::env::temp_dir().join("johnny-settings-test");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("johnny.ini");
@@ -408,10 +410,12 @@ fn the_two_story_days_leapfrog() {
     // `seg4:0x0BDC` lets the reached day catch up on the next real day. So
     // the offer is usually one ahead, and a reload that takes it for both
     // jumps the story forward every time the screen goes blank.
-    let mut s = settings::Settings::default();
-    s.story_offered = 5;
-    s.story_reached = 4;
-    s.story_date = (1992, 6, 1);
+    let s = settings::Settings {
+        story_offered: 5,
+        story_reached: 4,
+        story_date: (1992, 6, 1),
+        ..Default::default()
+    };
     let mut d = director::Director::new(0);
     d.configure(s.clone());
     assert_eq!(d.day, 4, "the reached day");
@@ -426,10 +430,12 @@ fn the_calendar_gates_the_story() {
     // today, nothing moves; stored long ago, it moves by exactly one.
     let today = director::civil_from_days(director::today());
     for (date, want) in [(today, 5u8), ((2020, 1, 1), 6)] {
-        let mut s = settings::Settings::default();
-        s.story_offered = 6;
-        s.story_reached = 5;
-        s.story_date = date;
+        let s = settings::Settings {
+            story_offered: 6,
+            story_reached: 5,
+            story_date: date,
+            ..Default::default()
+        };
         let mut d = director::Director::new(0);
         d.configure(s);
         d.settle_story_for_test();
@@ -787,3 +793,30 @@ fn the_ellipse_opcode_draws_a_circle_the_height_decides() {
     );
 }
 
+
+#[test]
+fn a_comment_needs_whitespace_in_front_of_it() {
+    // Two things pull against each other here. The file this port writes
+    // puts comments after values, so `StartTime=900  ; ...` has to lose the
+    // tail -- but a path may contain `#` or `;`, and cutting at every one of
+    // them sends the loader somewhere else entirely. The line is drawn where
+    // every other INI reader draws it: a marker starts a comment when it
+    // starts the line or follows a space, and is part of the value otherwise.
+    let dir = std::env::temp_dir().join("johnny_ini_comment_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("johnny.ini");
+    std::fs::write(
+        &path,
+        "[ScreenSaver.ScreenAntics]\n\
+         ; a whole-line comment\n\
+         SourceDir=/games/Johnny#1;odd\n\
+         StartTime=1030    ; when his day begins\n\
+         Speed=75\n",
+    )
+    .unwrap();
+    let s = crate::settings::Settings::load(&path);
+    assert_eq!(s.source_dir, "/games/Johnny#1;odd", "no space, so not a comment");
+    assert_eq!(s.start_time, 1030, "space then `;`, so a comment");
+    assert_eq!(s.speed, 75);
+    let _ = std::fs::remove_file(&path);
+}

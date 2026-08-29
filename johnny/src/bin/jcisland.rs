@@ -81,7 +81,7 @@ fn main() -> ExitCode {
     }
     // `JC_DATE=YYYY-MM-DD` pins the calendar, which is how you get a holiday
     // decoration without waiting for October.
-    if let Some(date) = std::env::var("JC_DATE").ok() {
+    if let Ok(date) = std::env::var("JC_DATE") {
         let parts: Vec<i64> = date.split('-').filter_map(|p| p.parse().ok()).collect();
         if let [y, m, dd] = parts[..] {
             d.date = johnny::director::days_from_civil(y, m as u32, dd as u32);
@@ -171,7 +171,7 @@ fn main() -> ExitCode {
     let silent: Vec<u16> = heard
         .keys()
         .copied()
-        .filter(|id| sounds.as_ref().map_or(true, |s| s.wave(*id).is_none()))
+        .filter(|id| sounds.as_ref().is_none_or(|s| s.wave(*id).is_none()))
         .collect();
     println!(
         "sounds: {played} played, {} distinct{}",

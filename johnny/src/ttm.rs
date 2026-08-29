@@ -213,7 +213,7 @@ pub fn walk(code: &[u8]) -> (Vec<Instr>, usize) {
             // even -- so a string always consumes an even number of bytes
             // and the next opcode stays word aligned.
             let text_len = end - (p + 2);
-            let next = end + 1 + if text_len % 2 == 0 { 1 } else { 0 };
+            let next = end + 1 + usize::from(text_len.is_multiple_of(2));
             (Vec::new(), Some(s), next)
         } else {
             if p + 2 + count * 2 > code.len() {
@@ -578,42 +578,6 @@ impl Stage {
     pub fn set_background(&mut self, frame: Frame) {
         self.surface.draw_background(&frame);
         self.background = Some(frame);
-        self.background_gen += 1;
-    }
-
-    /// Paint a sprite permanently into the background, the way the island is
-    /// composited over the sea before anything animates on top.
-    pub fn blit_into_background(&mut self, sprite: &Frame, x: i32, y: i32) {
-        let Some(mut bg) = self.background.take() else {
-            return;
-        };
-        // Borrow the surface to draw into the background, colours and all.
-        // The background only grows a colour buffer if the sprite or the
-        // background itself already had one; while neither does, it stays
-        // palette art and a later `F05F` still recolours it.
-        let tinted = self.surface.tinted;
-        let saved = std::mem::replace(&mut self.surface.pixels, bg.pixels);
-        let had = bg.colour.take();
-        let saved_colour = std::mem::replace(
-            &mut self.surface.colour,
-            had.clone().unwrap_or_else(|| {
-                self.surface
-                    .pixels
-                    .iter()
-                    .map(|i| crate::render::pack(self.palette[*i as usize]))
-                    .collect()
-            }),
-        );
-        self.surface.tinted = had.is_some();
-        let clip = self.surface.clip.take();
-        self.surface
-            .draw_sprite(sprite, x, y, crate::render::Mirror::none());
-        bg.pixels = std::mem::replace(&mut self.surface.pixels, saved);
-        let now = std::mem::replace(&mut self.surface.colour, saved_colour);
-        bg.colour = self.surface.tinted.then_some(now);
-        self.surface.tinted = tinted;
-        self.surface.clip = clip;
-        self.background = Some(bg);
         self.background_gen += 1;
     }
 

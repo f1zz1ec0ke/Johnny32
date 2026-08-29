@@ -195,8 +195,8 @@ pub fn lzw_decompress(data: &[u8], usize_hint: usize) -> Vec<u8> {
     let mut r = LzwReader::new(data);
     let mut prefix = [0u16; 4096];
     let mut suffix = [0u8; 4096];
-    for i in 0..256 {
-        suffix[i] = i as u8;
+    for (i, s) in suffix.iter_mut().enumerate().take(256) {
+        *s = i as u8;
     }
     let mut next_code: usize = 257;
 
@@ -336,7 +336,7 @@ pub fn rle_decompress(data: &[u8], usize_hint: usize) -> Vec<u8> {
         p += 1;
         if n & 0x80 != 0 {
             let Some(&b) = data.get(p) else { break };
-            out.extend(std::iter::repeat(b).take((n & 0x7f) as usize));
+            out.resize(out.len() + (n & 0x7f) as usize, b);
             p += 1;
         } else {
             let n = n as usize;
@@ -455,9 +455,9 @@ pub fn read_palette(body: &[u8]) -> Result<[[u8; 3]; 256]> {
     let vga = leaf(body, b"VGA:").ok_or(Error::Missing("VGA: chunk"))?;
     let mut pal = [[0u8; 3]; 256];
     for (i, entry) in pal.iter_mut().enumerate() {
-        for c in 0..3 {
+        for (c, channel) in entry.iter_mut().enumerate() {
             let v = vga.payload.get(i * 3 + c).copied().unwrap_or(0) as u32;
-            entry[c] = ((v * 255) / 63).min(255) as u8;
+            *channel = ((v * 255) / 63).min(255) as u8;
         }
     }
     Ok(pal)

@@ -304,12 +304,6 @@ impl Default for Backdrop {
 }
 
 impl Backdrop {
-    pub fn from_mask(mask: u32) -> Backdrop {
-        let mut b = Backdrop::default();
-        b.apply(mask);
-        b
-    }
-
     /// Fold one scene's wishes in. The engine ORs the whole queue's masks
     /// together this way before it draws anything (`seg3:0x1C41`), so what a
     /// queue's scenes ask for between them is what the island looks like for
