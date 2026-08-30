@@ -4,6 +4,53 @@ Reverse engineering the 1992 Dynamix/Sierra screensaver **Johnny Castaway**
 (internally *Screen Antics* / `SCRANTIC`) with the goal of a native 64-bit
 version — no DOSBox, no NTVDM, no 16-bit anything.
 
+| | | |
+| :---: | :---: | :---: |
+| ![Johnny climbing the palm](docs/screens/day.png) | ![the island at night](docs/screens/night.png) | ![a Christmas tree on the island](docs/screens/christmas.png) |
+| Up the palm, mid-afternoon | Night, and the moon on the water | 25 December, and he has a tree |
+
+Rendered by this port, from a copy of the original data. The artwork is
+Sierra's — these three screenshots aside, none of their data is redistributed
+here: no archive, no executable, no exported sprites. The screensaver reads a
+copy you supply.
+
+## Verified against the original, not against a memory of it
+
+The engine is not approximated here. `tools/x86.py` is a small 16-bit
+interpreter that loads `SCRANTIC.EXE`'s segments and *runs the original's own
+functions*, and `tools/oracle.py` puts the same questions to that and to this
+port and diffs the answers. A disagreement is a bug in the port with no
+interpretation on either side.
+
+| | |
+| --- | --- |
+| ADS instructions reached and diffed | **2,242 of 2,242 — 100%** |
+| TTM frames run and diffed | **6,631 of 6,631 — 100%** |
+| Scene markers reached | **611 of 611 — 100%** |
+| Queries the port and the binary agree on | **22 of 22** |
+
+Every executable word in the ten scripts is handed to the interpreter, every
+frame of every script is run, and every scene marker reaches the dispatcher —
+and all of it is compared, because `tools/reach.py` counts only the cases
+`oracle` also diffs. At the deep tier that is 31,680 `seqrun` answers, 13,836
+`seqpass`, 19,654 `tick` and 51,475 `ttm`, all identical to what the binary
+said.
+
+The denominator is measured too. Of the 2,688 words in the scripts, 446 can
+never reach the dispatcher at all — sequence headers, terminators, joiners and
+their second halves, random-block separators, opcodes with no handler, and the
+word after an `F010` that stops its own sequence. Each is set aside with the
+reason, read out of the binary rather than assumed, and if a run ever
+dispatches one of them the measurement fails and names it.
+
+What that leaves is one honest gap, and it is structural: the original hands
+its sprite blits to GDI, so there is no inner loop of Sierra's to compare a
+port against. `ISLETEMP.SCR` is the engine's own render of the island this
+port composes, so `jcisle` scores the composition against it pixel by pixel —
+92.3% over 18,248 painted pixels, with each piece checked separately — and
+that is the only place in the data where the original's pixels exist to be
+compared at all.
+
 ## Where things stand
 
 `johnnycastaway.exe` in this repo, as downloaded from screensaverplanet.com,
@@ -53,6 +100,73 @@ Details in [docs/ANALYSIS.md](docs/ANALYSIS.md),
 [docs/FILE_FORMATS.md](docs/FILE_FORMATS.md),
 [docs/SCHEDULER.md](docs/SCHEDULER.md) and
 [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
+
+## Getting it running
+
+The port has **no dependencies** — `cargo build` needs nothing but a Rust
+toolchain. Python 3 is only for the tools, and nothing here needs a network.
+
+You supply your own copy of the original. `johnnycastaway.exe` from
+screensaverplanet.com is an NSIS installer wrapping a UPX-packed launcher
+wrapping the untouched 1992 binary, and `tools/extract_original.py` unwraps all
+three layers — it needs `7z` and `upx` on PATH. If you already have
+`RESOURCE.001`, `RESOURCE.MAP` and `SCRANTIC.EXE`, drop them in `original/`
+and skip that step.
+
+### Linux
+
+```sh
+sudo apt install p7zip-full upx-ucl python3        # Debian/Ubuntu
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+git clone https://github.com/f1zz1ec0ke/Johnny32 && cd Johnny32
+python3 tools/extract_original.py                  # -> original/
+cargo build --release --manifest-path johnny/Cargo.toml
+./johnny/target/release/jcisland 600               # -> frames/*.png
+```
+
+### macOS
+
+```sh
+brew install p7zip upx python3
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+git clone https://github.com/f1zz1ec0ke/Johnny32 && cd Johnny32
+python3 tools/extract_original.py
+cargo build --release --manifest-path johnny/Cargo.toml
+./johnny/target/release/jcisland 600
+```
+
+On both, `jcisland` writes PNG frames rather than opening a window: the only
+live display this port has is the Windows shell below. Watching it is a matter
+of pointing anything at `frames/` — `ffmpeg -framerate 20 -i
+frames/island_%04d.png johnny.mp4` turns a run into a video.
+
+### Windows
+
+This is the real thing — a screensaver Windows will run.
+
+```sh
+cargo build --release --bin johnny_scr
+```
+
+Rename `johnny_scr.exe` to `Johnny.scr`, right-click it and pick **Install**,
+or drop it in `C:\Windows\System32`. Put `RESOURCE.001` and `RESOURCE.MAP`
+beside it — or point `JC_DATA` at the folder holding them. Put `SCRANTIC.EXE`
+there too and you get the sound effects, which live in its resource table
+rather than in the archive; without it the island is silent and everything
+else works.
+
+Cross-compiling from Linux or macOS needs a mingw-w64 linker:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu --bin johnny_scr
+```
+
+Settings live in `johnny.ini` beside the screensaver, under the same section
+and key names the original used in `SCRANTIC.INI`, so a 1992 file works as it
+is. See "Settings, and the story that survives being switched off".
 
 ## Usage
 
@@ -786,9 +900,12 @@ that reaching the end of a program does not stop a scene, and a scene played
 with a `flags` of zero runs its program through twice — which is exactly what
 makes `IF_RUNNING` on the scene you just started ever come true.
 
-## Building the screensaver
+## The Windows shell
 
-`johnny_scr` is the Windows shell — `/s` full screen, `/p <HWND>` for the
+Building and installing it is under "Getting it running" above; this is what
+it does once it is there.
+
+`johnny_scr` is the shell — `/s` full screen, `/p <HWND>` for the
 settings-dialog preview, `/c` for the config box. It talks to Win32 directly,
 so the crate still has no dependencies.
 
@@ -796,33 +913,15 @@ On more than one monitor it covers the whole virtual desktop with a single
 window but draws **one island per screen**, each centred and in proportion,
 rather than stretching a single 640x350 surface across the lot.
 
-On Windows:
-
-```sh
-cargo build --release --bin johnny_scr
-```
-
-Cross-compiling from Linux needs a mingw-w64 linker:
-
-```sh
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu --bin johnny_scr
-```
-
 Type-checking the Windows-only code needs no linker at all, which is worth
-knowing when you are developing on Linux — this catches everything short of
-actually running it:
+knowing when you are developing on Linux or macOS — this catches everything
+short of actually running it, and it is the only part of the port that the
+ordinary build never compiles:
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
 cargo check --manifest-path johnny/Cargo.toml --target x86_64-pc-windows-msvc
 ```
-
-Rename the result to `Johnny.scr` and put it in `C:\Windows\System32`, with
-`RESOURCE.001` and `RESOURCE.MAP` from your own copy of the original beside it
-— or point `JC_DATA` at the folder holding them. Put `SCRANTIC.EXE` there too
-and you get the sound; without it the island is silent but everything else
-works.
 
 It has been run, on a three-monitor Windows desktop: it comes up, draws the
 island, plays scenes and exits on input. Development happens on a headless
