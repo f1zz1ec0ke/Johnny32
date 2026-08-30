@@ -895,15 +895,25 @@ impl Scenery {
     pub fn compose(&self) -> Frame {
         let mut surface = self.surface(self.base.width, self.base.height);
         surface.draw_background(&self.base);
-        // Clouds go over the island, palm included, and that is the original's
-        // doing rather than an accident here. `seg3:0x0136` builds the
-        // backdrop once -- sea, island pieces, palm -- and the per-tick pass
-        // at `seg3:0x040e` then runs the wave stepper, the cloud walk at
-        // `seg3:0x0b67`, the surf at `seg3:0x0e74` and the raft, with no
-        // island redraw anywhere in it. So a cloud blitted each tick lands on
-        // top of the palm, and one drifting past the fronds passes in front of
-        // them. The cloud band is the top 139 rows (`seg3:0x0B0C`) and the
-        // fronds reach up to about y=122, so the overlap is real and visible.
+        // The order is `seg3:0x040e`'s, which runs the whole backdrop pass
+        // every tick over a backdrop built once by `seg3:0x0136`: the wave and
+        // glint drawer at `0x4a2`, the cloud walk at `0xb67`, then the surf at
+        // `0xe74`. Nothing in it redraws the island, which is why a cloud
+        // drifting past the palm passes in *front* of the fronds -- the cloud
+        // band is the top 139 rows and the fronds reach up to about y=122.
+        //
+        // The waves come first, and that matters: wave band 2 spans y 289-382
+        // and the surf sits at y 303-319, so the two overlap, and the engine
+        // paints the surf over the wave rather than under it.
+        for w in self.waves.iter() {
+            let frame = KINDS[w.kind].sequence[w.cursor.min(6)];
+            if let Some(f) = self.pieces.get(frame) {
+                surface.draw_sprite(f, w.x, w.y, Mirror::default());
+            }
+        }
+        for g in self.glints.iter() {
+            surface.draw_line(g.x, g.y, g.x + 1, g.y, GLINT_COLOUR);
+        }
         for c in self.clouds.iter() {
             if let Some(f) = self.pieces.get(CLOUDS[c.kind].0) {
                 surface.draw_sprite(f, c.x, c.y, Mirror::default());
@@ -919,15 +929,6 @@ impl Scenery {
                 let (x, y) = self.at(x, y);
                 surface.draw_sprite(f, x, y, Mirror::default());
             }
-        }
-        for w in self.waves.iter() {
-            let frame = KINDS[w.kind].sequence[w.cursor.min(6)];
-            if let Some(f) = self.pieces.get(frame) {
-                surface.draw_sprite(f, w.x, w.y, Mirror::default());
-            }
-        }
-        for g in self.glints.iter() {
-            surface.draw_line(g.x, g.y, g.x + 1, g.y, GLINT_COLOUR);
         }
         Frame {
             width: self.base.width,
