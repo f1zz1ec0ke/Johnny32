@@ -1,0 +1,56 @@
+[package]
+name = "johnny"
+version = "0.1.0"
+edition = "2021"
+description = "A native reimplementation of the 1992 Dynamix screensaver Johnny Castaway"
+license = "MIT"
+
+# None, on purpose. The port talks to Win32 directly on Windows and writes its
+# own PNGs everywhere else, so `cargo build` needs nothing but a toolchain.
+[dependencies]
+
+[lib]
+name = "johnny"
+path = "src/lib.rs"
+
+# The screensaver itself.
+[[bin]]
+name = "johnny_scr"
+path = "src/bin/johnny_scr.rs"
+
+# Watching it: the whole island, one script, one frame.
+[[bin]]
+name = "jcisland"
+path = "src/bin/jcisland.rs"
+
+[[bin]]
+name = "jcplay"
+path = "src/bin/jcplay.rs"
+
+[[bin]]
+name = "jcrender"
+path = "src/bin/jcrender.rs"
+
+# Checking it. `jcisle` is run by `tools/check.sh`; it was building only
+# because Cargo discovers `src/bin` on its own, which would have stopped
+# quietly the day anyone set `autobins = false`.
+[[bin]]
+name = "jcoracle"
+path = "src/bin/jcoracle.rs"
+
+[[bin]]
+name = "jcisle"
+path = "src/bin/jcisle.rs"
+
+# Digging: dump a record, check an art pack.
+[[bin]]
+name = "jcdump"
+path = "src/bin/jcdump.rs"
+
+[[bin]]
+name = "jcart"
+path = "src/bin/jcart.rs"
+
+[profile.release]
+lto = true
+opt-level = 3
