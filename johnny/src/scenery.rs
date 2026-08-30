@@ -895,7 +895,15 @@ impl Scenery {
     pub fn compose(&self) -> Frame {
         let mut surface = self.surface(self.base.width, self.base.height);
         surface.draw_background(&self.base);
-        // Clouds first: they are up in the sky, behind everything.
+        // Clouds go over the island, palm included, and that is the original's
+        // doing rather than an accident here. `seg3:0x0136` builds the
+        // backdrop once -- sea, island pieces, palm -- and the per-tick pass
+        // at `seg3:0x040e` then runs the wave stepper, the cloud walk at
+        // `seg3:0x0b67`, the surf at `seg3:0x0e74` and the raft, with no
+        // island redraw anywhere in it. So a cloud blitted each tick lands on
+        // top of the palm, and one drifting past the fronds passes in front of
+        // them. The cloud band is the top 139 rows (`seg3:0x0B0C`) and the
+        // fronds reach up to about y=122, so the overlap is real and visible.
         for c in self.clouds.iter() {
             if let Some(f) = self.pieces.get(CLOUDS[c.kind].0) {
                 surface.draw_sprite(f, c.x, c.y, Mirror::default());
