@@ -317,6 +317,15 @@ pub struct Rng {
     j: usize,
 }
 
+impl Rng {
+    /// The generator's whole state, for the oracle to compare with the
+    /// engine's: the two cursors (`ds:0x1CE2` and `ds:0x1CE4`, word
+    /// indices into the table) and the table itself.
+    pub fn state(&self) -> (usize, usize, [u16; 56]) {
+        (self.i, self.j, self.table)
+    }
+}
+
 /// `ds:0x1CE6`, verbatim.
 const SEED_TABLE: [u16; 56] = [
     0xDD23, 0x9533, 0xF3CD, 0x4BC2, 0xF7E2, 0xA2DF, 0xAA70, 0x60AA,
@@ -601,7 +610,7 @@ impl Sequencer {
     ///
     /// That difference is the repaint model, not an oversight. The engine
     /// leaves what a scene drew on the screen, so a backdrop scene guarded by
-    /// `1330` needs to run once and no more. This port paints every tick from
+    /// `1330` needs to run once and no more. This port paints every pass from
     /// nothing, so the same scene has to run again to be on screen at all --
     /// `STAND.ADS` sequence 14 and `MJ_AMB.BMP` are exactly that, and
     /// remembering the play count across scenes would leave Johnny standing

@@ -1,7 +1,7 @@
 # Dynamix DGDS formats as used by Johnny Castaway
 
-Derived from the shipped data plus a disassembly of the original 16-bit
-`SCRANTIC.EXE`. All integers are little-endian.
+Derived from the shipped data and a disassembly of the 16-bit `SCRANTIC.EXE`.
+All integers are little-endian.
 
 ## `RESOURCE.MAP`
 
@@ -12,13 +12,10 @@ uint16  count           180
 struct { uint32 hash; uint32 offset; } entries[count]
 ```
 
-`offset` is a byte offset into `RESOURCE.001`. The file is exactly
-`21 + count * 8` bytes. `hash` is a filename hash; it is not needed in
-practice, because the archive can be walked linearly.
+`offset` is a byte offset into `RESOURCE.001`; the file is `21 + count * 8`
+bytes. `hash` is a filename hash, not needed since the archive walks linearly.
 
 ## `RESOURCE.001`
-
-A flat sequence of records:
 
 ```
 char    name[13]        e.g. "JOHNWALK.BMP", NUL-padded
@@ -26,7 +23,7 @@ uint32  size
 uint8   body[size]
 ```
 
-Walking these back to back consumes the file exactly.
+Records run back to back and consume the file exactly.
 
 ## Chunks
 
@@ -38,9 +35,7 @@ uint32  size            top bit set => container
 uint8   payload[size & 0x7FFFFFFF]
 ```
 
-A container's payload is itself a chunk list. Leaves are data.
-
-Chunks seen in this build:
+A container's payload is a chunk list; leaves are data.
 
 | Tag | In | Meaning |
 | --- | --- | --- |
@@ -54,36 +49,21 @@ Chunks seen in this build:
 | `VGA:` | .BMP | vestigial alternate art, see below |
 | `VER:` | .TTM/.ADS | version string, e.g. `4.09` |
 | `PAG:` | .TTM | `uint16` page count |
-| `TT3:` | .TTM | animation bytecode |
+| `TT3:` | .TTM | animation bytecode, RLE-compressed |
 | `TTI:` | .TTM | container |
 | `TAG:` | .TTM/.ADS | scene-number to name table |
 | `RES:` | .ADS | resource-number to `.TTM` filename table |
 
-`FILES.VIN` is the exception: it has no chunk structure at all, just a
-newline-separated preload list (`intro.scr`, `johncast.pal`, `ocean*.scr` and
-so on). Its first four bytes spell `intr`, from `intro.scr`, which looks enough
-like a tag that a parser slicing without a bounds check will happily invent a
-chunk out of it.
+`FILES.VIN` has no chunk structure: a newline-separated preload list whose
+first bytes `intr` look like a tag. Bounds-check before slicing.
 
-**`BIN:`, `SCR:`, `TT3:` and `VGA:`-inside-a-`.BMP` carry a compression
-header.** Everything else is raw, including the `VGA:` in `JOHNCAST.PAL`, whose
-768 bytes are the palette directly. That makes 180 compressed chunks: 127
-`BIN:`, 10 `SCR:`, 41 `TT3:` and 2 `VGA:`.
-
-`TT3:` is easy to miss. It is RLE-compressed, and because RLE stores long
-literal runs verbatim, a raw `TT3:` still shows its strings in the clear and
-still disassembles for the first few dozen instructions. The giveaway is a
-stray byte every ~128 bytes -- the literal-run markers.
-
-Exactly two records, `JOHNWALK.BMP` and `MJTELE.BMP`, carry a `VGA:` chunk
-alongside their `BIN:`. It decompresses to the same byte count as the `BIN:`
-but is not a second image: in `JOHNWALK.BMP` it is 96,946 zero nibbles out of
-96,952. It looks like an alternate-art slot the Dynamix toolchain reserved and
-nobody ever filled. Ignore it and read `BIN:`.
+Compressed chunks (with the header below): `BIN:`, `SCR:`, `TT3:`, and `VGA:`
+inside a `.BMP`; 180 in total (127, 10, 41, 2). The `VGA:` in `JOHNCAST.PAL`
+is raw. `TT3:` shows its strings in the clear because RLE stores long literal
+runs verbatim. The `VGA:` in `JOHNWALK.BMP` and `MJTELE.BMP` is almost all
+zero nibbles (96,946 of 96,952); read `BIN:`.
 
 ## Compression
-
-A compressed leaf payload is:
 
 ```
 uint8   method          0 = none, 1 = RLE, 2 = LZW
@@ -93,55 +73,39 @@ uint8   data[]
 
 ### RLE (method 1)
 
-Per run: `uint8 n`. **If bit 7 is set**, repeat the following single byte
-`n & 0x7F` times. **If bit 7 is clear**, copy the next `n` bytes verbatim.
-
-The inverted reading is the natural guess and it is wrong. It still decodes
-short streams nearly correctly, so it fails quietly.
+Per run: `uint8 n`. Bit 7 set: repeat the next byte `n & 0x7F` times. Bit 7
+clear: copy the next `n` bytes verbatim.
 
 ### LZW (method 2)
 
-Ported from `SCRANTIC.EXE` segment 6 (init at `0x0D63`, `getcode` at `0x0FC1`).
-It is of the Unix `compress` lineage, and the details matter:
+Ported from segment 6 (init `0x0D63`, `getcode` `0x0FC1`). Unix `compress`
+lineage with these specifics:
 
-* Codes are **LSB-first**, 9 to 12 bits wide.
-* Entries 0..255 are the literals. Code **256 is CLEAR**. The first free entry
-  is **257**.
-* On CLEAR the decoder zeroes prefixes 0..255, drops back to 9-bit codes, and
-  sets the next free entry to **256, not 257**. `oldcode` is deliberately *not*
-  reset, so the entry added immediately after a CLEAR is built from a stale
-  `oldcode`. The encoder does the same thing, so it round-trips.
-* At 12 bits the original stores a max-code of `0x1000`, not `0x0FFF`. Since
-  the next free entry also caps at `0x1000`, the comparison stops being true
-  and the table simply **freezes** — it is never auto-reset when full.
-* **The input is read in blocks of `codesize` bytes — eight codes per block.**
-  A code-width increase or a CLEAR discards whatever is left of the current
-  block and starts a fresh one.
+* Codes are LSB-first, 9 to 12 bits wide.
+* 0..255 are literals, 256 is CLEAR, the first free entry is 257.
+* On CLEAR: zero prefixes 0..255, drop to 9-bit codes, set the next free
+  entry to 256 (not 257). `oldcode` is not reset, so the entry added after a
+  CLEAR is built from a stale `oldcode`. The encoder matches.
+* At 12 bits the max-code is `0x1000`, not `0x0FFF`; the table freezes when
+  full and is never auto-reset.
+* Input is read in blocks of `codesize` bytes, eight codes per block. A width
+  increase or a CLEAR discards the rest of the current block. Treating the
+  input as one continuous bitstream decodes small files and quietly
+  truncates large ones.
 
-That last point is the one that bites. Treat the input as a single continuous
-bitstream and small files still decode perfectly, because they never reach the
-first width change; large ones quietly come out a few percent short. All 139
-compressed chunks in `RESOURCE.001` decode to exactly their declared size with
-the block behaviour in place.
-
-None of that rests on the reading any more. `tools/oracle.py codec` runs the
-original's own decompressor over every compressed leaf and diffs — with
-`JC_DEEP=1`, all 180 of them and all 5,225,880 bytes, identical — so each of
-these details is confirmed by the binary rather than by this page. The way in
-is the memory branch of the stream layer: `seg6:0x0185` picks between two
-input modes on bit 5 of `ds:0x4030`, and with the bit clear the input is a far
-memcpy from `ds:0x4040`, so a descriptor built by hand replaces the file
-machinery entirely. `seg6:0x0C92(handle)` opens a stream compressed — running
-the method's init out of the vtable at `ds:0x1DC6 + method*14 + 6` and
-stepping the position past the five-byte header — and
-`seg6:0x0A0D(handle, off, seg, n)` produces `n` decompressed bytes.
+`tools/oracle.py codec` diffs the original decompressor against the port over
+every compressed leaf (`JC_DEEP=1`: all 180, 5,225,880 bytes). `seg6:0x0185`
+picks the input mode on bit 5 of `ds:0x4030` (clear: far memcpy from
+`ds:0x4040`); `seg6:0x0C92(handle)` opens a stream via the vtable at
+`ds:0x1DC6 + method*14 + 6`; `seg6:0x0A0D(handle, off, seg, n)` yields `n`
+bytes.
 
 ## Images
 
-Both sprites and backgrounds are **4bpp, two pixels per byte, high nibble
-first**, rows padded to a byte boundary. Backgrounds are 640x350.
+Sprites and backgrounds are 4bpp, two pixels per byte, high nibble first, rows
+padded to a byte boundary. Backgrounds are 640x350 (sea screens 640x480).
 
-`.BMP` `INF:` is:
+`.BMP` `INF:`:
 
 ```
 uint16  count
@@ -149,22 +113,19 @@ uint16  widths[count]
 uint16  heights[count]
 ```
 
-and the decompressed `BIN:` is those frames concatenated, each
+The decompressed `BIN:` is the frames concatenated, each
 `((width + 1) / 2) * height` bytes.
 
 ## Palette
 
-`JOHNCAST.PAL` -> `PAL:` -> `VGA:`, 768 raw bytes, 256 RGB triples of 6-bit
-VGA values (scale by 255/63).
-
-The first 16 entries are the EGA set **with entries 0 and 5 exchanged**, so
-index 0 holds magenta and index 5 holds black. Index 0 is the transparency key
-for sprites; the swap is what frees black up to be drawn normally.
+`JOHNCAST.PAL` -> `PAL:` -> `VGA:`: 768 bytes, 256 RGB triples of 6-bit VGA
+values (scale by 255/63). The first 16 entries are the EGA set with entries 0
+and 5 exchanged: index 0 is magenta, index 5 black. Index 0 is the sprite
+transparency key.
 
 ## Scripts
 
-`.TTM` files are per-scene animation programs, `.ADS` files sequence them.
-
+`.TTM` files are per-scene animation programs; `.ADS` files sequence them.
 `TAG:` and `RES:` share a layout:
 
 ```
@@ -172,153 +133,106 @@ uint16  count
 count * { uint16 id; char name[]; }   // NUL-terminated
 ```
 
-`TT3:` (TTM) and `SCR:` (ADS) both hold a stream of 16-bit opcodes, and both
-are compressed — `TT3:` in particular is RLE, which is easy to miss because
-long literal runs leave most of the bytecode readable.
+`TT3:` (TTM) and `SCR:` (ADS) hold streams of 16-bit opcodes, both compressed.
 
 ### TTM
 
-The low nibble of the opcode is the operand count, and `0x0F` means one inline
-NUL-terminated string padded to a word boundary. `seg12:0x0461` is the fetch
-loop. Opcodes are looked up in three tables — 47 general (`seg12:0x12BD`), 28
-draw (`seg12:0x03BC`) and 18 in the `Cxxx` family (`seg12:0x00FC`) — each with
-a parallel table of handlers; anything absent is ignored rather than fatal.
-
-All 41 scripts disassemble end to end, 34,781 instructions. The full list is
-in `johnny/src/ttm.rs`, where the opcode enum is exhaustive so a missed one is
-a compile error rather than a silent no-op. The ones worth knowing here:
+The low nibble of the opcode is the operand count; `0x0F` means one inline
+NUL-terminated string padded to a word. Fetch loop `seg12:0x0461`; opcode
+tables with parallel handlers: 47 general (`seg12:0x12BD`), 28 draw
+(`seg12:0x03BC`), 18 `Cxxx` (`seg12:0x00FC`); unknown opcodes are ignored.
+41 scripts, 34,781 instructions. Enum in `johnny/src/ttm.rs`; full audit in
+`docs/SCHEDULER.md`.
 
 | Opcode | Operands | Meaning |
 | --- | --- | --- |
-| `0x0FF0` | 0 | end of frame — present what has been drawn and wait |
+| `0x0FF0` | 0 | end of frame: present and wait |
 | `0x0110` | 0 | end of scene: set `ds:0x4644` and carry on (`seg12:0x0F73`) |
-| `0x1021` | 1 | frame delay, in 16ms ticks |
+| `0x1021` | 1 | frame delay, in 16 ms ticks |
 | `0x2022` | 2 | frame delay, random in a range |
-| `0x1111` | 1 | scene marker — the id an ADS `PlayScene` names |
+| `0x1111` | 1 | scene marker, the id an ADS `PlayScene` names |
 | `0x1201` | 1 | jump to a scene, taken at the next frame boundary |
 | `0xF02F` | string | load a sprite sheet into the current slot |
 | `0xA5x4` | 4 | draw sprite (x, y, frame, slot); `x` is the mirror mode |
 | `0xB606` | 6 | copy a rectangle between pages: (x, y, w, h, from, to) |
 | `0xA054` / `0xA064` | 4 | save and restore one rectangle of screen |
+| `0xC051` | 1 | play sound; the resources live in `SCRANTIC.EXE` (535 uses) |
+| `0xA601`, `0x4214` | | empty handlers (6,874 uses between them) |
 
-`0xB606` is worth spelling out, because it is the only one that reaches
-outside the scene. `seg12:0x0EB4` resolves its last two operands through
-`seg12:0x14E0` — page 0 is the working page, 1 the composite, 2 the island
-backdrop segment 3 paints — and hands the rectangle to the copier at
-`seg8:0x06CE`. All six uses in the data are `(.., 2, 1)`: put a piece of the
-island back over whatever has been drawn on it. That is how a scene rubs out
-what it drew, and it is why a port that repaints the whole background every
-frame gets it for free.
-
-`0xA054` and `0xA064` are the same idea the long way round, through the second
-draw table at `seg12:0x1900`. `A054` writes the rectangle into the structure
-at `ds:0x2638`; `A064` walks it and draws it back. Six of that table's eight
-opcodes are never used at all, and these two are used once each, in
-`GJGULIVR.TTM`, with the same rectangle.
-
-`0xC051` is `PLAY_SOUND`, with 535 call sites; the sounds it names are
-resources inside `SCRANTIC.EXE`, not the archive. Two opcodes that look like
-they should do something do not: `0xA601` and `0x4214` have empty handlers
-despite 6,874 call sites between them.
+`0xB606`: `seg12:0x0EB4` resolves pages through `seg12:0x14E0` (0 working, 1
+composite, 2 the island backdrop) and calls `seg8:0x06CE`. All six uses are
+`(.., 2, 1)`: island back over the drawing. `0xA054`/`0xA064` use the second
+draw table at `seg12:0x1900`, storing the rectangle in `ds:0x2638`; once each,
+in `GJGULIVR.TTM`.
 
 ### ADS
 
-ADS does **not** use the low-nibble rule. Each handler advances the script
-pointer itself, and the lengths come from a dedicated function at
-`seg10:0x0303` with its own 35-entry table. The opcodes are at `seg10:0x1875`
-with handlers at `0x18CD` — so the table is 0x58 bytes of words, forty-four
-of them, and an opcode outside it walks off the end of the search at
-`seg10:0x152C` and does nothing at all. Seventy-seven words in the shipped
-scripts are of that kind; `tools/reach.py` sets them aside, along with the
-headers, terminators and joiners, when it counts what a run reached.
+ADS does not use the low-nibble rule: lengths come from `seg10:0x0303` (35
+entries). Opcodes at `seg10:0x1875`, handlers at `0x18CD`, 44 words; an opcode
+outside the table does nothing (`seg10:0x152C`). The shipped scripts hold 77
+such words; `tools/reach.py` sets them aside.
 
-An `.ADS` record holds numbered sequences, and **several run at once**. Each
-has a state word: 1 means the interpreter runs it this pass, 2 means it has
-stopped, 4 means it starts on the next one. `seg10:0x1ACB` steps every TTM
-instance first and then interprets every sequence in state 1.
+An `.ADS` record holds numbered sequences that run concurrently. Each has a
+state word: 1 runs this pass, 2 stopped, 4 starts on the next pass.
+`seg10:0x1ACB` runs once per dispatcher pass (about every 55 ms): every
+sequence in state 1 is interpreted first, then every TTM instance is stepped.
 
-A sequence is a list of **guarded rules** rather than a program. Each rule is a
-condition, some instructions, and a `Step` that ends the rule. The engine
-re-reads a sequence **from the top on every pass** — `seg10:0x1C18` throws away
-the pointer its interpreter stopped at — so on each 16ms tick every condition
-in the sequence is tested again against the world as it now is, and whichever
-ones are true fire. A `Step` is not a yield across ticks: `seg10:0x194A`
-swallows the flag inside a guarded block, so a `Step` ends the block it is in
-and the pass moves on to the next rule.
+A sequence is a list of guarded rules: a condition, instructions, and a
+`Step` (`1510`). It is re-read from the top every pass (`seg10:0x1C18` discards
+the stopping point), so every condition is re-tested and every true one fires.
+A `Step` inside a guarded block is swallowed (`seg10:0x194A`) and the pass
+continues with the next rule; only a top-level `Step` ends the pass.
 
 | Opcode | Meaning |
 | --- | --- |
 | `0x2005` | play scene: ttm id, scene id, repeat operand, weight |
-| `0x1510` / `0x1520` | end of a guarded block |
+| `0x1510` / `0x1520` | end of a guarded block (see below) |
 | `0x1010`-`0x1080`, `0x1310`-`0x13C1` | conditions on a scene's run state |
 | `0x1420` / `0x1430` | join the previous condition to the next with AND / OR |
 | `0x3010` ... `0x30FF` | weighted random choice of one enclosed entry |
 | `0x2010` / `0x2015` | stop a scene (state 0) / finish it (state 5) |
-| `0x4000` / `0x4010` | move a scene in the draw order. `0x4000` is `seg10:0x15FB`, which calls `seg10:0x0F8C` and appends the record to the tail of the instance list; `0x4010` is `seg10:0x160C`, which calls `seg10:0x0EF2` and makes it the head. `seg10:0x1C35` walks head to tail, so the tail is drawn last: `0x4000` brings a scene to the front, `0x4010` sends it behind |
+| `0x4000` / `0x4010` | draw order: `0x4000` (`seg10:0x15FB`, `seg10:0x0F8C`) appends the record to the instance list tail; `0x4010` (`seg10:0x160C`, `seg10:0x0EF2`) makes it the head. `seg10:0x1C35` draws head to tail, so `0x4000` brings a scene to the front and `0x4010` sends it behind |
 | `0xF000` / `0xF200` / `0xF210` | set another sequence of this script running |
-| `0xF010` | put a sequence into state 2; an operand of -1 means this one |
+| `0xF010` | put a sequence into state 2; operand -1 means this one |
 | `0xFFFF` | end of a sequence body |
 
-`0x1420` and `0x1430` are **not** the same link, which is easy to miss because
-a disassembler shows both as a bare word between two conditions. `seg10:0x13E7`
-reads them left to right and short-circuits: a link whose answer is already
-decided steps over the condition on the far side of it. `0x1430` also sets a
-sticky flag that wins at the end (`seg10:0x14A2`). `0x1420` appears 47 times
-and `0x1430` 30 times in the shipped scripts; reading the first as OR makes a
-rule that should need all four of its conditions fire on any one of them.
+`0x1420` (AND, 47 uses) and `0x1430` (OR, 30 uses) are different links.
+`seg10:0x13E7` reads them left to right and short-circuits; `0x1430` also
+sets a sticky flag that wins at the end (`seg10:0x14A2`).
 
-The conditions read two fields of the scene's instance record — the play count
-at +0x2D and the run state at +0x2F — and their predicates are at
-`seg10:0x1351`-`0x13C7`:
+Conditions read the instance's play count at `+0x2D` and run state at
+`+0x2F`; predicates at `seg10:0x1351`-`0x13C7`:
 
 | Opcode | True when |
 | --- | --- |
 | `0x1010` / `0x1310` | state 5 (finished) |
 | `0x1020` / `0x1320` | not state 5 |
-| `0x1030` / `0x1330` | never played (+0x2D is zero) |
+| `0x1030` / `0x1330` | never played (`+0x2D` is zero) |
 | `0x1040` / `0x1340` | played at least once |
-| `0x1050` / `0x1350` | state 4 — **has just ended**, not "is running" |
-| `0x1060` / `0x1360` | state 4 or 0 — not waiting its turn |
-| `0x1070` / `0x1370` | state 1, 2 or 3 — queued |
+| `0x1050` / `0x1350` | state 4: has just ended |
+| `0x1060` / `0x1360` | state 4 or 0: not waiting its turn |
+| `0x1070` / `0x1370` | state 1, 2 or 3: queued |
 
-`0x1350` is the one everything is built out of: 500 of the 662 conditions in
-the shipped scripts are it. A scene stays in its queued state for as long as it
-is on screen and only reaches state 4 on the pass its program ends, so
-"`0x1350` on scene A" means "A has just finished". That is what makes a script
-a cascade — each rule starts the next scene as the one before it ends — and
-reading it as "A is playing" starts them all on top of each other.
+`0x1350` is 500 of the 662 shipped conditions. State 4 is reached on the pass
+a program ends and cleared when the instance is next stepped
+(`seg10:0x1DE2`), so it lasts one pass; instances are stepped after the
+scripts for that reason. "`0x1350` on A" means "A has just finished".
 
-State 4 lasts exactly one pass (`seg10:0x1DE2` clears it the next time the
-instance is stepped), which is why instances have to be stepped before the
-scripts are interpreted and not after.
+### Nesting
 
-### Rules nest, and that is load-bearing
+A rule's block runs to its `Step`; a rule inside a block is nested.
+`seg10:0x1758` runs a true block through a nested interpreter. The skipper for
+a false block, `seg10:0x106B`, uses eighteen entries at `cs:0x1142`:
 
-A rule's block is everything up to its `Step`, and a rule *inside* a block is
-nested in it. `seg10:0x1758` runs a true block through a nested copy of the
-interpreter, and `seg10:0x194A` swallows the yield that block ends on — so a
-`Step` closes the block it is in and the pass carries on to the next rule.
-Only a `Step` at the top level ends the pass. A script that fires four rules in
-one pass is normal; one that fires at most one per pass stalls.
-
-The skipper has to agree, and its own dispatch table says exactly how.
-`seg10:0x106B` looks each instruction up in eighteen entries at `cs:0x1142`:
-
-| In the table | What the scanner does |
+| In the table | Scanner action |
 | --- | --- |
-| `1510`, `1500` | stop — the block ends here |
-| `FFFF` | return null — the script ended first |
+| `1510`, `1500` | stop: the block ends here |
+| `FFFF` | return null: the script ended first |
 | the fifteen `13x0` guards | recurse: a nested rule's block belongs to it |
-| **everything else** | advance one instruction and carry on |
+| everything else | advance one instruction |
 
-That last row is the one to get right. `1520` is not in the table, and neither
-are the `10x0` guards, so both are skipped like any other instruction. A
-skipper that treats `1520` as a terminator stops in the middle of a block it
-was told to swallow, and **the rest of that block then runs as though it were
-the next rule** — a guard that just said no still starts the scenes
-underneath it. Several animations begin at once, at the moment one ends.
-
-`BUILDING.ADS` builds Johnny's fire out of exactly that shape:
+`1520` and the `10x0` guards are not in the table and are skipped like any
+instruction.
 
 ```
 IF RUNNING[3,142] {
@@ -330,58 +244,34 @@ IF RUNNING[3,142] {
 IF RUNNING[3,40] { ... }           <- top level, reached every pass
 ```
 
-A skipper that stops at the first `Step` it sees leaves the pointer inside the
-outer rule and the sequence never reaches the rule after it. The fire is built
-and then nothing happens, for ever.
+### `10x0` against `13x0`
 
-### `10x0` and `13x0` are not two spellings of the same guard
-
-They share their predicates exactly — the table at `cs:0x14BD` sends `1010`
-and `1310` to one handler, `1050` and `1350` to another, all the way down. But
-`seg10:0x1519` sends them to two entirely different *instructions*.
-
-A `13x0` (`seg10:0x1758`) is the rule described above: true runs the block and
-the pass carries on to the next rule.
-
-A `10x0` (`seg10:0x17A0`) waits. True parks a resume pointer at the guard
-itself (`ctx+0x292+seq*4`), counts the hit (`ctx+0xB2+seq*2`, which is what
-`1080` tests), runs the block, and then returns null — which ends the
-sequence's pass however deeply nested it was. The next pass restarts **at the
-guard**, not at the top of the sequence. So it is a "stay here while this
-holds" loop. False clears both, and hands the block to a scanner of its own:
-`seg10:0x118A` looks for a `1520` rather than a `1510`, and the sequence
-resumes just past it.
-
-One `10x0` in the whole shipped corpus — a `1070` in `ACTIVITY.ADS`, guarding
-the one `1520` — and between them they are how "MUNDANE JOHN READ" waits for
-Johnny to finish reading before the seagull arrives.
+Same predicates (table `cs:0x14BD`), different instructions (`seg10:0x1519`).
+A `13x0` (`seg10:0x1758`) runs its block when true and the pass carries on. A
+`10x0` (`seg10:0x17A0`) waits: when true it parks a resume pointer at the guard
+(`ctx+0x292+seq*4`), counts the hit (`ctx+0xB2+seq*2`, tested by `1080`), runs
+the block and returns null, ending the pass at any depth; the next pass
+restarts at the guard. When false it clears both and skips to past the `1520`
+(`seg10:0x118A`). One `10x0` is shipped: a `1070` in `ACTIVITY.ADS`.
 
 ### The three stop opcodes
 
 | | |
 | --- | --- |
-| `1510` | ends the block it is in; at the top level, ends the sequence's pass. 584 uses |
-| `1520` | returns null, which climbs out through every enclosing guard and ends the pass whatever the nesting. 1 use |
-| `1500` | scan a block, then stop (`seg10:0x1567`). No shipped script uses it |
+| `1510` | ends the block it is in; at top level, ends the sequence's pass. 584 uses |
+| `1520` | returns null: ends the pass at any nesting. 1 use |
+| `1500` | scan a block, then stop (`seg10:0x1567`). Unused |
 
-`seg10:0x1925` is the interpreter loop and `ds:0x460C` is its stop flag; the
-difference between `1510` and `1520` is only whether the pointer that comes
-back is live or null (`seg10:0x1588` against `seg10:0x158A`).
+`seg10:0x1925` is the interpreter loop and `ds:0x460C` its stop flag; `1510`
+and `1520` differ only in whether the returned pointer is live or null
+(`seg10:0x1588` against `seg10:0x158A`).
 
-### Random blocks hold instructions, not just scenes
+### Random blocks
 
-`seg10:0x0CDA` sums the weight of **every** instruction between `3010` and
-`30FF`, draws against the total, and hands whichever it lands on to the general
-dispatcher (`seg10:0x0D9C`) — so a random block can contain anything. The
-shipped scripts use three: `2005` play a scene, `2010` stop one, and `3020`, a
-bare weight that means "do nothing this time".
-
-The weight is not always in the same place (`seg10:0x0C8D`): `2000` and `2005`
-use the fourth operand, `3020` uses the first, and **everything else uses the
-third**. Weighing only the entries that play a scene means an entry that stops
-one can never be drawn — and that is how the twelve standing sequences end, so
-they do not.
-
-What those states mean, and how the repeat operand drives them, is in
-`docs/SCHEDULER.md` under "How long a scene lasts". It is the part that
-decides pacing, and it is not obvious from the bytecode alone.
+`seg10:0x0CDA` sums the weight of every instruction between `3010` and
+`30FF`, draws `rand() % total`, and hands the winner to `seg10:0x0D9C`. Shipped
+scripts use `2005` (play), `2010` (stop) and `3020` (a bare weight: nothing
+this time). Weight operand (`seg10:0x0C8D`): fourth for `2000`/`2005`, first
+for `3020`, third otherwise. The twelve standing sequences end through a
+weighted `2010`. Run states and the repeat operand: `docs/SCHEDULER.md`, "How
+long a scene lasts".

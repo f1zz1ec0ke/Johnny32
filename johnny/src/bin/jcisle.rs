@@ -85,7 +85,7 @@ fn main() -> ExitCode {
     // The bare-island layout, at the nominal anchor, on a sea it never
     // actually pairs with -- only the pixels the island puts down are
     // compared, so which sea is underneath does not matter.
-    let Some(scenery) = Scenery::build(&archive, scenery::SEAS[0], false, 0, 1) else {
+    let Some(scenery) = Scenery::build(&archive, scenery::SEAS[0], false, Default::default(), 1) else {
         eprintln!("could not build the island");
         return ExitCode::FAILURE;
     };

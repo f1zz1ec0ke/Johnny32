@@ -20,7 +20,7 @@
 #   island      the composed island against `ISLETEMP.SCR`, which is the
 #               1992 engine's own render of it -- the one place in the data
 #               where pixels can be compared rather than decisions
-#   oracle      twenty-two questions put to the 1992 binary itself and to
+#   oracle      twenty-four questions put to the 1992 binary itself and to
 #               the port, and diffed -- including its own LZW and RLE run
 #               over every compressed leaf in the archive, its own TTM
 #               interpreter run over every frame of every script, and its

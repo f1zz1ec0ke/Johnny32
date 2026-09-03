@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(300);
+    let passes: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(300);
     let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0x15_1A2D);
 
     let settings = johnny::settings::Settings::load(&johnny::settings::Settings::path())
@@ -118,7 +118,7 @@ fn main() -> ExitCode {
     let mut glints_max = 0usize;
     let mut active_max = 0usize;
 
-    for _ in 0..ticks {
+    for _ in 0..passes {
         let drew = d.tick(&archive);
         for id in d.take_sounds() {
             *heard.entry(id).or_insert(0) += 1;
@@ -131,7 +131,7 @@ fn main() -> ExitCode {
         while logged < d.log.len() {
             // Ticks and wall clock, so pacing can be read off the log.
             let t = d.ticks();
-            let secs = t as f32 * johnny::director::ms_per_tick_at(settings.speed) as f32 / 1000.0;
+            let secs = johnny::director::seconds_at(t, settings.speed);
             println!("[{t:6} {secs:7.1}s] {}", d.log[logged]);
             logged += 1;
         }
@@ -165,7 +165,7 @@ fn main() -> ExitCode {
 
     println!(
         "\nwaves: {waves_max} at most, {:.1} on average; clouds: {clouds_max}, glints: {glints_max}, scenes at once: {active_max}",
-        waves_total as f32 / ticks.max(1) as f32
+        waves_total as f32 / passes.max(1) as f32
     );
     let played: usize = heard.values().sum();
     let silent: Vec<u16> = heard
@@ -184,7 +184,7 @@ fn main() -> ExitCode {
     );
     println!(
         "{frame} frames in {:.1}s, day {}, phase {} ({}), Johnny at {:?}",
-        d.ticks() as f32 * johnny::director::ms_per_tick_at(settings.speed) as f32 / 1000.0,
+        johnny::director::seconds_at(d.ticks(), settings.speed),
         d.day,
         d.phase,
         if d.is_night() { "night" } else { "day" },

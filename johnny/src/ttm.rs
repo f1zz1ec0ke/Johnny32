@@ -333,7 +333,7 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
         // function -- prologue, epilogue, nothing between.
         //
         // 0x4204 saves a screen region (seg12:0x0E69). This renderer repaints
-        // the whole background every tick, so there is nothing for a saved
+        // the whole background every pass, so there is nothing for a saved
         // region to restore and no-oping it is correct rather than lazy.
         0xA601 | 0x4214 | 0x5005 | 0x2012 | 0x4204 => Op::NoOp(opcode),
 
@@ -365,7 +365,7 @@ fn build(opcode: u16, args: Vec<i16>, text: Option<String>) -> Op {
 
 /// One resolved drawing operation, kept so a held frame can be painted again.
 ///
-/// The engine runs a held frame **again**, every tick, with `ds:0x46DA` raised
+/// The engine runs a held frame **again**, every pass, with `ds:0x46DA` raised
 /// (`seg10:0x1CD6`) so that everything with a side effect is gated off and
 /// everything that draws is not. This port has to put the same frames back
 /// too, and re-running their instructions is not the same thing -- because by
@@ -608,7 +608,7 @@ impl Stage {
         self.background = Some(bg);
     }
 
-    /// Repaint the background. Scenes composite over this each tick.
+    /// Repaint the background. Scenes composite over this each pass.
     pub fn restore_background(&mut self) {
         if let Some(bg) = self.background.take() {
             self.surface.draw_background(&bg);
@@ -666,7 +666,7 @@ impl Stage {
 
 /// Everything a repaint is required to leave exactly as it found it.
 ///
-/// The port paints the whole picture again every tick, which is only the same
+/// The port paints the whole picture again every pass, which is only the same
 /// thing the engine does if painting a frame a second time changes nothing
 /// but the pixels it draws. Four separate bugs came from an opcode that
 /// quietly broke that -- a bitmap reloaded, a whole backdrop replaced, a
@@ -810,8 +810,10 @@ fn fits(stage: &Stage, x: i32, y: i32, w: i16, h: i16) -> bool {
 /// What one step of an instance produced.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
-    /// A frame is ready; hold it for this many ticks.
-    Frame(u16),
+    /// A frame ran. `asked` is what it set the delay to, if it set one --
+    /// the engine's `ds:0x46E8`, which `seg10:0x1CB4` clears to -1 in front
+    /// of every frame -- and `had` is the delay the instance came in with.
+    Frame { asked: Option<u16>, had: u16 },
     /// The program ran off the end.
     Finished,
 }
@@ -837,22 +839,9 @@ pub struct Instance {
     /// zeroed before each frame at `seg10:0x1CAE` and read at `0x1D1A`.
     pub ended: bool,
     /// The frame this instance last ran, for the tools -- the engine keeps it
-    /// at `[bx+8]` and hands it back to `seg11:0x074A` every tick a held
+    /// at `[bx+8]` and hands it back to `seg11:0x074A` every pass a held
     /// frame is drawn again.
     last_frame: usize,
-    /// The frame just run asked for a delay, and asked for a different one
-    /// than the instance already had.
-    ///
-    /// `seg10:0x1CE6` re-bases the instance's deadline to `now + delay` only
-    /// then: `ds:0x46E8` is what the frame asked for, `-1` if it asked for
-    /// nothing, and the deadline is left alone when it matches `+0x29`
-    /// already. Otherwise the deadline is whatever `seg10:0x196E` set when it
-    /// last stepped the instance on, which is a tick earlier -- so a frame
-    /// that changes the delay is shown one tick longer than one that inherits
-    /// the same delay. Six ticks either way is a tenth of a second, and it is
-    /// the difference between a scene that loops in step with the original
-    /// and one that drifts.
-    delay_changed: bool,
     /// The drawing colours, which belong to the instance and not to the
     /// screen.
     ///
@@ -885,8 +874,8 @@ pub struct Instance {
     /// The engine leaves what a frame drew on screen until something paints
     /// over it: scripts save and restore the rectangles they disturb
     /// (`4204` and `A064`) rather than the whole picture. This port repaints
-    /// the backdrop every tick, so it has to put the frames back on top of it
-    /// every tick too, or a sprite would only be on screen for the one tick
+    /// the backdrop every pass, so it has to put the frames back on top of it
+    /// every pass too, or a sprite would only be on screen for the one pass
     /// in seven its own script advanced on. See `Paint` for why this keeps
     /// the drawings rather than replaying the instructions.
     painted: Vec<Paint>,
@@ -909,7 +898,6 @@ impl Instance {
             last_goto: None,
             ended: false,
             last_frame: 0,
-            delay_changed: false,
             fg: 15,
             bg: 15,
             clip: None,
@@ -960,10 +948,6 @@ impl Instance {
         self.last_frame
     }
 
-    /// See `delay_changed`.
-    pub fn rebased(&self) -> bool {
-        self.delay_changed
-    }
 
     /// What the frame on screen is made of, for the tools.
     pub fn marks(&self) -> usize {
@@ -1083,14 +1067,13 @@ impl Instance {
             self.pc += 1;
             match op {
                 Op::EndFrame => {
-                    self.delay_changed = matches!(asked, Some(v) if v != had);
                     self.last_goto = self.pending_goto.take();
                     if let Some(target) = self.last_goto {
                         if !self.seek_scene(target) {
                             return Step::Finished;
                         }
                     }
-                    return Step::Frame(self.delay);
+                    return Step::Frame { asked, had };
                 }
                 Op::LoadScreen(name) => {
                     stage.loads += 1;
@@ -1252,7 +1235,7 @@ impl Instance {
                 }
                 Op::SceneMarker { .. } | Op::SetBackground(_) | Op::NoOp(_) => {}
                 // The record half. Nothing to do: this port repaints the
-                // whole background every tick, so what it saves is never lost.
+                // whole background every pass, so what it saves is never lost.
                 // It is still subject to the same guard as the restore half --
                 // `seg12:0x0318` is in front of the whole family -- which is
                 // the only part of it the `ttm` oracle can see.

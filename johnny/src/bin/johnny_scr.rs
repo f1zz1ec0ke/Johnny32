@@ -625,9 +625,13 @@ fn windows_main() {
             colors: [0; 256],
         };
 
-        // One tick is 16ms; see `director::MS_PER_TICK`. `Speed` scales it.
-        let ms_per_tick = johnny::director::ms_per_tick_at(settings.speed);
-        let mut last = GetTickCount();
+        // The engine's two clocks, on the one wall clock: a dispatcher pass
+        // every `PASS_MS`, and the software clock fires once per
+        // `MS_PER_TICK`, caught up on at each pass. `Speed` scales both.
+        let speed = settings.speed.clamp(10, 400) as u64;
+        let started = GetTickCount();
+        let mut last_pass: u64 = 0;
+        let mut fired: u64 = 0;
         let mut msg: MSG = core::mem::zeroed();
 
         while !QUIT.load(Ordering::Relaxed) {
@@ -646,26 +650,25 @@ fn windows_main() {
                 }
             }
 
-            // Catch up on however many ticks the clock has moved, the way the
-            // original's dispatcher does, but bounded so a hitch cannot make
-            // it sprint.
-            let now = GetTickCount();
-            let mut due = ((now.wrapping_sub(last)) / ms_per_tick).min(8);
-            if due == 0 {
+            // One pass when the last was a pass ago. Windows coalesces the
+            // timer messages the original ran on, so a late pass does not
+            // owe another; the software clock does catch up, bounded so a
+            // hitch cannot make it sprint.
+            let elapsed = GetTickCount().wrapping_sub(started) as u64 * speed / 100;
+            if elapsed - last_pass < johnny::director::PASS_MS as u64 {
                 Sleep(1);
                 continue;
             }
-            last = last.wrapping_add(due * ms_per_tick);
+            last_pass = elapsed;
+            let due = elapsed / johnny::director::MS_PER_TICK as u64;
+            let fires = (due - fired).min(16) as u32;
+            fired = due;
             // The time of day is the user's, not UTC's: the phase is half
             // hours since a dawn they set, so it has to be the local clock.
             let mut wall = SYSTEMTIME::default();
             GetLocalTime(&mut wall);
             director.hhmm = Some(wall.hour * 100 + wall.minute);
-            let mut drew = false;
-            while due > 0 {
-                drew |= director.tick(&archive);
-                due -= 1;
-            }
+            let drew = director.pass(&archive, fires);
             // `seg5:0x00BA`, with the flags it passes: asynchronous, from
             // memory, and no fallback beep for an id that has no resource.
             // `sndPlaySound` stops whatever is playing, so the island makes

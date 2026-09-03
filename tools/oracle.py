@@ -1544,12 +1544,12 @@ class World(Interpreter):
             m.write16(m.ds, TICK_CTX + 0x3D2 + sid * 2, self._plays(code, off))
         m.write16(m.ds, ADS_CURSEQ, sequence)
 
-    def tick(self):
+    def tick(self, fires):
         """One call of `seg10:0x1ACB`, with the clock moved on first the way
-        `seg2:0x16D8` moves it -- every deadline on an instance record is
-        measured against it."""
+        `seg2:0x16D8` moves it, `fires` times -- every deadline on an
+        instance record is measured against it."""
         m = self.m
-        lo = m.read16(m.ds, 0x2E72) + 1
+        lo = m.read16(m.ds, 0x2E72) + fires
         m.write16(m.ds, 0x2E72, lo & 0xFFFF)
         if lo > 0xFFFF:
             m.write16(m.ds, 0x2E74, (m.read16(m.ds, 0x2E74) + 1) & 0xFFFF)
@@ -1569,6 +1569,16 @@ class World(Interpreter):
 # the first scene of each of the ten `.ADS` files and runs each far enough to
 # get past the first frames, through several held ones and into the second.
 # `JC_DEEP=1` runs all sixty-five, four times as far.
+def ticks_by_pass(n):
+    """How many ticks of the 16ms software clock have fired by the end of
+    dispatcher pass `n`, at 55ms a pass: `director::ticks_by_pass`."""
+    return n * 55 // 16
+
+
+def fires_for_pass(n):
+    return ticks_by_pass(n) - ticks_by_pass(n - 1)
+
+
 def tick_cases():
     """Every scheduler scene, driven for a while, or one per file for less.
 
@@ -1580,6 +1590,12 @@ def tick_cases():
     rows = scenes.scenes()
     deep = bool(os.environ.get('JC_DEEP'))
     ticks = int(os.environ.get('JC_TICKS') or (120 if deep else 32))
+    # `JC_TICK_ONLY=MISCGAG.ADS` keeps to one file's scenes, which is how
+    # `tools/deep.sh` splits the deep tier into pieces a slow machine can
+    # finish one at a time.
+    only = os.environ.get('JC_TICK_ONLY')
+    if only:
+        rows = [(name, seq) for name, seq in rows if name == only]
     if deep:
         return [(name, int(seq), ticks) for name, seq in rows]
     first, out = set(), []
@@ -1596,7 +1612,7 @@ def q_tick():
     for record, sequence, ticks in cases:
         w = World(record, sequence)
         for n in range(ticks):
-            acts, draws = w.tick()
+            acts, draws = w.tick(fires_for_pass(n + 1))
             out.append('%s %d act %s' % (record, n, ' ; '.join(acts)))
             out += ['%s %d %s' % (record, n, line) for line in draws]
     out.append('total %d cases' % len(cases))
@@ -1610,6 +1626,284 @@ def p_tick():
         lines += port('tick', record, sequence, ticks)
     lines.append('total %d cases' % len(cases))
     return lines
+
+
+# ---- the outer loop, and the water under it ------------------------------
+
+def bitmap_sizes():
+    """Every `.BMP` in the archive: (width, height) per frame, off `INF:`."""
+    import dgds
+    out = {}
+    recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
+    for name, body, _ in recs:
+        if not name.endswith('.BMP'):
+            continue
+        for path, payload in dgds.flatten(dgds.parse_chunks(body)):
+            if path[-1] == 'INF:':
+                n = struct.unpack_from('<H', payload, 0)[0]
+                w = struct.unpack_from('<%dH' % n, payload, 2)
+                h = struct.unpack_from('<%dH' % n, payload, 2 + n * 2)
+                out[name] = list(zip(w, h))
+                break
+    return out
+
+
+class Engine:
+    """The program with its drawing walled off, for driving the outer loop.
+
+    Segments 3 and 4 -- the backdrop and the dispatcher -- run for real.
+    `seg7:0x124A`, the bitmap loader, is answered with shape tables of the
+    real frames' sizes, because the placer takes a sprite's size off its band
+    and the overlap tests read widths and heights; the sea loader is
+    answered with nothing, and everything else outside the wall -- the
+    blitter, the screen, the sounds, the ADS runner -- with zero. The one
+    call recorded is `seg5:0x00BA`, the sound request.
+    """
+
+    def __init__(self, inside):
+        self.m = fresh()
+        self.m.limit = 50_000_000
+        self.near = TTM_HEAP
+        self.sizes = bitmap_sizes()
+        self.sounds = []
+        m = self.m
+        m.hook(7, 0x124A, self._shapes)
+        m.hook(7, 0x16D8)
+        m.hook(7, 0x00FE)
+        # Through the wall: the generator, the weighted chooser, and the C
+        # runtime's long multiply the chooser scales its weights with.
+        m.wall(inside, self._outside,
+               allow={(4, 0x1E86), (4, 0x1F1B), (1, 0x0302)})
+        # The settings as they ship: island, clouds and waves on; the speed
+        # index over the line the spawner wants; the screen size.
+        for off, v in [(0xB6, 1), (0xB8, 1), (0xBA, 1), (0x30BE, 200),
+                       (0x2562, TTM_W), (0x2564, TTM_H)]:
+            m.write16(m.ds, off, v)
+        m.write8(m.ds, STORY_DAY, 1)
+        m.write8(m.ds, STORY_REACHED, 1)
+
+    def _shapes(self, m):
+        at = m.read16(m.ds, m.regs['sp'])
+        base = m._lin(m.ds, at)
+        name = m.mem[base:m.mem.index(0, base)].decode('latin-1')
+        frames = self.sizes.get(name)
+        if frames is None:
+            m.regs['ax'] = 0
+            return
+        table = self.near
+        recs = table + len(frames) * 2
+        for i, (w, h) in enumerate(frames):
+            rec = recs + i * 10
+            m.write16(m.ds, table + i * 2, rec)
+            m.write16(m.ds, rec + 6, w)
+            m.write16(m.ds, rec + 8, h)
+        self.near = (recs + len(frames) * 10 + 3) & ~3
+        if self.near > TTM_TOP:
+            raise RuntimeError('the shape tables have run into the stack')
+        m.regs['ax'] = table
+
+    def _outside(self, m, seg, off):
+        m.regs['ax'] = 0
+        if (seg, off) == (5, 0x00BA):
+            self.sounds.append(m.read16(m.ds, m.regs['sp']))
+
+    def timer(self, fires):
+        """`seg2:0x16CE`, the software clock, `fires` times."""
+        for _ in range(fires):
+            self.m.call(2, 0x16CE)
+
+
+def water_state(m):
+    """The object array at `ds:0x2F42` and the cloud array at `ds:0x2E82`,
+    in the words `Scenery::dump` prints them in."""
+    r = lambda off: _s16(m.read16(m.ds, off))
+    u = lambda off: m.read16(m.ds, off)
+    objects = []
+    for k in range(30):
+        at = 0x2F42 + k * 12
+        x, y = r(at), r(at + 2)
+        if x == 0 and y == 0:
+            continue
+        kind = u(at + 6)
+        if kind == 0:
+            objects.append('0:%d:%d:%d' % (x, y, r(at + 0xA)))
+        else:
+            objects.append('%d:%d:%d:%d:%d:%d'
+                           % (kind, x, y, u(at + 4), u(at + 8), r(at + 0xA)))
+    clouds = []
+    for k in range(15):
+        at = 0x2E82 + k * 12
+        x, y = r(at), r(at + 2)
+        if x == 0 and y == 0:
+            continue
+        clouds.append('%d:%d:%d:%d:%d' % (u(at + 6), x, y, u(at + 8), u(at + 0xA)))
+    return ('wind %d off %d %d coin %d surf %d %d %d delay %d %d objects %s clouds %s'
+            % (r(0x280), r(ISLAND_X), r(ISLAND_Y), u(LAYOUT),
+               u(0x282), u(0x284), u(0x286), u(0x288), u(0x28A),
+               ','.join(sorted(objects)), ','.join(sorted(clouds))))
+
+
+# What a queue can ask of the backdrop, and the hour: plain, at night, no
+# rock, flat calm, night asked for, a cutaway, and the island pinned or
+# quartered.
+WATER_CASES = [(0, 2), (0, 13), (0x0200, 2), (0x1000, 2), (0x0800, 2),
+               (0x2000, 2), (0x00200000, 2), (0x00040000, 2), (0x00100000, 13)]
+
+
+def water_passes():
+    return int(os.environ.get('JC_PASSES') or (600 if os.environ.get('JC_DEEP') else 200))
+
+
+def q_water():
+    """seg3:0x0136 and then seg3:0x040E(0), pass after pass.
+
+    The backdrop is built for a queue that asked for `mask` at `phase`, and
+    then the per-pass backdrop function runs with the software clock moved
+    on between calls the way the dispatcher's timer moves it. After every
+    call the whole object array and cloud array are read out: every wave
+    with its frame cursor, hold and countdown, every glint with its
+    countdown, every cloud with its speed and countdown, and the surf's
+    counters and both delay slots beside them.
+    """
+    passes = water_passes()
+    out = []
+    for case, (mask, phase) in enumerate(WATER_CASES):
+        e = Engine({3})
+        m = e.m
+        m.write16(m.ds, 0x30BA, phase)
+        m.write16(m.ds, 0x30BC, 0)
+        m.call(3, 0x1C41, [0xFFFF, 0xFFFF])
+        m.call(3, 0x1C41, [mask & 0xFFFF, mask >> 16])
+        m.call(3, 0x0136)                    # loads the bitmaps
+        m.call(3, 0x0136)                    # builds the backdrop
+        out.append('water %d setup %s' % (case, water_state(m)))
+        for n in range(passes):
+            e.timer(fires_for_pass(n + 1))
+            m.call(3, 0x040E, [0])
+            out.append('water %d %d %s' % (case, n, water_state(m)))
+    return out
+
+
+def p_water():
+    return port('water', water_passes(),
+                ','.join('%x:%d' % c for c in WATER_CASES))
+
+
+def run_passes():
+    return int(os.environ.get('JC_PASSES') or (6000 if os.environ.get('JC_DEEP') else 1500))
+
+
+RUN_STUB = 3
+
+
+def run_state(m, e, steps):
+    """The outer loop's state and the walk driver's, in the words
+    `Director::dump` prints them in. The route block is named by the pair
+    the matrix holds it under, the path by its step and how far along it
+    is, the pose by the triple it points at."""
+    u = lambda off: m.read16(m.ds, off)
+    r = lambda off: _s16(m.read16(m.ds, off))
+    route = u(ROUTE)
+    frm = 0
+    if route:
+        for f in range(1, 7):
+            for t in range(1, 7):
+                if u(0x0A94 + f * 12 + t * 2) == route:
+                    frm = f
+    path = u(PATH)
+    step, along = 0, 0
+    if path:
+        step = -1
+        for sid, (off, pts) in steps.items():
+            if off <= path < off + len(pts) * 6 and (path - off) % 6 == 0:
+                step, along = sid, (path - off) // 6
+    pose = u(POSE)
+    triple = (u(pose), u(pose + 2), u(pose + 4)) if pose else (0, 0, 0)
+    rows = []
+    k = 0
+    while u(QUEUE + k * 2):
+        rows.append(str((u(QUEUE + k * 2) - SCENES) // ROW))
+        k += 1
+    story_row = (u(0x30EC) - SCENES) // ROW if u(0x30EC) else -1
+    base = m._lin(m.ds, 0x1CE6)
+    crc = zlib.crc32(bytes(m.mem[base:base + 112])) & 0xFFFFFFFF
+    return ('pos %d %d tgt %d want %d goal %d route %d path %d %d pose %d %d %d '
+            'wd %d idle %d cur %d queue %s story %d %d %d %d island %d off %d %d '
+            'coin %d phase %d rng %d %d %08X snd %s'
+            % (u(MAJOR), u(MINOR), u(TARGET), r(PENDING), u(TURN_GOAL), frm,
+               step, along, triple[0], triple[1], triple[2],
+               u(WALK_DELAY), u(0x334E), u(0x30F2), ','.join(rows),
+               m.read8(m.ds, STORY_DAY), m.read8(m.ds, STORY_REACHED),
+               u(STORY_FLAG), story_row, u(ISLAND_STATE), r(ISLAND_X), r(ISLAND_Y),
+               u(LAYOUT), u(0x30BA), u(0x1CE2), u(0x1CE4), crc,
+               ','.join(str(s) for s in e.sounds)))
+
+
+def q_run():
+    """seg4:0x06BF, the dispatcher, pass after pass.
+
+    This is the outer loop the timer message drives: build a queue when the
+    last has run out, run the backdrop pass, and take up the entry under the
+    cursor -- walk Johnny to it, stand him about for an idle, or run its
+    scene and land him afterwards. The ADS runner is stood in for on both
+    sides by a scene that says it is running for `RUN_STUB` passes, since
+    the `tick` query already compares the runner itself, and everything
+    that draws is walled off. The clock is ten in the morning on the
+    fifteenth of June, 1992, and after every pass the loop's state, the
+    walk driver's and the generator's are read out whole.
+    """
+    import scheduler
+    passes = run_passes()
+    steps = scheduler.walk_steps(EXE, scheduler.data_segment(EXE))
+    e = Engine({3, 4})
+    m = e.m
+    left = [0]
+
+    def gettime(mm):
+        at = mm.read16(mm.ss, mm.sp)
+        mm.write8(mm.ds, at, 10)
+        mm.write8(mm.ds, at + 1, 0)
+
+    def getdate(mm):
+        at = mm.read16(mm.ss, mm.sp)
+        mm.write8(mm.ds, at, 15)
+        mm.write8(mm.ds, at + 1, 6)
+        mm.write16(mm.ds, at + 2, 1992)
+
+    def unload(mm):
+        # `seg4:0x0673` frees the queue's scripts, which are not loaded here,
+        # and leaves the queue empty.
+        mm.write16(mm.ds, QUEUE, 0)
+        mm.write16(mm.ds, 0x30F2, 0)
+
+    def running(mm):
+        mm.regs['ax'] = 1 if left[0] > 0 else 0
+        left[0] = max(0, left[0] - 1)
+
+    m.hook(1, 0x020F, gettime)
+    m.hook(1, 0x01F4, getdate)
+    m.hook(4, 0x0673, unload)
+    m.hook(4, 0x0D37)
+    m.hook(4, 0x0C88, lambda mm: mm.regs.__setitem__('ax', 1))
+    m.hook(10, 0x0874, lambda mm: left.__setitem__(0, RUN_STUB))
+    m.hook(10, 0x0766, running)
+    m.write16(m.ds, 0xBE, 900)
+    for off in (0x334C, 0x1DBA, STORY_FLAG, 0x30F0, QUEUE, 0x30F2, LAST_GAG,
+                LAST_MATE, 0x30EC, 0x2D95, 0x2D97, 0x2D99):
+        m.write16(m.ds, off, 0)
+    m.call(4, 0x0000)                        # the walk sprites, and area 1
+    m.call(3, 0x0136)                        # the backdrop's bitmaps
+    out = []
+    for n in range(passes):
+        e.timer(fires_for_pass(n + 1))
+        del e.sounds[:]
+        m.call(4, 0x06BF)
+        out.append('run %d %s | %s' % (n, run_state(m, e, steps), water_state(m)))
+    return out
+
+
+def p_run():
+    return port('run', run_passes(), RUN_STUB)
 
 
 def q_ttm():
@@ -1655,6 +1949,8 @@ QUERIES = {
     'codec': (q_codec, p_codec),
     'ttm': (q_ttm, lambda: port('ttm')),
     'tick': (q_tick, p_tick),
+    'water': (q_water, p_water),
+    'run': (q_run, p_run),
 }
 
 

@@ -140,9 +140,13 @@ since `StartTime`, counted modulo sixteen, and the last four phases are night.
 The shipped dawn of nine in the morning puts dusk at three and the next dawn
 at five.
 
-`Speed` is a percentage of the authored frame rate. The data was written for a
-16 ms tick and the port runs it at that rate; the machines of the day could
-not keep up, which is why the screensaver is remembered as slower.
+`Speed` is a percentage of the original's pace. The engine has two clocks: a
+16 ms software tick that counts every delay down, and a 55 ms Windows timer
+that runs one pass of everything -- the surf, the walk, one step of the
+running scene. A frame that asks for a delay of one tick is still on screen
+for a whole pass, and the port keeps both clocks (`tools/oracle.py run` and
+`tick` hold it to them). The machines of the day could not keep even that
+pace, which is why the screensaver is remembered as slower still.
 
 ## The tools
 
@@ -187,9 +191,9 @@ original's behaviour.
   `ISLETEMP.SCR`, the engine's own render of the island, does not have them
   anywhere, and the composition matches it better without them.
 * **The clouds.** The engine has a cloud walk that moves the clouds and
-  refills the sky, but its per-tick backdrop pass is called in a way that
+  refills the sky, but its per-pass backdrop function is called in a way that
   skips it, so in the original the clouds never move. The port runs the walk
-  every tick, which is what the code was written to do.
+  every pass, which is what the code was written to do.
 
 Two things are not verified against the binary because they cannot be. The
 sprite blit is GDI's, so there is no inner loop of Sierra's to compare; the
@@ -202,7 +206,10 @@ there is not known, and the port shows the water they sit in.
 `bash tools/check.sh` runs everything below, cheapest first. It needs the
 original data in `original/`; the last steps also need `capstone`. The
 default tier takes about half an hour; `JC_DEEP=1` runs the exhaustive case
-lists and takes about three hours.
+lists and takes about three hours. `bash tools/deep.sh` runs that deep tier
+one piece at a time into `deep/`, skipping the pieces already done, so a
+machine that cannot stay up for three hours can get through it in sittings;
+its last step merges the saved reach results and holds them to the floor.
 
 **Unit tests** (`cargo test`) cover the arithmetic, the decoders and the
 rules that were easy to read wrongly, and need no data.
@@ -260,7 +267,9 @@ inside `tools/x86.py` and diffs the answers against `jcoracle`:
   seqrun     1056 answers, all identical
   codec       181 answers, all identical
   ttm        51475 answers, all identical
-  tick        895 answers, all identical
+  tick       1072 answers, all identical
+  water      1809 answers, all identical
+  run        1500 answers, all identical
 ```
 
 In order: the generator; the weighted chooser; the time-of-day arithmetic,
@@ -272,8 +281,13 @@ operand is stored; which way Johnny walks and which way he turns; where every
 ADS block ends; one pass and then many passes of every ADS sequence inside the
 engine's own interpreter; the original's LZW and RLE over every compressed
 leaf; every frame of every TTM script through the original's frame runner;
-and whole ticks of the engine, a scene at a time. `tools/listing.py` checks
-the listing above against what the oracle printed, so it cannot go stale.
+whole passes of the engine, a scene at a time; the water and the sky --
+every wave, glint and cloud in the engine's own arrays, pass by pass, for
+nine kinds of backdrop; and the outer loop itself, `seg4:0x06BF`, driven
+fifteen hundred passes with the scenes stood in for on both sides -- the
+queue builder, the walk driver, the idles, the landings, the story and the
+generator's whole state after every pass. `tools/listing.py` checks the
+listing above against what the oracle printed, so it cannot go stale.
 
 **`tools/reach.py`** measures how much of the scripts those queries actually
 run, because agreement over an unreached instruction means nothing. Of the

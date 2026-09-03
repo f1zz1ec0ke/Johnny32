@@ -277,8 +277,8 @@ def do_tick(item):
 
     m.watch(10, 0x1519, instruction)
     m.watch_at(12, 0x040C, frame)
-    for _ in range(ticks):
-        world.tick()
+    for n in range(ticks):
+        world.tick(oracle.fires_for_pass(n + 1))
     return got
 
 
@@ -425,13 +425,36 @@ def main():
     # is it in, what guards it, is it one block or ninety-seven -- is a
     # question about the same set of offsets. Saving it makes those free.
     save = None
+    loads = []
     for a in args:
         if a.startswith('--save='):
             save = a.split('=', 1)[1]
-    wanted = [a for a in args if not a.startswith('-')] or SOURCES
+        if a.startswith('--load='):
+            # Reached sets saved by earlier runs, merged in as if they had
+            # been run now: `tools/deep.sh` runs the sources one piece at a
+            # time and gates the union here at the end.
+            import glob
+            loads += sorted(glob.glob(a.split('=', 1)[1]))
+    wanted = [a for a in args if not a.startswith('-')]
+    if not wanted and not loads:
+        wanted = SOURCES
     deep = bool(os.environ.get('JC_DEEP'))
     ads, frames, scenes = totals()
     total = blank()
+    for path in loads:
+        import json
+        with open(path) as fh:
+            saved = json.load(fh)
+        got = blank()
+        for name, hits in saved['ads'].items():
+            got['ads'][name] = set(hits)
+        for name, hits in saved['frames'].items():
+            got['frames'][name] = set(hits)
+        got['scenes'] = set(tuple(s) for s in saved['scenes'])
+        got['played'] = set(tuple(s) for s in saved['played'])
+        print('%s:' % path)
+        report(got, ads, frames, scenes)
+        merge(total, got)
     # Two of these runs share a machine with the oracle itself often
     # enough to be worth a knob.
     jobs = int(os.environ.get('JC_JOBS') or 0) or min(4, os.cpu_count() or 1)
@@ -446,7 +469,7 @@ def main():
         print('%s:' % which)
         report(got, ads, frames, scenes)
         merge(total, got)
-    if len(wanted) > 1:
+    if len(wanted) + len(loads) > 1:
         print('\nall of them together:')
         worst = report(total, ads, frames, scenes)
     else:

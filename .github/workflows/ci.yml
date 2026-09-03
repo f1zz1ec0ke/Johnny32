@@ -1,0 +1,44 @@
+name: ci
+
+# What can be checked without the original data: the port builds on Linux
+# and checks for Windows, its unit tests pass, clippy is quiet, and every
+# tool at least parses. The oracle, the sweeps and the soaks need
+# RESOURCE.001 and SCRANTIC.EXE, which are not in the repository;
+# `bash tools/check.sh` runs those locally.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: johnny
+      - name: build
+        run: cargo build --release --manifest-path johnny/Cargo.toml
+      - name: test
+        run: cargo test --release --manifest-path johnny/Cargo.toml
+      - name: clippy
+        run: cargo clippy --release --manifest-path johnny/Cargo.toml --all-targets -- -D warnings
+      - name: check for Windows
+        run: cargo check --release --manifest-path johnny/Cargo.toml --target x86_64-pc-windows-msvc
+
+  tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: compile
+        run: python3 -m py_compile tools/*.py
+      - name: scene list
+        run: python3 -c "import sys; sys.path.insert(0, 'tools'); import scenes; print(len(scenes.scenes()), 'scenes')"

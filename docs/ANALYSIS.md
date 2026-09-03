@@ -1,9 +1,8 @@
-# What is actually inside `johnnycastaway.exe`
+# What is inside `johnnycastaway.exe`
 
-Short version: the download is a 32-bit installer wrapping a 32-bit launcher
-wrapping **the untouched 1992 16-bit original**. Nothing in it was ever ported.
-That is why it cannot work on 64-bit Windows, and it is also good news — the
-original data files come out intact.
+The download is a 32-bit installer wrapping a 32-bit launcher wrapping the
+untouched 1992 16-bit original. Nothing was ported, which is why it fails on
+64-bit Windows, and why the original data files come out intact.
 
 ## The layers
 
@@ -20,12 +19,13 @@ johnnycastaway.exe                     1,357,166 bytes
         └── RCDATA SCREENANTICSMAPFILE        1,461 bytes -> RESOURCE.MAP
 ```
 
-`tools/extract_original.py` performs all three unwrappings and writes the
-originals to `original/`.
+`tools/extract_original.py` performs all three unwrappings into `original/`.
 
-## The Delphi layer is a dropper, not a port
+## The Delphi layer
 
-Its version resource is candid about what it is:
+A dropper: it writes the three originals to disk and `ShellExecute`s the
+16-bit binary. Without NTVDM the launch fails with "Sorry, an error occurred
+while launching Johnny saver...".
 
 | Field | Value |
 | --- | --- |
@@ -35,33 +35,15 @@ Its version resource is candid about what it is:
 | Comments | `Windows XP version of Screen Antics...` |
 | `DESCRIPTION` resource | `CRNSAVE Screen Antics V2.0 unofficial` |
 
-Its imports are ordinary Delphi VCL plus `ShellExecuteExA`,
-`GetExitCodeProcess`, `CreateFileA`/`WriteFile`/`DeleteFileA`. Its strings give
-away the whole runtime behaviour:
+Imports: Delphi VCL plus `ShellExecuteExA`, `GetExitCodeProcess`,
+`CreateFileA`/`WriteFile`/`DeleteFileA`. Resource language 1043 (Dutch).
 
-```
-\scrantic.exe        \RESOURCE.001        \RESOURCE.MAP        \scrantic.ini
-Sorry, an error occurred while launching Johnny saver...
-```
+## `scrantic.exe`
 
-So at run time it writes the three originals to disk and `ShellExecute`s the
-16-bit binary. On 64-bit Windows there is no NTVDM to load an NE image, the
-launch fails, and you get that apology. The Delphi wrapper renders nothing
-itself; every pixel still comes from 1992 code.
-
-Resource language is 1043 (Dutch), consistent with the site it came from.
-
-## The real program: `scrantic.exe`
-
-A Windows 3.x New Executable — the genuine Dynamix screensaver.
-
-* Linker 5.10, 14 segments, `exetype` 2 (Windows)
-* Imports only `KERNEL`, `USER`, `GDI`, `MMSYSTEM`
-* Resident name `SCRNATIC`; module description `SCRNSAVE :Screen Antics`
-* Exports the standard Windows screensaver entry points —
-  `ScreenSaverProc`, `ScreenSaverConfigureDialog`, `PasswordDialog`,
-  `ChangePasswordDialog` — plus a non-standard **`AdsControlDialog`**, which
-  looks like a leftover developer scene-picker.
+A Windows 3.x New Executable: linker 5.10, 14 segments, `exetype` 2, imports
+`KERNEL`, `USER`, `GDI`, `MMSYSTEM` only. Resident name `SCRNATIC`, module
+description `SCRNSAVE :Screen Antics`. Exports the standard screensaver entry
+points plus a non-standard `AdsControlDialog` (a developer scene picker).
 
 | Segment | Kind | Bytes |
 | --- | --- | --- |
@@ -80,100 +62,44 @@ A Windows 3.x New Executable — the genuine Dynamix screensaver.
 | 13 | CODE | 2,686 |
 | 14 | DATA | 18,368 |
 
-**81,919 bytes of 16-bit code.** That is small. For comparison, it is about a
-third the size of the Delphi wrapper that fails to launch it. A complete,
-faithful disassembly is a realistic goal rather than an aspiration.
+81,919 bytes of 16-bit code in total.
 
-## Data: `RESOURCE.001`
+## `RESOURCE.001`
 
-180 records, and the linear walk consumes all 1,175,645 bytes exactly, so the
-container format is fully understood.
+180 records; the linear walk consumes all 1,175,645 bytes exactly.
 
 | Type | Count | What it is |
 | --- | --- | --- |
-| `.BMP` | 117 | sprite sheets — 2,392 frames total |
+| `.BMP` | 117 | sprite sheets, 2,392 frames total |
 | `.TTM` | 41 | per-scene animation scripts |
 | `.SCR` | 10 | 640x350 backgrounds |
 | `.ADS` | 10 | scene sequencing scripts |
 | `.PAL` | 1 | the 256-entry palette |
 | `.VIN` | 1 | `FILES.VIN`, a preload list |
 
-There is no audio in the archive. The twenty-three sound effects are `WAVE`
-resources inside `scrantic.exe` itself, which is why the port asks for that
-file alongside the data; see `docs/SCHEDULER.md` under "The sound".
-
-The scripts are self-documenting. Every `.TTM` carries a `TAG:` chunk naming
-its scenes: `LOAD FIRE`, `RUB STICKS`, `john gets boards`, `johnny building`,
-`johnny kicks castle`, `UNDRESS JOHNNY`, `johnny gets an idea`. Every `.ADS`
-carries a `RES:` chunk listing the `.TTM` files it drives.
+No audio: the 23 sound effects are `WAVE` resources inside `scrantic.exe`
+(`docs/SCHEDULER.md`, "The sound"). Every `.TTM` carries a `TAG:` chunk naming
+its scenes; every `.ADS` a `RES:` chunk listing the `.TTM` files it drives.
 
 ## Status
 
-**Solved and verified:**
+Solved and verified against the binary (`docs/FILE_FORMATS.md`,
+`docs/SCHEDULER.md`):
 
-* all three unwrapping layers, end to end
-* the `RESOURCE.MAP` / `RESOURCE.001` container format
-* both codecs — LZW ported from the disassembly, and RLE once the disassembly
-  showed the literal/repeat convention is the opposite of the obvious reading.
-  All 180 compressed chunks decode to exactly their declared size
-* 4bpp image decoding, the palette, and index 0 as the transparency key
-* every background and all 2,392 sprite frames export to PNG correctly
+* the three unwrapping layers and the container format
+* both codecs (LZW from segment 6, RLE with bit 7 meaning repeat); all 180
+  compressed chunks decode to their declared size
+* 4bpp images, the palette, index 0 as the transparency key; all 2,392
+  sprite frames and every background export
+* the TTM bytecode from segment 12's three opcode tables: 41 scripts, 34,781
+  instructions
+* the ADS sequencer: length function `seg10:0x0303`, weighted random block
+  `seg10:0x0CDA`
+* the scheduler in segment 4: scene table `ds:0x1756`, the queue, the
+  eleven-day story, the sixteen-phase day, the holiday calendar
+* the walk: route matrix `ds:0x0A94`, 34 authored paths, eight facings
+* the island: placement, surf, waves, glints, sky, raft, decorations
 
-* **the TTM bytecode**, read out of the interpreter in segment 12 rather than
-  inferred. All 41 animation scripts now disassemble end to end — 34,781
-  instructions — against the three opcode tables the interpreter itself uses.
-
-The TTM breakthrough was not the opcode table; it was noticing that `TT3:` is
-RLE-compressed at all. Raw `TT3:` looks like plain bytecode — the strings are
-readable and the first few dozen instructions decode — because RLE stores long
-literal runs verbatim. What gives it away is one stray byte every ~128 bytes,
-which is a literal-run marker. Two wrong assumptions (raw chunk, inverted RLE
-convention) had been cancelling out just well enough to look like progress.
-
-* **the ADS sequencer.** ADS turned out not to use the TTM length rule at all;
-  it has its own length function at `seg10:0x0303`. With that, all ten scripts
-  consume exactly, and they read as what they are — small state machines that
-  play a scene, wait for it, and branch on what happened.
-
-  The find worth having is `seg10:0x0CDA`: `3010 ... 30FF` is a **weighted
-  random choice**. It sums a weight per entry, draws `rand() % total`, and runs
-  the one it lands on. That is the mechanism behind the screensaver's variety,
-  and the weights are sitting in the data as operand 4 of every `2005`.
-
-* **the scheduler**, in segment 4 — the part no existing project recovered
-  from the binary. An 80-entry scene table at `ds:0x1756` says, for each gag,
-  what it costs, which position Johnny must be standing in, where he ends up,
-  what time of day it can happen, and which ADS sequence to run. Selection is
-  the same weighted-random shape the ADS blocks use.
-
-  Above that sits an eleven-day story gated on real elapsed days and kept in
-  `SCRANTIC.INI`, a sixteen-phase day whose last four phases are night, and a
-  holiday calendar that covers Halloween, Christmas, New Year and St
-  Patrick's. Written up in `docs/SCHEDULER.md`; `tools/scheduler.py` dumps it.
-
-* **the walking system.** A 6x6 route matrix at `ds:0x0A94` points at route
-  blocks that say, for wherever Johnny currently is, which walk steps could
-  take him toward the target and with what weight — every list summing to
-  exactly 100. A step resolves to one of 34 hand-authored paths of
-  `(frame, x, y)` waypoints in real screen coordinates, with bit 15 of the
-  frame mirroring the sprite so one path serves both directions.
-
-  This is the part `jc_reborn` names as its remaining inaccuracy, and it is
-  not something watching the screensaver would give you: the paths are
-  authored data, not a pathfinder.
-
-  It also turned up a bug that has been in the shipped data since 1992. One
-  route's weight list sums to 150 while the picker draws `rand() % 100`, so its
-  last two options are unreachable — and they are the only ones that reach the
-  target directly. Johnny has never walked straight from position 1 to position
-  5; he always detours. Details and the fix in `docs/SCHEDULER.md`.
-
-**Open:**
-
-* ~~**Geometry.**~~ Settled. The minor is one of eight **facings**, which
-  `seg4:0x01D6` pivots toward and `seg4:0x0258` indexes the standing poses by;
-  the major is an **area** 1-6, indexing the route matrix at `ds:0x0A94`.
-  Neither is a screen coordinate, because every waypoint and pose in the data
-  is already a `(frame, x, y)` triple. See `docs/SCHEDULER.md`.
-* **The blitter.** `seg8:0x0AE4` hands each sprite to GDI, so there is no
-  pixel loop of Sierra's to check the port's against.
+Open: the blitter (`seg8:0x0AE4` hands each sprite to GDI, so there is no
+pixel loop of Sierra's to check against) and what the engine draws in the sea
+screens' index-0 patches.

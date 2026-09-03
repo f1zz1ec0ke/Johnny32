@@ -624,19 +624,19 @@ fn the_clip_and_the_colours_belong_to_the_instance() {
     let mut a = ttm::Instance::new(std::rc::Rc::clone(&setter));
     let mut b = ttm::Instance::new(std::rc::Rc::clone(&plain));
 
-    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame { .. }));
     assert!(stage.surface.clip.is_some(), "4004 sets the screen's clip");
     assert_eq!((stage.fg, stage.bg), (3, 4));
 
     // The next instance to draw brings its own, and its own is the whole
     // screen and colour 15 (`seg10:0x0B6E`).
-    assert!(matches!(b.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(matches!(b.run_frame(&mut stage, &archive), ttm::Step::Frame { .. }));
     assert!(stage.surface.clip.is_none(), "the clip followed the wrong scene");
     assert_eq!((stage.fg, stage.bg), (15, 15), "the colours followed the wrong scene");
 
     // And the one that set them still has them next time round.
     assert!(a.seek_scene(0));
-    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame(_)));
+    assert!(matches!(a.run_frame(&mut stage, &archive), ttm::Step::Frame { .. }));
     assert!(stage.surface.clip.is_some(), "the instance lost its own clip");
 }
 

@@ -192,6 +192,94 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // The outer loop itself, `seg4:0x06BF`, pass after pass: the queue
+        // builder, the walk driver, the idle entries, the story, and the
+        // landings, with every scene stood in for by a fixed number of
+        // passes on both sides. `tools/oracle.py run` drives the engine's
+        // own dispatcher the same way and diffs the state word for word.
+        //
+        //     jcoracle run <passes> <stub passes>
+        "run" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let passes: u32 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(500);
+            let stub: u32 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(3);
+            // The binary is what is being compared with, so the port's own
+            // departures are switched off.
+            std::env::set_var("JC_FAITHFUL", "1");
+            let mut d = director::Director::new(0);
+            d.configure(johnny::settings::Settings {
+                intro_ticks: 0,
+                ..Default::default()
+            });
+            d.faithful_router = true;
+            d.stub = Some(stub);
+            // Ten in the morning on the fifteenth of June, 1992, which the
+            // harness hands the engine through `gettime` and `getdate`.
+            d.hhmm = Some(1000);
+            d.date = director::days_from_civil(1992, 6, 15);
+            for pass in 0..passes {
+                d.tick(&archive);
+                println!("run {pass} {} | {}", d.dump(), d.water_dump());
+            }
+        }
+        // The water and the sky on their own: `seg3:0x0136` builds the
+        // backdrop for a queue that asked for `mask`, at `phase`, and
+        // `seg3:0x040E(0)` runs every pass after it. The engine's object
+        // and cloud arrays are read out after each and diffed.
+        //
+        //     jcoracle water <passes> <mask:phase,mask:phase,...>
+        "water" => {
+            let dir = std::env::var("JC_DATA").unwrap_or_else(|_| "original".into());
+            let Ok(data) = std::fs::read(format!("{dir}/RESOURCE.001")) else {
+                eprintln!("no {dir}/RESOURCE.001");
+                return ExitCode::FAILURE;
+            };
+            let map = std::fs::read(format!("{dir}/RESOURCE.MAP")).ok();
+            let Ok(archive) = johnny::dgds::Archive::load(&data, map.as_deref()) else {
+                eprintln!("archive");
+                return ExitCode::FAILURE;
+            };
+            let passes: u32 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(200);
+            let cases: Vec<(u32, u8)> = args
+                .get(2)
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|c| {
+                            let (mask, phase) = c.split_once(':')?;
+                            Some((
+                                u32::from_str_radix(mask.trim_start_matches("0x"), 16).ok()?,
+                                phase.parse().ok()?,
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![(0, 2)]);
+            std::env::set_var("JC_FAITHFUL", "1");
+            for (case, &(mask, phase)) in cases.iter().enumerate() {
+                let mut d = director::Director::new(0);
+                d.configure(johnny::settings::Settings {
+                    intro_ticks: 0,
+                    ..Default::default()
+                });
+                d.phase = phase;
+                d.take_wishes(mask);
+                d.load_scenery(&archive);
+                println!("water {case} setup {}", d.water_dump());
+                for pass in 0..passes {
+                    d.water_pass(director::fires_for_pass(pass as u64 + 1));
+                    println!("water {case} {pass} {}", d.water_dump());
+                }
+            }
+        }
         // Which way Johnny goes: one roll of the route picker for every
         // (block, position) the six-by-six matrix offers.
         "route" => {
@@ -458,7 +546,10 @@ fn main() -> ExitCode {
                     programs.insert(name, std::rc::Rc::new(p));
                 }
             }
-            for now in 0..ticks {
+            for pass in 0..ticks {
+                // The clock the deadlines are measured against: three or
+                // four ticks a pass, the way the two clocks fall together.
+                let now = director::ticks_by_pass(pass as u64 + 1) as u32;
                 if let Some(t) = &mut stage.trace {
                     t.clear();
                 }
@@ -520,10 +611,10 @@ fn main() -> ExitCode {
                         }
                     }
                 }
-                println!("{record} {now} act {}", seq.trace.join(" ; "));
+                println!("{record} {pass} act {}", seq.trace.join(" ; "));
                 director::advance_scenes(&mut active, &mut seq, &mut stage, &archive, now);
                 for line in stage.trace.iter().flatten() {
-                    println!("{record} {now} {line}");
+                    println!("{record} {pass} {line}");
                 }
             }
         }

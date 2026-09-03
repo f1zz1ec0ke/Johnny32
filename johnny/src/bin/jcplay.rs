@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-/// One tick is 16ms; see `director::MS_PER_TICK`.
-const MS_PER_TICK: u32 = johnny::director::MS_PER_TICK;
+/// One pass is 55ms; see `director::PASS_MS`.
+const PASS_MS: u32 = johnny::director::PASS_MS;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -79,7 +79,7 @@ fn main() -> ExitCode {
         }
     }
 
-    // `JC_CHECK=1` holds the repaint model to its invariant every tick; see
+    // `JC_CHECK=1` holds the repaint model to its invariant every pass; see
     // `director::check_repaint`.
     let check = std::env::var("JC_CHECK").is_ok();
     let mut complaints = 0usize;
@@ -109,6 +109,9 @@ fn main() -> ExitCode {
     // background produces no frames, and without this the loop spins.
     let tick_limit = (cap as u32).saturating_mul(50).max(1000);
     while frame < cap && tick < tick_limit {
+        // `tick` counts dispatcher passes; the clock the deadlines are
+        // measured against runs three or four ticks a pass.
+        let now = johnny::director::ticks_by_pass(tick as u64 + 1) as u32;
         // The script is re-read from the top first and the instances move
         // after it -- the order `seg10:0x1ACB` has, the pass at
         // `seg10:0x1B6B` and then the walk at `seg10:0x1C32`, so a scene the
@@ -180,7 +183,7 @@ fn main() -> ExitCode {
                         .iter_mut()
                         .find(|a: &&mut Active| (a.ttm, a.scene) == (ttm_id, scene))
                     {
-                        a.rearm(repeat, tick);
+                        a.rearm(repeat, now);
                         continue;
                     }
                     let mut inst = ttm::Instance::new(program);
@@ -198,12 +201,12 @@ fn main() -> ExitCode {
                             johnny::director::depth(&order, a.ttm, a.scene) > rank
                         })
                         .unwrap_or(active.len());
-                    active.insert(at, Active::start(ttm_id, scene, inst, repeat, tick));
+                    active.insert(at, Active::start(ttm_id, scene, inst, repeat, now));
                 }
             }
         }
         stage.restore_background();
-        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, tick) {
+        for (_, scene) in advance_scenes(&mut active, &mut seq, &mut stage, &archive, now) {
             println!("[tick {tick:5}] scene {scene} finished");
         }
         if check && stage.has_background() {
@@ -247,8 +250,8 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\n{frame} frames over {tick} ticks, {:.1}s at {MS_PER_TICK}ms/tick",
-        (tick * MS_PER_TICK) as f64 / 1000.0
+        "\n{frame} frames over {tick} passes, {:.1}s at {PASS_MS}ms/pass",
+        (tick * PASS_MS) as f64 / 1000.0
     );
     if check {
         println!(
