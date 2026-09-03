@@ -61,7 +61,8 @@ fn main() -> ExitCode {
                 println!("finished after {i} frames");
                 break;
             }
-            ttm::Step::Frame(delay) => {
+            ttm::Step::Frame { asked, had } => {
+                let delay = asked.unwrap_or(had);
                 let path = out.join(format!("{stem}_{i:03}.png"));
                 if let Err(e) = png::write_indexed(
                     &path,

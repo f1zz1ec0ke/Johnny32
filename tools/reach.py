@@ -12,7 +12,7 @@ This measures the other half. It drives the same engine through the same
 queries, counts what each one touches, and reports the union:
 
 * **ADS instructions.** Every one the interpreter at `seg10:0x1519` is handed,
-  against the 2,308 in the ten scripts it can ever be handed. This is the
+  against the 2,242 in the ten scripts it can ever be handed. This is the
   branch number -- a guard that never fired, a random block that always went
   one way, and a sequence nothing ever started are all instructions that
   never ran.
@@ -26,10 +26,11 @@ they cover all 2,688 by construction and would flatter the number without
 telling anyone anything.
 
 The denominator is the other half of not flattering it. Of the 2,688 words in
-the scripts, 380 are structure the dispatcher is never handed at all -- the
+the scripts, 446 are structure the dispatcher is never handed at all -- the
 sequence headers, the `FFFF` terminators, the two-word joined conditions, the
-random-block separators, and the words whose opcode has no handler in the
-table at `cs:0x1875`. Counting those as unreached branches would be inventing
+random-block separators, the words whose opcode has no handler in the table
+at `cs:0x1875`, and the word after an `F010` that stops its own sequence.
+Counting those as unreached branches would be inventing
 a gap; quietly dropping the ones a run happened to miss would be inventing a
 pass. So `structural()` reads the dispatch table out of the binary, classifies
 every word with the reason it is set aside, and `--missing` prints whatever is
@@ -276,8 +277,8 @@ def do_tick(item):
 
     m.watch(10, 0x1519, instruction)
     m.watch_at(12, 0x040C, frame)
-    for _ in range(ticks):
-        world.tick()
+    for n in range(ticks):
+        world.tick(oracle.fires_for_pass(n + 1))
     return got
 
 
@@ -401,7 +402,7 @@ def missing(got, ads):
 def wrongly_aside(got):
     """Anything the run dispatched that the denominator excused.
 
-    `totals()` sets 380 words aside on the strength of a reading of the
+    `totals()` sets 446 words aside on the strength of a reading of the
     interpreter. This is the reading being wrong: a word that was excused and
     then handed to the dispatcher anyway. Nothing else in the harness would
     notice, because an excused word is not in the denominator and not in the
@@ -424,13 +425,36 @@ def main():
     # is it in, what guards it, is it one block or ninety-seven -- is a
     # question about the same set of offsets. Saving it makes those free.
     save = None
+    loads = []
     for a in args:
         if a.startswith('--save='):
             save = a.split('=', 1)[1]
-    wanted = [a for a in args if not a.startswith('-')] or SOURCES
+        if a.startswith('--load='):
+            # Reached sets saved by earlier runs, merged in as if they had
+            # been run now: `tools/deep.sh` runs the sources one piece at a
+            # time and gates the union here at the end.
+            import glob
+            loads += sorted(glob.glob(a.split('=', 1)[1]))
+    wanted = [a for a in args if not a.startswith('-')]
+    if not wanted and not loads:
+        wanted = SOURCES
     deep = bool(os.environ.get('JC_DEEP'))
     ads, frames, scenes = totals()
     total = blank()
+    for path in loads:
+        import json
+        with open(path) as fh:
+            saved = json.load(fh)
+        got = blank()
+        for name, hits in saved['ads'].items():
+            got['ads'][name] = set(hits)
+        for name, hits in saved['frames'].items():
+            got['frames'][name] = set(hits)
+        got['scenes'] = set(tuple(s) for s in saved['scenes'])
+        got['played'] = set(tuple(s) for s in saved['played'])
+        print('%s:' % path)
+        report(got, ads, frames, scenes)
+        merge(total, got)
     # Two of these runs share a machine with the oracle itself often
     # enough to be worth a knob.
     jobs = int(os.environ.get('JC_JOBS') or 0) or min(4, os.cpu_count() or 1)
@@ -445,7 +469,7 @@ def main():
         print('%s:' % which)
         report(got, ads, frames, scenes)
         merge(total, got)
-    if len(wanted) > 1:
+    if len(wanted) + len(loads) > 1:
         print('\nall of them together:')
         worst = report(total, ads, frames, scenes)
     else:
@@ -465,7 +489,7 @@ def main():
     if show:
         print('\nnever handed to `seg10:0x1519`:')
         missing(total, ads)
-    # The denominator says 380 words can never be dispatched. If one of them
+    # The denominator says 446 words can never be dispatched. If one of them
     # just was, that is not a rounding difference -- it is a wrong
     # denominator, and every percentage above it was inflated by exactly the
     # words it wrongly excused. So it fails rather than being noted.

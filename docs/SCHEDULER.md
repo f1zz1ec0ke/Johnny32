@@ -1,17 +1,15 @@
 # The scene scheduler
 
-Read out of `SCRANTIC.EXE` segment 4. This is the layer above the ADS
-sequencer: what Johnny does next, where he has to stand to do it, when the sun
-sets, and how the eleven-day story advances.
-
-No existing reimplementation recovered this from the binary — `jc_reborn` and
-the others reconstructed the behaviour by watching the screensaver run. Run
-`python3 tools/scheduler.py` to dump the tables.
+Read out of `SCRANTIC.EXE` segment 4 (scheduling, walking, story, clock) and
+segment 3 (the island). `tools/scheduler.py` dumps the tables. `tools/oracle.py`
+runs the original code against the port (24 queries; `water` is the backdrop
+pass by pass, `run` the dispatcher `seg4:0x06BF` for 1,500 passes with scenes
+stubbed). `tools/deep.sh` runs the deep tier in resumable pieces.
 
 ## Two tables in the data segment
 
-**ADS file table** at `ds:0x166E`, 17-byte records of
-`{uint16 id; char name[13]; uint16 handle}`:
+**ADS file table** at `ds:0x166E`, 17-byte records
+`{uint16 id; char name[13]; uint16 handle}`, resolved by `seg4:0x0D37`:
 
 | id | file | id | file |
 | --- | --- | --- | --- |
@@ -21,7 +19,7 @@ the others reconstructed the behaviour by watching the screensaver run. Run
 | 105 | `JOHNNY.ADS` | 110 | `VISITOR.ADS` |
 | 106 | `MARY.ADS` | 111 | `WALKSTUF.ADS` |
 
-Id 103 is unused. `seg4:0x0D37` resolves an id against this table.
+Id 103 is unused.
 
 **Scene table** at `ds:0x1756`, 80 records of 17 bytes, zero-terminated:
 
@@ -29,226 +27,206 @@ Id 103 is unused. `seg4:0x0D37` resolves an id against this table.
 | --- | --- | --- |
 | `+0x00` | word | group id (200-215); zero terminates the table |
 | `+0x02` | byte | selection weight |
-| `+0x03` | byte | required start position, major |
-| `+0x04` | byte | required start position, minor |
-| `+0x05` | byte | position Johnny ends at, major |
-| `+0x06` | byte | position Johnny ends at, minor |
-| `+0x07` | byte | cost, deducted from the caller's time budget |
+| `+0x03` | byte | required start area 1-6; 0 = any |
+| `+0x04` | byte | required start facing 0-7; -1 = any |
+| `+0x05` | byte | end area; 0 = `rand % 6 + 1` at the landing |
+| `+0x06` | byte | end facing; 0 = `rand & 7` at the landing |
+| `+0x07` | byte | cost, deducted from the queue budget |
 | `+0x08` | byte | earliest time-of-day phase |
 | `+0x09` | byte | one past the latest phase |
 | `+0x0A` | byte | story day, or 0 for an everyday scene |
-| `+0x0B` | dword | category bitmask |
-| `+0x0F` | byte | ADS file id |
+| `+0x0B` | dword | category and backdrop bitmask |
+| `+0x0F` | byte | ADS file id; `0xFF` is an idle row |
 | `+0x10` | byte | sequence number in that file; 0 disables the entry |
+
+32 distinct positions appear; 43 of the 80 rows move Johnny.
 
 ## Choosing a scene
 
-`seg4:0x0D76` takes a category, the current time-of-day phase and a cost
-ceiling. It walks the whole table and keeps an entry when **all** of:
+`seg4:0x0D76(category, phase, ceiling)` keeps a row when all of:
 
 * the category bit is set in `+0x0B`
-* `+0x10` is non-zero (the entry is enabled)
-* `+0x08 <= phase` and `+0x09 > phase`
-* `+0x0A` is 0 — everyday scenes only, on this path
-* `+0x07 / 2` is below the caller's ceiling
+* `+0x10` is non-zero
+* `+0x08 <= phase < +0x09`
+* `+0x0A == 0`
+* `+0x07 / 2 < ceiling`
+* `seg4:0x0EDB` says the row's island bits agree with the queue (below)
 
-Then it sums `+0x02` over the survivors, draws `rand() % total`, and walks back
-to the entry it lands on. **The same weighted-random shape as an ADS
-`3010...30FF` block** — the engine uses it at both levels.
-
-Four categories are used, from the four call sites:
+It sums `+0x02` over the survivors, draws `rand() % total` plus one, and
+subtracts weights until the count stops being positive (`seg4:0x0E62`).
 
 | Category | Caller | Use |
 | --- | --- | --- |
-| `0x01` | `seg4:0x0A26` | scenes reachable from Johnny's position |
-| `0x02` | `seg4:0x0A8A` | second slot, same shape |
-| `0x04` | `seg4:0x091C` | self-contained gags, ending at position (0,0) |
-| `0x80` | `seg4:0x08DD` | the day's story scene |
-
-The story path is different. It first rolls `rand() % 10` and gives up unless
-the result is zero — so **the story scene has a one-in-ten chance** each time
-it is offered. It then sets the story stage to the day counter and matches on
-`+0x0A` instead of the category mask.
-
-Category `0x04` throws the caller's cost ceiling away and uses 999
-(`seg4:0x0D90`), so the gag that closes a queue is never priced out of it.
-
-There is a sixth test, and it is the interesting one: `seg4:0x0EDB` is asked
-whether the entry's mask can still agree with the queue about where the island
-is standing. That needs the next section.
+| `0x01` | `seg4:0x0A26` | first slot |
+| `0x02` | `seg4:0x0A8A` | later slots |
+| `0x04` | `seg4:0x091C` | closing gag; ceiling forced to 999 (`seg4:0x0D90`) |
+| `0x80` | `seg4:0x08DD` | story scene: `rand() % 10` must be 0, then match `+0x0A` against the story day |
 
 ## The queue
 
-Scenes are not chosen one at a time. `seg4:0x08B9` builds a **queue** of them,
-and the point of a queue is that everything in it has agreed on one island.
-
-`seg4:0x0645` is the only caller and passes a budget of **300**. Every entry
-queued takes its `cost` out of that, and the queue closes when nothing
-affordable is left. Scenes cost 5 to 105, so a queue is ten to twenty of them —
-twenty minutes or so of screensaver.
-
-The build, in order:
+`seg4:0x08B9` builds the queue at `ds:0x30F4` (cursor `ds:0x30F2`) from a
+budget of 300 (`seg4:0x0645`). Each row costs `+0x07`, 5 to 105, so a queue is
+ten to twenty rows. Order:
 
 1. Roll for the story (`choose(0x80)`). If it comes up and is not one of the
-   two that ran last time, it is held aside — as the closing gag if its mask
-   has the standalone bit, otherwise as a companion.
-2. Draw the **closing gag** from category `0x04`, redrawing while it is the
-   one that closed the last queue, or while there is a companion and the gag
-   also stands as a primary.
-3. Charge both to the budget and hand both masks to `seg3:0x1C41`.
-4. If the gag *is* a primary, the queue is just that one scene and the build
-   stops. The four entries that do this are the cutaways — the office, Suzy's
-   flat — and they own the screen while they run.
-5. Otherwise fill slot 0: the companion, if it is a primary, on a coin flip
-   at 50%; else a fresh category `0x01` draw.
-6. Then loop: a 5% chance the companion drops in here, otherwise a category
-   `0x02` draw. An entry whose mask has bit 3 is **repeatable**, and the
-   engine rolls 1-6 goes for it weighted 10/20/30/20/10/10, redrawing until
-   the budget can afford however many it asked for.
-7. Push the gag on the end.
+   two that ran last time, hold it: as the closing gag if its mask has the
+   standalone bit, else as a companion.
+2. Draw the closing gag from `0x04`; redraw while it closed the last queue, or
+   while there is a companion and the gag also stands as a primary.
+3. Charge both to the budget; hand both masks to `seg3:0x1C41`.
+4. If the gag is a primary, the queue is that one scene (the four cutaways).
+5. Slot 0: the companion if it is a primary, on a 50% flip; else a `0x01`
+   draw.
+6. Loop: 5% the companion, else a `0x02` draw. A row with mask bit 3 is
+   repeatable: 1-6 goes weighted 10/20/30/20/10/10, redrawn until affordable.
+7. Push the gag last.
 
-Two things fall out of the order. The first entry is what Johnny's position is
-set from (`seg4:0x064D` writes `ds:0x30E4`/`ds:0x30E0` straight from its `from`
-field, with no walk), so **he is placed for the first scene of a queue and
-walks between all the rest**. And the gag really is last, so a queue ends on a
-punchline.
+Every queued row gets bit 15 set (unresolved). Johnny's position is written
+from the first row's `from` field unconditionally; he walks to all the rest.
 
-`ds:0x30F4` is the queue itself and `ds:0x30F2` the cursor. `seg4:0x06D4` reads
-the entry under the cursor each pass, and when it finds a null one it calls
-`seg4:0x0540` — which advances the clock, checks the calendar, and builds the
-next queue. **The clock only moves between queues**, so a queue plays out in
-the light it started in.
+## The dispatcher pass
+
+Two clocks:
+
+* A software tick every 16 ms (`seg2:0x16CE`) increments `ds:0x2E72` and
+  decrements five delay slots: `ds:0x30D6` walk, `ds:0x334E` idle,
+  `ds:0x0288` surf, `ds:0x028A` waves, `ds:0x3F2E`.
+* A Windows timer (`SetTimer` 50 ms, about 55 ms in practice) runs one
+  dispatcher pass, `seg4:0x06BF`.
+
+Three or four ticks fire per pass; a delay of 1 to 3 ticks still lasts a
+whole pass. The port keeps both: `Director::pass(fires)` per pass,
+`ticks_by_pass(n) = n * 55 / 16`.
+
+One pass:
+
+1. Entry under the cursor null: rebuild (`seg4:0x0540`). Unload, `gettime` to
+   phase, `getdate` to holiday, island reset `seg3:0x1C41(-1, -1)`, story roll
+   `seg4:0x0BA5`, build `seg4:0x08B9`, position = first row's `from`, cursor
+   0, backdrop `seg3:0x0136`. The clock only moves here.
+2. Backdrop pass `seg3:0x040E(0)`.
+3. The entry. With bit 15 set, `seg4:0x0B64` writes the wanted area and
+   facing and says whether Johnny is there; if not, the walk driver
+   `seg4:0x0094` runs and the pass ends.
+   * Idle row: first pass rolls `rand % 240 + 180` into `ds:0x334E` and
+     `seg4:0x0074` clears route and path. Every pass runs the walk driver.
+     When the slot is 0: position = row's `to`, cursor++.
+   * Scripted row: first pass resolves and starts the sequence
+     (`seg4:0x0C88`, `seg10:0x04FC`, `seg10:0x0874`), clears bit 15, sets the
+     draw offset (`seg3:0x00FC`). Every later pass ticks the runner
+     `seg10:0x1ACB` and asks `seg10:0x0766` whether it still runs. When not,
+     the landing `seg4:0x081C`: position = row's `to` (zeros filled at
+     random), bit 15 set, cursor++; if the story state `ds:0x30EE` is 2, the
+     offer `ds:0x2D9B` advances and the state becomes 3.
+4. `seg3:0x1E50(0)`. If the entry this pass handled is the story scene
+   (`ds:0x30EC`): request sound 25, clear `ds:0x30EC`, set `ds:0x30EE` to 2.
+
+The story is marked told on the pass that first takes up its entry, and the
+story scene's own landing advances the offer.
+
+`seg4:0x0B64`: an area of 0 skips the area test; the facing is still required
+unless it is -1.
 
 ## Where the island stands
 
-`ds:0x30C0` is six bits that say where on screen the island may be, and it is
-the thing the queue is really built around.
+`ds:0x30C0` holds six placement bits. `seg3:0x1C41` reads them from the high
+word of a scene mask:
 
-`seg3:0x1C41` takes a scene's 32-bit mask. The low word is what the island
-looks like; the **high** word is where it may stand:
-
-| High bit | Effect on `ds:0x30C0` |
+| High bit | `ds:0x30C0` |
 | --- | --- |
-| `0x20` | `= 1` — pinned hard left and low, at (0x011, 0x135) |
-| `0x10` | `= 2` — pinned at (0x121, 0x12B) |
-| `0x01` | `\|= 4` — top-left quadrant |
-| `0x02` | `\|= 8` — top-right quadrant |
-| `0x04` | `\|= 0x10` — bottom-left quadrant |
-| `0x08` | `\|= 0x20` — bottom-right quadrant |
+| `0x20` | `= 1`: pinned at (0x011, 0x135) |
+| `0x10` | `= 2`: pinned at (0x121, 0x12B) |
+| `0x01` | `\|= 4`: top-left quadrant |
+| `0x02` | `\|= 8`: top-right quadrant |
+| `0x04` | `\|= 0x10`: bottom-left quadrant |
+| `0x08` | `\|= 0x20`: bottom-right quadrant |
 
-The queue's masks are ORed together as it is built, and `seg4:0x0633` resets
-the word to -1 ("anywhere") first. So the state accumulates constraints over
-one queue and starts clean on the next.
+The reset writes -1 (anywhere); the queue's masks OR into it. `seg4:0x0EDB`
+gates: `0x15` is the three left bits, `0x2A` the three right. A row wanting
+one side cannot join a queue that claimed the other; a row wanting one
+quadrant cannot join one that claimed the opposite half.
 
-`seg4:0x0EDB` is the gate. The six bits are three pairs, and each pair has a
-left member and a right member — `0x15` is the three left bits and `0x2A` the
-three right ones. A scene that wants the island on one side cannot join a
-queue that has claimed the other, and a scene that wants a single quadrant
-cannot join one that has claimed the opposite half. That is what keeps a queue
-coherent: everything in it can be drawn against the same island.
-
-Then `seg3:0x1B00` places it. Pinned states return their fixed spot; otherwise
-it picks a **uniform random point in a rectangle**:
+`seg3:0x1B00` places it: pinned states return their spot, otherwise a uniform
+random point in a rectangle, halved per quadrant bit (shift off the full
+extent, then halve):
 
 | Layout | x | y | width | height |
 | --- | --- | --- | --- | --- |
 | bare island | 0x043 | 0x0FF | 0x0E2 | 0x081 |
 | with the sandbar | 0x0A8 | 0x0FF | 0x06F | 0x03B |
 
-and the quadrant bits halve it: the shift is taken off the full extent and the
-extent halved afterwards, so one bit is a corner, two adjacent bits are a half,
-and none at all is the lot.
+`seg3:0x0236` subtracts the nominal anchor (0x121, 0x117), leaving the offset
+`ds:0x30C6`/`ds:0x30C4`, applied to:
 
-`seg3:0x0236` then subtracts the nominal anchor (0x121, 0x117), leaving
-`ds:0x30C6`/`ds:0x30C4` as an **offset**, and everything moves by it:
+* island pieces, surf, raft, palm (`seg3:0x0262` on)
+* glint and wave exclusion rectangles (`seg3:0x08A5`, `seg3:0x0F05`), without
+  the port's one-pixel drawing correction
+* walk waypoints (`seg4:0x02EA`)
+* scene drawing opcodes: `seg3:0x00FC` copies offset plus one into
+  `ds:0x46E4`/`ds:0x46E6`; `seg12:0x05B9` adds it to the first coordinate pair
+  of the `0xA000` family, `0x4004` and `0x4204`, and to the second pair of
+  `0x4004` and `0xA0A4` (table `cs:0x1379`). `0xA601`, `0xAF1F`, `0xAF2F` get
+  nothing. A cutaway (`ds:0x30B4` = 2) draws in absolute coordinates; low mask
+  bit `0x400` adds 272 pixels to the right (`seg4:0x07DF`).
 
-* every piece of the island, the surf, the raft and the palm (`seg3:0x0262`
-  onwards)
-* the rectangles the glints and the waves are kept out of (`seg3:0x08A5`,
-  `seg3:0x0F05`)
-* every waypoint of Johnny's walk (`seg4:0x02EA`)
-* **every drawing opcode of every scene** — `seg3:0x00FC` copies the offset
-  plus one into `ds:0x46E4`/`ds:0x46E6`, and `seg12:0x05B9` adds it to an
-  opcode's first coordinate pair before the handler sees it, for the whole
-  `0xA000` family plus `0x4004` and `0x4204`. `0x4004` and `0xA0A4` get their
-  second pair shifted too, off the table at `cs:0x1379`; `0xA601`, `0xAF1F`
-  and `0xAF2F` get nothing.
-
-Two exceptions: a cutaway scene (`ds:0x30B4` at 2) draws in absolute
-coordinates, and a scene whose low mask has `0x400` is drawn a further 272
-pixels to the right.
-
-This is what `ISLETEMP.SCR` is for. It is the island **template** — the
-composition at the nominal anchor — and the scripts load it so their sprites
-have something to be absolute against. The live island is the same picture
-somewhere else, and the whole scene moves with it.
+`ISLETEMP.SCR` is the island at the nominal anchor, the template the scripts
+load.
 
 ## What else the mask asks for
 
-The low word, from `seg3:0x1C7C`:
+Low word, `seg3:0x1C7C`; all ones (`seg3:0x1C4B`) resets the lot.
 
 | Bit | Variable | Meaning |
 | --- | --- | --- |
 | `0x0010` | `ds:0x30B6 = 0` | no holiday decoration |
-| `0x0200` | `ds:0x30C2 = 0` | no rock and no sandbar |
-| `0x0400` | — | read per scene at `seg4:0x07DF`: draw 272px right |
-| `0x0800` | `ds:0x30B4 = 1` | night, whatever the hour says |
-| `0x1000` | `ds:0x30B2 = 1` | flat calm |
-| `0x2000` | `ds:0x30B4 = 2` | cutaway: no island at all |
-| `0x4000` | `ds:0x30B0 = 1` | no raft |
-
-The flat calm is not "no glints". `ds:0x2F42` is an array of thirty twelve-byte
-slots and `ds:0x2F40` says how many of them the stepper at `seg3:0x04B4` looks
-at; the waves and the glints share it, so `seg3:0x0386` setting it to nothing
-takes both away.
-
-`ds:0x30C2` is a coin flip per queue (`seg3:0x021F`, when the reset left it at
--1), and seventeen of the seventy-nine live scenes force it to 0. With ten to
-twenty entries in a queue that makes the sandbar layout rare — about one queue
-in twenty — which is why it reads as a variant rather than an alternative.
+| `0x0200` | `ds:0x30C2 = 0` | no rock and no sandbar (17 rows) |
+| `0x0400` | per scene | draw 272px right |
+| `0x0800` | `ds:0x30B4 = 1` | night regardless of the hour |
+| `0x1000` | `ds:0x30B2 = 1` | flat calm: `ds:0x2F40 = 0`, no waves and no glints |
+| `0x2000` | `ds:0x30B4 = 2` | cutaway: no island, the scene's own `.SCR` is the picture (4 rows) |
+| `0x4000` | `ds:0x30B0 = 1` | no raft (1 row) |
 
 ## Positions and walking
 
-Johnny's current position is a pair: `ds:0x30E4` (major) and `ds:0x30E0`
-(minor). Every scene entry declares the position he must be standing in
-(`+0x03`,`+0x04`) and where he ends up (`+0x05`,`+0x06`); 43 of the 80 move
-him. `seg4:0x0B64` is the match test, and treats a major of 0 or a minor of -1
-as "don't care" — which is what `(0,0)` in the table means.
+Position is `ds:0x30E4` (area 1-6) and `ds:0x30E0` (facing 0-7); wanted area
+`ds:0x30E2`, wanted facing `ds:0x30DE`. `tools/scheduler.py --walk` dumps the
+walk data.
 
-32 distinct positions appear, major 0-6 and minor 0-7.
+### The walk driver, `seg4:0x0094`
 
-### The route tables
+Once per pass, in order:
 
-When the chosen scene starts somewhere Johnny is not, `seg4:0x0094` walks him
-there. Run `python3 tools/scheduler.py --walk` to dump this.
+1. `ds:0x30D6` nonzero: redraw the pose, re-arm 4, return.
+2. Route lookup `seg4:0x03AC(current, target)` when there is no route and
+   Johnny is not at the target; 0 if either area is 0.
+3. Step pick: `rand() % 100` against the weights (`seg4:0x0115`), taken when
+   the running count stops being positive. Turn goal = the step's starting
+   facing; destination recorded.
+4. Wanted facing (`seg4:0x0179`): once at the target facing the goal, goal =
+   wanted; if already equal, set the arrived pose and clear wanted to -1.
+5. Pivot one eighth (`seg4:0x01CA`) the short way, `rand() & 1` when dead
+   opposite, drawn with the arrived or travelling pose.
+6. Waypoint (`seg4:0x0264`) if facing == goal; arrival when the next triple is
+   all zero. A finished pivot and the first waypoint happen in one pass.
+7. Draw the pose `ds:0x30C8`, re-arm 4 (`seg4:0x02B2`).
 
-`seg4:0x03AC` looks up a **6x6 route matrix** at `ds:0x0A94` — the word at
-`0x0A94 + from*12 + to*2` — giving the offset of a route block for that
-(current major, target major) pair.
+The route block is chosen once, on the pair Johnny set out on, and re-entered
+from wherever he has got to.
 
-A route block is a flat list: a `-position` marker, then `(step, weight)`
-pairs, terminated by `-7`. The engine scans for the marker matching Johnny's
-current position, draws `rand() % 100`, and walks the pairs subtracting
-weights until it lands on one. **Every weight list sums to exactly 100** —
-with one exception, below — which is a good check that the format is right.
-The pair `(0, 0)` under the marker equal to the target means "already there".
+### Route tables
 
-The exception is a bug in the shipped data. Route 1 to 5, at position 1, lists
-six options totalling 150:
+`seg4:0x03AC` reads a 6x6 matrix at `ds:0x0A94`: the word at
+`0x0A94 + from*12 + to*2` is the offset of a route block. A block is a flat
+list: `-position` marker, `(step, weight)` pairs, terminator -7. `(0, 0)`
+under the target's marker means "already there". Every weight list sums to
+100 except route 1 to 5 at position 1, which sums to 150:
 
 ```
 step 4 w16, step 4 w17, step 3 w34, step 2 w33, step 1 w25, step 1 w25
 ```
 
-Since the draw is `rand() % 100`, the running subtraction can never get past
-the first 100 of weight, so **the last two options are unreachable**.
-
-That matters more than it looks. Step 1 lands on position 5 — it is the only
-option in that list that reaches the target directly. Steps 4, 3 and 2 land on
-2, 3 and 6, from which the block is re-entered. So the effect of the bug is
-that **Johnny has never once walked straight from position 1 to position 5**;
-he always detours. Weighted as authored he would take the direct route about a
-third of the time:
+Against `rand() % 100` the last two options are unreachable, and step 1 is
+the only one that lands on the target:
 
 | Step | Lands on | As shipped | As authored |
 | --- | --- | --- | --- |
@@ -257,140 +235,42 @@ third of the time:
 | 3 | 3 | 34% | 22.7% |
 | 4 | 2 | 34% | 22.7% |
 
-The other two weighted pickers in the engine — the ADS random block at
-`seg10:0x0CDA` and the scene chooser at `seg4:0x0E62` — both draw against a
-summed total rather than a hardcoded 100, so this picker is the odd one out. A
-port should draw `rand() % total`, which makes the data behave as authored and
-matches the rest of the engine. `tools/verify.py` asserts this is the only
-block affected, so a parser regression cannot hide behind it.
+The port draws `rand() % total`, like `seg10:0x0CDA` and `seg4:0x0E62`;
+`JC_FAITHFUL=1` keeps the shipped draw. `tools/verify.py` asserts this is the
+only block affected. The scene chooser adds one to its draw and the router
+does not, so boundary draws fall on different sides.
 
-So a block is not a single hop — it is a routing table keyed on where Johnny
-currently is, re-entered after each step until he arrives.
+### Walk paths and poses
 
-### The walk paths
+A step id resolves through stubs at `seg4:0x04FB` to one of 34 blocks,
+`ds:0x0AEA` to `ds:0x162A`: `(frame, x, y)` triples ending in all zeros, `x`,
+`y` on the 640x350 background, bit 15 of `frame` mirroring the sprite. Paths
+are hand-authored, 5 to 32 waypoints. A parallel table at `ds:0x02DE`, 3 bytes
+per step: starting facing, destination facing, destination area.
 
-A chosen step id resolves through a jump table of stubs at `seg4:0x04FB` to one
-of **34 walk-path blocks** in the data segment, from `ds:0x0AEA` to `ds:0x162A`.
-Each is a list of `(frame, x, y)` triples ending in an all-zero triple:
-
-* `x`, `y` are real screen coordinates on the 640x350 background
-* bit 15 of `frame` mirrors the sprite horizontally, which is how the same
-  path serves both directions — and why the executable carries the string
-  `Insufficent memory (%lu).  Bitmaps won't be flipped.`
-
-A parallel table at `ds:0x02DE`, 3 bytes per step id, says where the step
-leaves him: byte 1 is the destination minor and byte 2 the destination major,
-written to `ds:0x30E0`/`ds:0x30E4` once the step finishes (`seg4:0x0161`). When
-the new major equals the target the route is cleared; otherwise the block is
-re-entered from the new position, which is how multi-step walks work.
-
-Byte 0 is the facing the path **starts** from, and it is not decoration.
-
-### The minor is a facing, and Johnny turns
-
-`seg4:0x0B64` is the "get him here" call: it takes a scene's `(area, minor)`,
-writes the area into `ds:0x30E2` and the minor into `ds:0x30DE`, and returns
-whether Johnny is already both. The second half of a position is **which of
-eight ways he is facing**, not a spot inside the area — and the engine will
-not run a walk path until he is turned the way that path begins
-(`seg4:0x01CD`), nor start a scene until he is turned the way the scene asked
-for.
-
-So `seg4:0x01D6` pivots him an eighth of a turn at a time, the short way
-round, on the same four-tick clock as a walk waypoint. Dead opposite has no
-short way, so it tosses a coin — `rand() & 1` — which is the only reason two
-identical walks can start differently. The tick a pivot finishes goes straight
-on to draw the first waypoint (`seg4:0x026B`), so the last frame of a turn is
-never seen.
-
-### The standing poses
-
-Twelve of the thirty-four "walk paths" are not paths. They have eight entries
-and go nowhere: they are **standing poses**, one per facing, and
-`seg4:0x0258` indexes them by the minor rather than walking them.
-
-`ds:0x0347` and `ds:0x034E` hold one such step id per area, and `seg4:0x0223`
-picks between them by whether Johnny has reached the area he was heading for:
+Twelve blocks are standing poses, eight entries indexed by facing
+(`seg4:0x0258`). `ds:0x0347` and `ds:0x034E` hold one per area:
 
 | Area | 1 | 2 | 3 | 4 | 5 | 6 |
 | --- | --- | --- | --- | --- | --- | --- |
 | arrived (`ds:0x0347`) | 6 | 10 | 17 | 22 | 28 | 34 |
 | travelling (`ds:0x034E`) | 5 | 9 | 16 | 21 | 27 | 33 |
 
-That is what is on screen whenever a scene is not running, which is a good
-fraction of the time: `ds:0x30C8` is the single "what to draw" pointer, and it
-holds either a pose or the walk waypoint just reached.
+`ds:0x30C8` points at what to draw: a pose or the waypoint just reached, one
+`JOHNWALK.BMP` frame that stays on screen between scenes.
 
-These paths are hand-authored, 5 to 32 waypoints each. That is the part a
-behavioural reimplementation has to approximate, and it is why walking is
-where `jc_reborn` reports its remaining inaccuracy.
+## The story
 
-### The story is two numbers, and they leapfrog
-
-`ds:0x2D9B` is the day **on offer** and `ds:0x2D9C` the day **reached**, and
-they are not the same number. `SCRANTIC.INI` calls them `Introduction` and
-`NumDays`, which is no help at all.
-
-* `seg4:0x0C28`, at the end of a queue: if the queue ran itself out
-  (`ds:0x30F0`) and a story flag is set (`ds:0x30EE`), and the offer is not
-  already ahead, the **offer** moves on by one.
-* `seg4:0x0BDC`, on a new calendar day: if the reached day is behind the
-  offer, the **reached** day moves on by one. Past eleven or below two, both
-  reset to one.
-
-So the offer runs a step ahead and the reached day catches up once a real day
-has passed, which is what makes eleven days of story take eleven days. Taking
-the offer for both — on a reload, say — moves the story on every time the
-screen goes blank.
-
-`seg4:0x0861` is the other half: when the scene that ends *is* the story
-scene, the flag goes to 2 and sound 25 is asked for. There is no resource 25,
-so that is silent in the original too.
-
-## Time of day
-
-`seg4:0x0554` computes it, and the unit is the **half hour**. `seg4:0x0C48`
-turns an HHMM clock reading into `hhmm / 50 + (hhmm % 100) / 30`, which is the
-number of half hours since midnight; the phase is that for now minus that for
-the `StartTime` in `SCRANTIC.INI`, modulo 16. The result lives in `ds:0x30BA`.
-
-Sixteen half hours is **eight hours**, so Johnny's day is a third of a real
-one. `ds:0x00BE` ships at 900 — nine in the morning — which puts dusk at three
-in the afternoon and the next dawn at five. Somebody chose that on purpose: an
-office worker at their desk from nine to five sees a whole day and a whole
-night without staying late.
-
-* phases **0-11** are day — the sea is one of `OCEAN00/01/02.SCR`, picked at
-  random each redraw
-* phases **12-15** are night — `NIGHT.SCR`
-
-The `+0x08`/`+0x09` window on each scene is in these units, so `0-8` is a
-morning scene and `12-16` only happens after dark.
-
-## Holidays
-
-`seg4:0x0560` also checks the calendar and puts a background id in `ds:0x30BC`.
-When it is non-zero, `HOLIDAY.BMP` is drawn over the scene.
-
-| Date | Id |
-| --- | --- |
-| 29-31 October | 1 (Halloween) |
-| 23-25 December | 2 (Christmas) |
-| 29-31 December, and 1 January | 3 (New Year) |
-| 15-17 March | 4 (St Patrick's Day) |
-
-## The eleven-day story
-
-The day rollover is at `seg4:0x0BC8`. `SCRANTIC.INI` keeps the state:
+State in `SCRANTIC.INI`:
 
 | Key | Variable | Meaning |
 | --- | --- | --- |
-| `NumDays` | `ds:0x2D9C` | days elapsed |
-| `Introduction` | `ds:0x2D9B` | story stage reached |
+| `Introduction` | `ds:0x2D9B` | story day on offer |
+| `NumDays` | `ds:0x2D9C` | story day reached |
 | `CurrentYear/Month/Day` | `ds:0x2D99/97/95` | date of the last run |
-| `StartTime` | `ds:0x00BE` | clock origin for the time-of-day cycle |
+| `StartTime` | `ds:0x00BE` | clock origin, ships at 900 |
 
-On the first run of a new calendar day the stored date differs, and then:
+Day rollover (`seg4:0x0BC8`, `seg4:0x0BDC`) when the stored date differs:
 
 ```
 if (NumDays < Introduction) NumDays++;
@@ -398,11 +278,9 @@ if (NumDays > 11 || NumDays < 2) { Introduction = 1; NumDays = 1; }
 store today's date
 ```
 
-and once the day's story scene has actually played, `Introduction` advances if
-the day counter has caught up. So the story is **gated on real elapsed days**,
-wraps after eleven, and cannot be rushed by leaving the screensaver running.
-
-The arc itself, from the `+0x0A` field:
+The offer advances at the story scene's landing, so it runs a step ahead and
+the reached day catches up after a real day. The story wraps after eleven.
+Sound 25 has no resource, so the story cue is silent in the original too.
 
 | Day | Scene | Day | Scene |
 | --- | --- | --- | --- |
@@ -413,69 +291,128 @@ The arc itself, from the `+0x0A` field:
 | 5 | `MARY.ADS` seq 1 | 11 | `JOHNNY.ADS` seq 1 |
 | 6 | `JOHNNY.ADS` seq 3 | | |
 
+## Time of day
+
+`seg4:0x0554`, in half hours: `seg4:0x0C48` turns HHMM into
+`hhmm / 50 + (hhmm % 100) / 30`, and phase = (now - `StartTime`) mod 16 into
+`ds:0x30BA`. Phases 0-11 are day (`OCEAN00/01/02.SCR` at random per backdrop
+build), 12-15 night (`NIGHT.SCR`). Scene windows `+0x08`/`+0x09` use these
+units.
+
+## Holidays
+
+`seg4:0x0560` writes an id to `ds:0x30BC`. `seg3:0x1E50` draws `HOLIDAY.BMP`
+when it is non-zero, unless `ds:0x30B6` is 0 or the scene is a cutaway;
+`seg3:0x1E87` indexes `cs:0x1F67` by `id - 1`.
+
+| Date | Id | Frame | Where | Redraw size |
+| --- | --- | --- | --- | --- |
+| 29-31 October (Halloween) | 1 | 0 | (0x19B, 0x12A) | 40x34 |
+| 23-25 December (Christmas) | 2 | 2 | (0x195, 0x10B) | 56x65 |
+| 29-31 December, 1 January (New Year) | 3 | 3 | (0x16A, 0x09B) | 152x47 |
+| 15-17 March (St Patrick's) | 4 | 1 | (0x14E, 0x11E) | 120x47 |
+
 ## The clock
 
-Everything in the data — animation delays, how long a scene plays, how fast
-Johnny walks — is counted in one unit, and the unit is **16 milliseconds**.
+`seg2:0x1516` calls `seg9:0x076A` with 13: `1000 / (13 * 18)` = 4 ms per unit
+of `ds:0x45E0`; the one timer (`seg2:0x1522`) at 4 units runs `seg2:0x16CE`
+every 16 ms. Script delays are in ticks (60 is about a second), but frames
+only advance on the 55 ms pass, so the original never showed more than 18
+frames a second. `JC_SPEED` is a percentage of the authored rate.
 
-`seg2:0x1516` calls the timer setup at `seg9:0x076A` with 13, and that turns
-into `1000 / (13 * 18)` = 4ms per unit of a software clock (`ds:0x45E0`); the
-18 is the PC's own 18.2Hz tick. There is exactly one timer registered
-(`seg2:0x1522`), asking for an interval of 4 units, so its callback at
-`seg2:0x16CE` runs every 16ms — 62.5 times a second. That callback is the
-whole clock. It does two things:
-
-* bumps the 32-bit tick counter at `ds:0x2E72`
-* counts down five delay slots: `ds:0x30D6`, `ds:0x334E`, `ds:0x0288`,
-  `ds:0x028A` and `ds:0x3F2E`
-
-The authors clearly thought in 60ths of a second. The delays in the scripts
-are 7, 8, 10, 15, 20, 30, 60, 120, 180, 240, 360 — a `SET_DELAY` of 60 is a
-second, of 240 four seconds. `PlayScene`'s durations are -60, -120, -180,
--240, -300, -360, -1000. At 62.5Hz a 60 is 0.96 seconds, which is near enough
-that nobody would have noticed.
-
-Three consumers of that clock are worth naming:
-
-| What | Where | Rate |
+| Consumer | Slot | Re-armed to |
 | --- | --- | --- |
-| Walk, one waypoint | `seg4:0x039D` writes 4 to `ds:0x30D6`, `seg4:0x00A3` waits for zero | 64ms |
-| Ocean, one of three phases | `seg3:0x0E96` writes 4 to `ds:0x0288`, `seg3:0x0E8F` waits | 64ms |
-| Animation frame | `SET_DELAY` into `ds:0x46E8`, armed per instance at `seg10:0x1D02`, gated at `seg10:0x1980` | the delay, in ticks |
+| walk waypoint or pivot | `ds:0x30D6` | 4 |
+| idle row | `ds:0x334E` | `rand % 240 + 180` |
+| surf phase | `ds:0x0288` | 4 |
+| wave movement | `ds:0x028A` | 10 |
+| animation frame | deadline at instance `+0x37` against `ds:0x2E72` | the frame's delay |
 
-The animation gate is worth reading in full, because it is what makes a delay
-mean "between frames" rather than "once": `seg10:0x1980` compares the
-instance's deadline at +0x37 with the tick counter, and when it passes, pushes
-the deadline forward by the delay again before running the frame.
+## How long a scene lasts
 
-### `ISLETEMP.SCR` is a render of the island, and that makes it an oracle
+`PlayScene`'s third operand (`seg10:0x0DDB`, signed):
 
-The backdrop 32 of the 41 scripts load is not a hand-painted approximation of
-the island — it is a picture of this exact composition. Match each piece
-against it and the numbers are unmistakable:
-
-| Piece | Best match | Where |
+| Operand | State | Meaning |
 | --- | --- | --- |
-| frame 0, the island | **96%** | one pixel left of the nominal anchor |
-| frame 13, the palm trunk | **95%** | same offset |
-| frame 12, the fronds | **90%** | same offset |
-| surf 3, 6, 9 at phase 0 | 54-75% | same offset |
-| surf 3, 6, 9 at phase 1 or 2 | lower, and scattered | — |
+| `0` | 1 | play the program through |
+| `> 0` | 2, count at `+0x31` | play it that many times |
+| `< 0` | 3, deadline at `+0x33` | play until `tick + \|operand\|` |
 
-All three solid pieces agree on the same one-pixel correction, and only the
-phase-0 surf frames match, which says the render was taken with the counters
-at zero. `ds:0x30C6`/`ds:0x30C4` are placed at random inside a rectangle, so
-the anchor those offsets are written against is nominal; this is where the
-island actually goes.
+`seg10:0x1C56` runs an instance in state 1, 2, 3 or 5 only. At the end of its
+program (`seg10:0x1D2B`) a scene restarts: state 1 becomes 4; state 2 until
+the count runs out; state 3 until the deadline (`seg10:0x1DEB` promotes to 4).
+State 4 becomes 0 on the next pass (`seg10:0x1DE2`), so it lasts one pass and
+an operand of 0 runs the program twice. State 0 is `StopScene`; state 5 is
+`FinishScene`, unused.
 
-The rock and sandbar score 0-15%, which is the coin flip having come up the
-other way, and the low surf (frames 30-41) sits below row 350 where the
-picture stops.
+* TTM `0x0110` (`seg12:0x0F73`) sets `ds:0x4644` and the frame finishes
+  drawing. All 528 uses are scene terminators.
+* A goto to the scene's own start sets a self-loop flag at `+0xC`
+  (`seg10:0x1D9E`); `seg10:0x07E3` ignores such instances when asking whether
+  a sequence is done.
+* `GotoFrame` (`seg12:0x0FC3`) stashes the target; it is taken at the frame
+  boundary.
 
-`jcisle` is this measurement made standing rather than one-off, and
-`tools/check.sh` runs it. Scoring each piece where the composition actually
-puts it — rather than searching for its best offset, which is how the −1 was
-found in the first place — gives:
+## The island itself
+
+Screen 640x480 (`seg2:0x1483` into `ds:0x2562`/`ds:0x2564`); scene backdrops
+are 640x350, sea screens 640x480. `seg3:0x0136` loads bitmaps on its first
+call and builds on later ones:
+
+1. Sea: `OCEANnn.SCR` by `rand % 3` in daylight and not a cutaway;
+   `NIGHT.SCR` otherwise.
+2. Coin `rand & 1` into `ds:0x30C2` (rock and sandbar) unless a scene said
+   no rock.
+3. Place, `seg3:0x1B00`. Then the island pieces.
+4. Surf reset unless a cutaway: `ds:0x0288 = 0`, counters
+   `ds:0x0282..0x0286 = 2`, one step.
+5. Object count `ds:0x2F40` = 30, or 0 for flat calm or waves off; object
+   array reset `seg3:0x0463`.
+6. Cloud count `ds:0x2F36` = 15 or 0; sky `seg3:0x0A38`.
+7. One `seg3:0x040E(1)` pass; holiday `seg3:0x1E50(1)`.
+
+Pieces from `BACKGRND.BMP` (handles `ds:0x30AC`):
+
+| Frame | Size | At | Drawn at | What |
+| --- | --- | --- | --- | --- |
+| 0 | 280x52 | (289, 279) | `seg3:0x0270` | the island |
+| 1 | 384x69 | (250, 303) | `seg3:0x0293` | sandbar, when `ds:0x30C2` |
+| 2 | 64x30 | (151, 328) | `seg3:0x02B0` | rock, when `ds:0x30C2` |
+| 14 | 104x28 | (397, 279) | `seg3:0x02EA` | shells, see below |
+| 13 | 24x145 | (443, 148) | `seg3:0x0307` | palm trunk |
+| 12 | 152x69 | (366, 122) | `seg3:0x0324` | fronds |
+
+The sandbar layout adds four surf patches, its own placement rectangle
+(`seg3:0x1B56`) and raft spot (`seg3:0x1DCB`). Surf, three frames per patch:
+
+| At | Frames | Size | Counter | Set up at |
+| --- | --- | --- | --- | --- |
+| (271, 306) | 3-5 | 72x29 | 0 | `seg3:0x13A0` |
+| (365, 319) | 6-8 | 160x25 | 1 | `seg3:0x13C9` |
+| (519, 303) | 9-11 | 72x32 | 2 | `seg3:0x13F2` |
+| (234, 323) | 30-32 | 120x48 | 0 | `seg3:0x141B`, sandbar only |
+| (368, 356) | 33-35 | 176x28 | 1 | `seg3:0x1444`, sandbar only |
+| (559, 323) | 36-38 | 88x48 | 2 | `seg3:0x146D`, sandbar only |
+| (130, 340) | 39-41 | 104x29 | 0 | `seg3:0x1496`, rock ripple |
+
+Counters `ds:0x0282`, `ds:0x0284`, `ds:0x0286`; one moves per step
+(`seg3:0x0E9C`), a nine-step cycle:
+
+```
+if c0 == c2      { c0 += 1 }
+else if c1 != c0 { c1 += 1 }
+else             { c2 += 1 }
+each wraps 3 -> 0
+```
+
+**Raft**: `MRAFT.BMP` (`seg3:0x0179`, handle `ds:0x30AE`), five frames 72x39
+to 128x39. `seg3:0x1D7E` takes `ds:0x2D9C - 1` clamped to 1..5. At (513, 266),
+or (530, 281) with the sandbar. `MARY.ADS` sequence 5 turns it off with mask
+bit `0x4000` because the scene animates it.
+
+**`ISLETEMP.SCR`** is a render of the bare-island composition with the surf
+counters at zero. `jcisle` (`tools/check.sh`) scores each piece where the code
+puts it:
 
 | Piece | Score | Floor |
 | --- | --- | --- |
@@ -487,709 +424,175 @@ found in the first place — gives:
 | surf at `0x207` | 34.0% | not checked |
 | the whole composition | 92.3% | 80% |
 
-The floors are not decoration: a piece one pixel out of place drops from the
-nineties into single figures, because the artwork is hard-edged sixteen-colour
-pixel art and a shifted copy of it agrees with almost nothing.
+Matching pieces sit one pixel left of the nominal anchor, so the port draws
+with `ORIGIN = (-1, 0)`. Frame 14 (shells) is nowhere in the reference (best
+28%; composition 81.1% without it, 76.6% with), so the port omits it;
+`JC_FAITHFUL=1` draws it. The third surf patch peaks at `0x209` at 54.7%; the
+port keeps the code's `0x207`.
 
-### The third patch of surf is two pixels out, and the code is not
+**Index 0 in the sea screens.** `OCEAN00/01/02.SCR` draw about 10,000 pixels
+each with index 0, the transparency key, in patches of open water; all of
+`OCEAN00`'s 9,917 are index 9 in `OCEAN01`. No palette animation is imported.
+`JOHNCAST.PAL` swaps 0 (magenta) and 5 (black); `seg3:0x01C4` clears to 5.
+The port fills them with index 9. What the engine drew is open.
 
-`seg3:0x13F2` puts it at `0x207`, and the port draws what the binary says. The
-reference's best match for it is at `0x209` — two pixels right — and even there
-only 54.7%, where its two neighbours peak at 75%. Scored where the code puts
-it, it comes out at 34%, which is *below* several positions around it: the
-match surface there is flat enough that no floor would tell right from wrong.
+### The per-pass backdrop, `seg3:0x040E(0)`
 
-That is the same shape of disagreement as the shells above — the code says one
-thing and the game's own picture of its island says another — but with much
-weaker evidence. The shells are provably nowhere in the reference; this is a
-soft peak two pixels away. So the port stays with the binary, `jcisle` reports
-the number and asserts nothing about it, and the two patches either side
-confirm the island's own −1 correction at 75% apiece.
+Nothing for a cutaway. Otherwise:
 
-### The shells the picture does not have
+* Wave walk `seg3:0x04A2` over all 30 slots of `ds:0x2F42` (12-byte records).
+  Empty slot: 35% roll (`seg3:0x04CE`), then weighted 35/5/5/5
+  (`seg3:0x04EE`) for a glint or wave size 1-3. Movement only when
+  `ds:0x028A` is 0, re-armed to 10 afterwards.
+* The cloud walk is skipped: only the setup call `seg3:0x040E(1)` runs it, so
+  clouds never move in the original. The port runs it every pass;
+  `JC_FAITHFUL=1` leaves the sky still.
+* Surf steps when `ds:0x0288` is 0 and re-arms to 4, unless flat calm.
 
-`seg3:0x02EA` draws frame 14 — a starfish and two shells — at (397, 279),
-unconditionally, on the island's white patch. `ISLETEMP.SCR` does not have
-them, and searching the whole image finds them nowhere in it: the best
-position anywhere scores 28%, diffuse, which is noise. Compositing the island
-with them scores 76.6% against the reference and without them 81.1%.
+Nothing spawns unless the speed index `ds:0x30BE` (a calibration loop at
+`seg2:0x1600`) is over 100 (`seg3:0x04E4`). `seg4:0x1F1B` is the weighted
+chooser: percentage arguments, scaled by 655, walked against a 16-bit draw.
 
-So the code says draw them and the game's own picture of its island says
-otherwise. The port sides with the picture; `JC_FAITHFUL=1` sides with the
-code.
+Waves are four-frame `BACKGRND.BMP` ping-pongs, sequences terminated by
+`0xFF`, caps from `seg3:0x046E`:
 
-### Why a guarded block has to be able to fire late
-
-State 4 lasts one pass, and the ADS pass runs before the runner in the same
-tick, so a sequence parked on `IF_RUNNING(x)` always catches x ending. But the
-scripts do not wait one at a time. `WALKSTUF.ADS` sequence 1 opens with
-
-```
-IF_NOTSTARTED(1,1)
-  PLAY 1,1   PLAY 1,2   PLAY 1,4
-STEP
-IF_RUNNING(1,2)  STOP 1,1   PLAY 1,14
-STEP
-IF_RUNNING(1,14) PLAY 1,6
-STEP
-IF_RUNNING(1,4)  PLAY 1,13
-```
-
-Three scenes start together and the chain branches on whichever ends. A
-sequencer that could only ever catch the single pass a scene ends on would
-have to service them in the order the blocks are written — and scene 4's
-branch, four blocks down, would be long gone by the time it got there. Two
-scenes meant to overlap end up taking turns instead.
-
-The port keeps a set of scenes that have reached the running state, so
-`IF_RUNNING` is true for a scene that has run as well as one running right
-now, and a block can fire late. Playing a scene again clears it, so the next
-guard waits for the new run.
-
-### The instance state machine
-
-`seg10:0x1C56` runs an instance only when its state is 1, 2, 3 or 5. Nothing
-else. That one line settles the whole lifecycle:
-
-* **state 0** — stopped. `StopScene` writes it straight into the instance
-  record, and 111 places in the scripts do. A stopped scene stops drawing,
-  immediately.
-* **state 4** — over. `seg10:0x1DDC` turns it into state 0 on the very next
-  pass, so it lasts exactly one, and it does not draw during it.
-* **states 1, 2, 3** — queued: play once, play a count, play until a deadline.
-* **state 5** — set only by `FinishScene`, which no script uses.
-
-So a scene played with `flags` of zero runs its program through **once**, and
-the single pass it spends in state 4 is the entire window in which
-`IF_RUNNING` can see it. That is the handshake every script is built on: play
-a scene, and the block guarded on it running fires the moment it is over.
-
-### What the clock actually says
-
-The port runs the data at the rate it was authored for, and that is
-measurable: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay across its
-twenty frames, and the port takes 134.
-
-It still feels quicker than the screensaver people remember, and the reason is
-in the binary. A 386 could not hold 62.5 passes a second. The engine has a
-speed index at `ds:0x30BE` precisely because it might not keep up, and the
-frame gate at `seg10:0x19A1` re-arms each deadline from *now* rather than from
-the deadline it missed — so a machine that falls behind runs the animation
-slower, permanently, and never catches up. The screensaver most people
-remember is this data on hardware that could not quite play it.
-
-`JC_SPEED` is a percentage against the authored rate: 100 is faithful, 70 runs
-it at seven tenths.
-
-## How long a scene lasts
-
-Nothing in the scene table says. A scene lasts as long as its ADS sequence
-takes, and the sequence is a cascade: each guarded block waits on the state of
-the scene the block before it started.
-
-`PlayScene`'s third operand is the lever. `seg10:0x0DDB` reads it as signed:
-
-| Operand | Run state | Meaning |
-| --- | --- | --- |
-| `0` | 1 | play the program through |
-| `> 0` | 2, count at +0x31 | play it that many times |
-| `< 0` | 3, deadline at +0x33 | keep playing until `tick + \|operand\|` |
-
-The state is then the whole story, and `seg10:0x1D2B` is where it turns:
-
-* a scene reaching the end of its program does **not** stop — state 1 starts
-  it over and becomes **4**, state 2 starts it over until the count runs out,
-  state 3 starts it over until its deadline passes (`seg10:0x1DEB` promotes it
-  to 4 when it does)
-* only a scene already in state **4** stops, going to state **0**
-  (`seg10:0x1DE2`)
-
-So a scene played with an operand of zero runs its program through *twice*:
-once to get from queued to running, once to finish. That is not a quirk to be
-tidied away — it is load-bearing. Every script is a chain of
-`IF_RUNNING(previous) -> play next`, and without that first pass the guard
-would never come true and the chain would never start.
-
-Two more details make the chains work:
-
-* **A scene says when it is done.** TTM opcode `0x0110` is two instructions
-  (`seg12:0x0F73`): set `ds:0x4644` and carry on. The frame still finishes
-  drawing; the runner reads the flag afterwards. All 528 uses of it across the
-  41 scripts are scene terminators — almost no scene simply runs out of
-  instructions.
-* **A scene that jumps back to its own start never ends.** `seg10:0x1D9E`
-  notices (goto target == the scene's start pointer) and sets a self-loop flag
-  at +0xC, and `seg10:0x07E3` passes over instances carrying it. Those are the
-  background layers — a fire, a gull, Johnny standing about — and they must
-  not hold the scene open, or nothing would ever end.
-
-## The island itself
-
-The screen is **640x480**. `seg2:0x1483` writes 640 and 480 into `ds:0x2562`
-and `ds:0x2564`, and `seg3:0x01D1` clears a rectangle that size. The scene
-backdrops the animation scripts load are 640x350 and cover the top of it; the
-sea is the full height.
-
-`seg3:0x01E7` builds the picture in three passes.
-
-**The sea.** Before phase 12, one of `OCEAN00/01/02.SCR` at random, from the
-pointer table at `ds:0x0262`. From phase 12, `NIGHT.SCR` at `ds:0x02D3`. All
-four are 640x480.
-
-**The island**, six pieces out of `BACKGRND.BMP`, blitted through the handle
-table at `ds:0x30AC`:
-
-| Frame | Size | At | Drawn at | What |
-| --- | --- | --- | --- | --- |
-| 0 | 280x52 | (289, 279) | `seg3:0x0270` | the island |
-| 1 | 384x69 | (250, 303) | `seg3:0x0293` | sandbar, optional |
-| 2 | 64x30 | (151, 328) | `seg3:0x02B0` | rock, optional |
-| 14 | 104x28 | (397, 279) | `seg3:0x02EA` | scrub |
-| 13 | 24x145 | (443, 148) | `seg3:0x0307` | the palm trunk |
-| 12 | 152x69 | (366, 122) | `seg3:0x0324` | the fronds |
-
-Those last two are not trimmings. `seg3:0x0226` flips a coin into `ds:0x30C2`
-once a session and it picks between **two islands**: with the flip up, the
-sandbar carries the beach forward and the rock sits offshore, four more
-patches of surf come with them, the placement rectangle is different
-(`seg3:0x1B56`) and so is where the raft ties up (`seg3:0x1DCB`).
-
-The surf is the giveaway, and it is **two sets of alternatives, one per
-layout** — not seven patches of one shoreline. Each set traces its own
-island's waterline, and the sandbar's is further forward. `ISLETEMP.SCR` is
-the bare-island layout and shows the split exactly: the first three match it
-at 54-75%, and it contains no trace of the other four.
-
-Get it wrong either way and it shows. Draw the sandbar's four without the
-sandbar and they are strips of beach floating in open water. Draw all seven
-together and the bare island's waterline runs across the middle of the
-sandbar's beach — a band of sea cutting through dry sand.
-
-**The surf.** Seven patches of breaking water round the shore, three frames
-each:
-
-| At | Frames | Size | Counter | Set up at |
-| --- | --- | --- | --- | --- |
-| (271, 306) | 3-5 | 72x29 | 0 | `seg3:0x13A0` |
-| (365, 319) | 6-8 | 160x25 | 1 | `seg3:0x13C9` |
-| (519, 303) | 9-11 | 72x32 | 2 | `seg3:0x13F2` |
-| (234, 323) | 30-32 | 120x48 | 0 | `seg3:0x141B` — sandbar only |
-| (368, 356) | 33-35 | 176x28 | 1 | `seg3:0x1444` — sandbar only |
-| (559, 323) | 36-38 | 88x48 | 2 | `seg3:0x146D` — sandbar only |
-| (130, 340) | 39-41 | 104x29 | 0 | `seg3:0x1496` — the rock's ripple |
-
-Three counters (`ds:0x0282`, `ds:0x0284`, `ds:0x0286`) say which frame each
-patch is showing. They step every 4 ticks — 64ms, from the delay slot at
-`ds:0x0288` — and only one of them moves per step (`seg3:0x0E9C`):
-
-```
-if c0 == c2      { c0 += 1 }
-else if c1 != c0 { c1 += 1 }
-else             { c2 += 1 }
-each wraps 3 -> 0
-```
-
-All three start at 2 (`seg3:0x02C5`). From there it is a nine-step cycle, so
-the shoreline comes back round every 576ms, and because the counters chase
-each other the seven patches never move together.
-
-### The colour that is not there
-
-The three ocean screens are the only artwork in the game that draws with
-index 0, the transparency key — about 10,000 pixels each, in large connected
-patches inside the open water. What the engine puts there is not yet known,
-but the shape of the answer is:
-
-* every one of `OCEAN00`'s 9,917 index-0 pixels is index 9 in `OCEAN01`, and
-  every neighbouring pixel in its own image is index 9 as well. Whatever goes
-  there is a second shade of open water.
-* it is not a palette trick. The binary imports no `AnimatePalette`, no
-  `SetPaletteEntries`, no `CreatePalette` — the whole GDI import list stops at
-  ordinal 119 apart from the DIB calls.
-* `ISLETEMP.SCR`, which is the same island painted once and frozen, has white
-  and cyan crests in the same water. Filling the key with white does make the
-  oceans read as foam.
-* **black is the obvious answer and it is wrong.** `JOHNCAST.PAL` puts magenta
-  at 0 and black at 5, the other way round from the standard sixteen, so the
-  blitter's key sits on a colour nothing wants and `seg3:0x01C4` clears the
-  screen to 5. Showing the patches as what is behind the hole therefore means
-  black — and it turns the near water to mud. Counting the screens by rows
-  also shows the water *below* those patches is a clean 9-and-5 checkerboard,
-  half bright blue and half black: the artist had a way to draw deep water and
-  did not use it here.
-
-The port fills it with index 9 — the water it sits in — which cannot be far
-wrong either way.
-
-### The raft
-
-The one thing on the island that changes with the story. `MRAFT.BMP` is
-loaded next to `BACKGRND.BMP` at `seg3:0x0179` and kept in `ds:0x30AE`; it
-holds five frames of a raft under construction, 72x39 growing to 128x39.
-
-`seg3:0x1D7E` reads the story day out of `ds:0x2D9C`, takes one off it and
-clamps to 1..5, so there is a raft from the first day, it grows through days
-three to six, and from day six it is finished. It goes at (513, 266), or
-(530, 281) when the rock and sandbar are there (`seg3:0x1DCB`).
-
-One scene turns it off — `MARY.ADS` sequence 5, "JOHNNY LEAVES", the day-eight
-story scene where he sails away on it. The scene animates the raft itself, so
-the backdrop must not also be drawing one.
-
-### What a scene asks of the backdrop
-
-The scene table's 32-bit mask at `+0x0B` is not only a category filter. The
-chooser hands it to `seg3:0x1C41`, which reads more bits out of it:
-
-| Bit | Effect |
-| --- | --- |
-| `0x0010` | clears `ds:0x30B6` |
-| `0x0200` | `ds:0x30C2 = 0` — no rock and no sandbar |
-| `0x0800` | `ds:0x30B4 = 1` |
-| `0x1000` | sets `ds:0x30B2` |
-| `0x2000` | `ds:0x30B4 = 2` — a cutaway: `seg3:0x01C4` clears the whole 640x480 to black instead of drawing a sea, and the scene's own `.SCR` is the picture |
-| `0x4000` | sets `ds:0x30B0` — no raft |
-| `0x010000`-`0x200000` | the island placement bits below |
-
-Passing all ones resets the lot (`seg3:0x1C4B`), which is what puts the island
-back to normal between scenes.
-
-Seventeen of the eighty scenes ask for no rock; four are cutaways — Suzy's
-city, meeting Suzy, the office, and the ending — and one asks for no raft.
-
-### The island is placed at random, and the scenes follow it
-
-`seg3:0x1B00` picks the island's position rather than fixing it, out of the
-rectangle the queue's scenes agreed on — see "Where the island stands" above.
-
-The reason to believe it is that **the scenes do follow**. It looked for a
-long time as though they could not: the TTM sprite handler at `seg12:0x025B`
-draws at absolute coordinates and segment 12 never mentions `ds:0x30C6`. But
-it does not have to. `seg12:0x05B9` shifts an opcode's operands before the
-handler ever sees them, from `ds:0x46E4`/`ds:0x46E6` — and `seg3:0x00FC` is
-the only thing that writes those, from the island offset plus one. Segment 12
-does not reference the origin because the origin has already been applied.
-
-So everything moves together: the island, the surf, the raft, the exclusion
-zones, Johnny's walk, and every sprite of every scene. The port does the same,
-and `ISLETEMP.SCR` — the island at the nominal anchor, which is what the
-scripts load as their backdrop — is the template the whole thing is expressed
-against.
-
-### Waves on the open water
-
-There is a second wave system, and this one comes and goes. `seg3:0x04BD`
-walks an array of twelve-byte object records at `ds:0x2F42`; an empty slot may
-be filled, a live one is moved on.
-
-Three of the four kinds are waves, and each is a four-frame `BACKGRND.BMP`
-animation played as a ping-pong. The sequences live at `ds:0x0268`, `ds:0x0270`
-and `ds:0x0278`, terminated by `0xFF`:
-
-| Kind | Sequence | Frames | Size | On the water at once | Spawns in | Set up at |
+| Kind | Sequence | Frames | Size | At once | Spawn band | Set up at |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `ds:0x0278` | 18-21 | 32x6 | 4 | x -10 +650, y 249 +40 | `seg3:0x05CA` |
 | 2 | `ds:0x0270` | 22-25 | 64x12 | 2 | x -40 +680, y 289 +93 | `seg3:0x0627` |
 | 3 | `ds:0x0268` | 26-29 | 104x16 | 1 | x -70 +710, y 382 +142 | `seg3:0x0682` |
 
-The three sizes are three distances: the small one high and far out, the big
-one low and close. `seg3:0x14BF` picks the spot inside the band, taking the
-sprite's own size off the span so it lands whole, and the caps come from
-`seg3:0x046E`.
+`seg3:0x14BF` picks `base + rand() % span` with no size subtraction for waves.
+A wave holds each frame 0, 1 or 2 steps (`seg4:0x1F1B(30, 50)`) and each step
+adds the wind `ds:0x0280` (+1 or -1) to x. Waves fully inside one of three
+hard-coded surf rectangles per layout are not drawn.
 
-A slot is filled by two rolls through the weighted chooser at `seg4:0x1F1B`,
-whose arguments are percentages (it scales each by 655, a hundredth of 65536,
-and walks them against a 16-bit draw). First a flat 35% for the slot to be
-filled at all (`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it
-(`seg3:0x04EE`): 35% a glint, 5% each wave size, 50% nothing after all.
-
-A wave holds each frame for 0, 1 or 2 steps — `seg4:0x1F1B(30, 50)`, so 30%
-one, 50% two, 20% none — and a step is 160ms, from the delay slot at
-`ds:0x028A` (`seg3:0x0A19`). Seven frames later the cursor hits the `0xFF` and
-the wave retires, giving its slot back. So one lasts between about one and
-three and a half seconds.
-
-They barely travel. Each step adds `ds:0x0280` to the x, and that is +1 or -1,
-re-rolled at `seg3:0x0A59` on a straight 50/50. The effect is a crest that
-swells, shimmers and subsides where it is, not one that rolls ashore.
-
-### The speed gate
-
-Nothing in that array spawns unless `ds:0x30BE` is over 100 (`seg3:0x04E4`),
-and `ds:0x30BE` is a **speed index**: `seg2:0x1600` times a calibration loop
-against the system clock and divides `100000 * iterations` by the elapsed
-time, twice by ten. On a slow 386 the decorative objects were simply skipped.
-Any machine running this port is over the line, so the port spawns them.
+Glints (`seg3:0x07DE`): colour 15, a line from x to x+1, y in 214..249
+(`seg3:0x053C`), countdown `rand % 30 + 10` rolled before the spot. One
+landing on either palm rectangle (`seg3:0x055E` trunk, `seg3:0x058A` fronds)
+is thrown away.
 
 ### The sky
 
-Fifteen cloud slots (`ds:0x2E82`), filled from `BACKGRND.BMP` frames 15, 16
-and 17 — three sizes of cloud bank — with a cap on each and a weight in the
-spawn roll (`seg3:0x0AB1`):
+Fifteen slots at `ds:0x2E82`, `BACKGRND.BMP` frames 15, 16, 17:
 
-| Frame | Size | At most | Weight | Cap at |
-| --- | --- | --- | --- | --- |
-| 15 | 128x36 | 8 | 15% | `ds:0x2E7C` |
-| 16 | 192x57 | 4 | 10% | `ds:0x2E7E` |
-| 17 | 264x76 | 2 | 5% | `ds:0x2E80` |
+| Frame | Size | At most | Cap at |
+| --- | --- | --- | --- |
+| 15 | 128x36 | 8 | `ds:0x2E7C` |
+| 16 | 192x57 | 4 | `ds:0x2E7E` |
+| 17 | 264x76 | 2 | `ds:0x2E80` |
 
-The roll runs biggest first and falls through to the next size down when that
-one is at its cap (`seg3:0x0AC9`). Clouds go anywhere across the width, in the
-top 139 rows (`seg3:0x0B0C`). Each gets its own speed — `rand() % 5 + 6`
-passes per pixel (`seg3:0x0B2B`) — and when one leaves the screen it is
-retired and its cap given back (`seg3:0x0D19`), so the sky refills behind it.
+Setup `seg3:0x0A38`: wind 50% into `ds:0x0280` (`seg3:0x0A59`, shared with
+the waves); per slot a 30% gate (`seg3:0x0A8E`) then 5/10/15 biggest first,
+falling through at a cap (`seg3:0x0AC9`); x anywhere, y in the top 139 rows
+(`seg3:0x0B0C`); speed `rand % 5 + 6` passes per pixel (`seg3:0x0B2B`);
+countdown `rand % speed`. Walk `seg3:0x0B67`: refill empty slots 20/30/50 by
+size, 1,000 pixels off screen upwind (`seg3:0x0C28`); move each cloud whose
+countdown ran out one pixel; retire one off the far side (`seg3:0x0D19`).
 
-**The wind is one thing.** `ds:0x0280` is +1 or -1, and `seg3:0x0A59` rolls it
-once when the sky is set up. The clouds drift with it, and so do the waves out
-on the water — they read the same variable. That is why everything on screen
-moves the same way.
+## The ADS runner, `seg10:0x1ACB`
 
-### Glints
+Once per dispatcher pass, on the context at `ds:0x2608`:
 
-`seg3:0x07DE` sets the drawing colour to 15 and draws a line from x to x+1: a
-glint is two white pixels. Thirty at a time (`ds:0x2F38`), scattered across a
-band of open water below the horizon — x anywhere, y in 214..249
-(`seg3:0x053C`) — each lasting ten to thirty-nine steps of 160ms.
+1. `seg10:0x1B12`: each sequence's null-terminated instance array at
+   `ctx+0x3D2+sid*2` (built by `seg10:0x040F` from `2000`/`2005`). A sequence
+   in state 3 (how `seg4:0x07CE` starts one) has its records reset by
+   `seg10:0x0B3E`.
+2. `seg10:0x1B6B`: one pass of every sequence in state 1, in id order,
+   through `seg10:0x1925`.
+3. `seg10:0x1C32`: the instance walk from `ctx+0x10`, chained at `+0x3B`.
+   Each record selects its own TTM (`seg10:0x1C71`; bitmap slots are per
+   file, `seg12:0x0773`), restores colours and clip (`seg10:0x1C81`), runs its
+   frame (`seg11:0x074A` into `seg12:0x040C`).
 
-They take 35% of the spawn roll against 5% for each wave size, so most of what
-that array holds is sparkle. One that lands on the palm is thrown away rather
-than drawn (`seg3:0x055E` tests the trunk, `seg3:0x058A` the fronds) — these
-are reflections, and the palm is not water.
+The script runs before the instances, so a scene started this pass draws its
+first frame this pass, and a scene that ended last pass is still in state 4.
 
-## In the port
+A held frame runs again every pass with `ds:0x46DA` set (`seg10:0x1CD6` sets
+`[bx+0x0E]`). Opcodes with side effects (loads, `0080`, the `C` family,
+`2022`, `B606`, `1061`) test the flag and do nothing; drawing opcodes draw
+again, re-reading their bitmap slot.
 
-`tools/gen_tables.py` emits these tables as `johnny/src/tables.rs`, so the port
-does not need the 16-bit binary at run time. `johnny/src/director.rs`
-implements the queue, the chooser, the walk router and the clock;
-`johnny/src/scenery.rs` places and draws the island; `jcisland` runs the lot.
+Stepping (`seg10:0x196E`): `+0x29` zero steps at once; otherwise step when
+`ds:0x2E72 >= +0x37`, next deadline `now + delay`. On a step `[bx+0x0E] = 0`
+and `[bx+8] = [bx+6]` if a goto is pending, else `[bx+8]++`. Scene end uses
+the same test (`seg10:0x1D65`). `seg10:0x1CE6` re-bases the deadline only when
+the frame changed the delay (`ds:0x46E8` differs from `+0x29`).
 
-The one deliberate difference is the clock. `Clock::Wall` is the shipped
-behaviour — half hours since the dawn the user set — and `johnny.scr` uses it,
-feeding it the local time from `GetLocalTime`. The tools default to
-`Clock::PerQueue`, one phase per queue, so a twenty-minute run still walks
-through a whole day and night.
-
-Things the port had to get right that are easy to get wrong:
-
-* `GotoFrame` does not jump on the spot. `seg12:0x0FC3` stashes the target and
-  it is taken at the frame boundary — jumping immediately makes a scene that
-  loops back on itself spin forever inside one call rather than yielding.
-* **Johnny is still on screen between scenes.** Walking and standing about
-  are not scenes; they are one `JOHNWALK.BMP` frame drawn and left there. The
-  surf repaints the backdrop under him every 64ms, so the port has to draw him
-  again after it.
-* **A held frame still has to be painted, and painting it is not re-running
-  it.** The engine leaves what a frame drew on the screen until something
-  paints over it; scripts save and restore the rectangles they disturb
-  (`4204` and `A064`) rather than the whole picture. This port repaints the
-  backdrop every tick, so it has to put the frames back on top of it every
-  tick too — only drawing an instance on the tick its own delay expired put
-  Johnny on screen one tick in seven, a strobe rather than an animation.
-
-  Running the frame's instructions a second time is the obvious way to do
-  that and it is wrong. Every scene of one `.TTM` file shares that file's
-  sixteen bitmap slots, and slots are loaded and freed from inside frames: 263
-  `LOAD_BITMAP`s and 190 `FREE_SHAPES` in the shipped scripts, every one of
-  them inside a scene rather than in a header, and **sixty-six frames that
-  load or free artwork and also draw with it**. By the time such a frame is
-  painted again the slot it drew from holds something else, or nothing — so
-  it paints the wrong sprite, or none, for as long as the frame is held. Four
-  further bugs came from the same root: a repaint that reloaded a bitmap,
-  replaced the backdrop, made a noise a second time, or drew a delay from the
-  generator.
-
-  So an instance keeps what its frame *drew* rather than where it drew it
-  from: a short list of resolved marks, each with its artwork, its colour and
-  its clip already worked out (`ttm::Paint`). Replaying that cannot touch a
-  slot, cannot load, cannot make a noise and does not need the archive, which
-  makes the invariant true by construction instead of by discipline.
-  `director::check_repaint` still holds it to that every tick under
-  `JC_CHECK=1` — what it catches now is a drawing opcode that paints without
-  recording.
-* **The scene Johnny walks to is the scene that then plays.** Obvious, and
-  easy to lose: the queue cursor moves when a scene is taken off it, so a
-  port that answers "he has to walk first" by *returning* has already spent
-  that entry, and when he arrives it reaches for the next one. Sixty walks in
-  a forty-three minute run, so the queue drained at twice the rate it should
-  and more than half the scenes chosen never played.
-* **The route block is chosen once, on the pair Johnny set out on.**
-  `seg4:0x03AC` indexes a six by six table of blocks and `seg4:0x00EA` scans
-  the block it returned for a `-area` marker matching wherever he has got to
-  since. Looking the pair up afresh each leg instead offers him the full
-  spread of ways to *set out* again from there, and he wanders: 4 → 3 → 6 → 5
-  → 4 → 3 → 1 where the block would have taken him 4 → 3 → 1. Twenty-three
-  seconds of walking instead of four.
-* **The two weighted pickers count differently, and it is not a mistake.**
-  Both subtract weights from a draw and stop when the running count stops
-  being positive. The scene chooser (`seg4:0x0E62`) draws `rand() % total`
-  and then adds one; the walk router (`seg4:0x0111`) draws `rand() % 100` and
-  does not. So a draw landing exactly on a boundary belongs to the option
-  *after* it in one and the option *before* it in the other. Giving the
-  router the chooser's extra one sent it the wrong way twenty-seven times in
-  the oracle's 4,736 rolls — a wrong turn about once every two hundred walks.
-* **`F200` starts a second sequence.** Every one of `STAND.ADS`'s twelve
-  standing sequences opens with `F200 14`, and 14 is its own `TAG:` entry
-  "STAND INIT" — four instructions that put up the base pose,
-  `MJAMBWLK.TTM` scene 42. `seg10:0x16C2` writes state 4 into that sequence's
-  word, so it runs alongside from the next pass; `F010 -1` is the other half,
-  putting a sequence into state 2 to say it is done. Without `F200` Johnny
-  stands about with no Johnny in the picture.
-* **An ADS script is a rule set, not a program.** See `docs/FILE_FORMATS.md`:
-  the engine re-reads a sequence from the top every pass, `1350` means "has
-  just ended" rather than "is running", and `1420`/`1430` are AND and OR
-  rather than two spellings of the same link. Getting any of those wrong
-  shows up the same way — two scenes animating over each other, or a cascade
-  that stops after its first step.
-
-## The interpreter, driven
-
-`seg12:0x040C` is the frame runner: fetch an opcode, collect the operands its
-low nibble asks for, dispatch. It can be run in `tools/x86.py` — what makes
-that possible is stating a boundary rather than stubbing leaves one at a time.
-`x86.Machine.wall` answers every call that leaves segments 1 and 12 while the
-interpreter is running, so the blitter, the pager, the resource loader and the
-sound never run and the interpreter never notices they are missing. A target
-missed from a list would run for real and the first sign of it would be a
-wrong answer downstream; a boundary cannot be missed.
-
-Standing a loaded TTM up in front of it:
-
-| | |
-| --- | --- |
-| `ds:0x2634`/`0x2636` | the head of the loaded-TTM list, which `seg11:0x03E2` walks by file id |
-| `ds:0x2638`/`0x263A` | the one in play. `+0x00` is its id, `+0x02` the frame count, `+0x04`/`+0x06` its bytes, `+0x08`/`+0x0A` their last byte, `+0x0C`..`+0x2B` its sixteen bitmap slots, `+0xCC`/`+0xCE` the next in the list, `+0xD0`/`+0xD2` the frame table |
-| `ds:0x263E` | the instance record the frame runs against, made by `seg11:0x042A` and reset by `seg10:0x0B3E` |
-| `ds:0x2562`/`0x2564` | the screen, 640x480 (`seg2:0x1483`) |
-
-`seg11:0x04D6` fills the frame table itself by walking the file and counting
-`0FF0`s, and makes an instance record for every `1111` on the way — so what a
-frame *is* comes from the binary rather than from a second reading of the
-format. `seg11:0x074A(frame)` then checks the index against the count and the
-table entry against null and calls `seg12:0x040C`.
-
-Two places are worth watching from inside. `seg12:0x0620` is where the opcode
-and its operands are complete and no handler has run: `ds:0x46DC` holds the
-opcode after the two rewrites at `seg12:0x0467` (`1301` becomes `C051`, `1311`
-becomes `C061`), `[bp-0x26]` the operand count, `[bp-4]` downward the operands
-with the island's offset already added, and `[bp-0x1A]` the string when the
-count is `0x0F`. `seg12:0x0340` is reached only by a region rectangle that got
-past the guard at `seg12:0x0318`.
-
-Afterwards the frame has left its mark on the instance record — `+0x12`
-palette slot, `+0x14` bitmap slot, `+0x1E`/`+0x1F` colours, `+0x20`..`+0x27`
-clip — and on two globals: `ds:0x4644` for "the scene ended" and `ds:0x46E8`
-for "hold it this long", both set to their nothing-yet values by
-`seg10:0x1C81` before each frame and read back at `seg10:0x1CE6` and
-`seg10:0x1D1A`. A frame that asks for no delay leaves the last one standing.
-
-`tools/oracle.py ttm` runs all of it over every frame of every script and
-compares the three streams against the port's: 41 files, 6,631 frames, 28,150
-instructions, 16,652 drawing decisions, 51,475 lines, all identical. What it
-found:
-
-* **Bitmap slots are per file.** `seg12:0x0773` reads one out of the
-  loaded-TTM record, not out of anything global, and `seg10:0x1C71` selects
-  that record from the running instance's own file id before every frame. Two
-  scenes of one `.TTM` share their sixteen; two files on screen at once cannot
-  tread on each other's. The port had one set for everything, which meant a
-  scene could be handed another file's artwork — the shape of the glitch that
-  shows when several branches are animating at once. `GJVIS5.TTM` caught it:
-  it draws from a slot it never loads.
-* **`A404`'s width operand is read by nobody**, above.
-* **A frame index past the end of a sheet is not caught.**
-  `seg12:0x0281` indexes the shape table by the opcode's frame operand with no
-  bounds check, and eleven draws in the shipped scripts ask for a frame their
-  bitmap does not have — `GJNAT1.TTM` wants frame 27 of a 26-frame sheet,
-  `SMDATE.TTM` frame 31 of 24, `SBREAKUP.TTM` frame 8 of 2. What the 1992 code
-  reads there is whatever the heap holds next. The harness pads every table
-  past the largest index any script asks for, so the read lands on a zero and
-  `seg12:0x0291` takes the no-shape path — the one answer that is not garbage,
-  and the one the port gives.
-
-## The tick, driven
-
-`seg10:0x1ACB` takes no arguments. It reads the current ADS context out of
-`ds:0x2608` and is the whole of what happens in sixteen milliseconds:
-
-1. **`seg10:0x1B12`, the sequence bookkeeping.** Each sequence keeps a
-   null-terminated array of the instance records it plays, at
-   `ctx+0x3D2+sid*2` — `seg10:0x040F` builds it by walking the script for the
-   two opcodes at `ds:0x260A` (`2000` and `2005`) and resolving each one's
-   first two operands through `seg10:0x0BF4`. A sequence whose state is 3, the
-   state `seg4:0x07CE` starts one in, has every record in its array reset by
-   `seg10:0x0B3E`; every other state is stamped onto each record's `+0x2B`.
-2. **`seg10:0x1B6B`, one pass of every sequence**, in id order, through the
-   interpreter at `seg10:0x1925` — and only for a sequence in state 1
-   (`seg10:0x1C0B`).
-3. **`seg10:0x1C32`, the instance walk.** `ctx+0x10` is the head and `+0x3B`
-   chains it. Each record selects its own loaded TTM (`seg10:0x1C71`), has its
-   colours and clip put back (`seg10:0x1C81`), and runs its current frame
-   (`seg10:0x1CBA` into `seg11:0x074A`).
-
-**The script runs before the instances.** A scene the pass starts therefore
-draws its first frame on the same tick, and a scene that reached its end last
-tick is still in state 4 when this pass reads it — because it is the walk that
-clears it, at `seg10:0x1DDC`.
-
-### A held frame is run again, not kept
-
-`seg10:0x1CD6` raises `[bx+0x0E]` the moment a frame has run, and the frame
-runs again on every tick after that with `ds:0x46DA` set. Every opcode with a
-side effect — the loads, `0080`, the whole `C` family, `2022`, `B606`, `1061` —
-opens with `cmp word ptr [0x46da], 0` and does nothing; every opcode that draws
-does not test it and draws again. So the engine's picture is not retained, it
-is redrawn from the script fifty times a second, and the mechanism the port
-needed for its own repaint turns out to be the engine's own.
-
-It also has a bug this port does not: a held frame re-reads the bitmap slot it
-drew from, and a slot loaded over in the meantime gives it different artwork.
-
-### When a frame is stepped on
-
-`seg10:0x196E` is the whole of it, and it both tests and acts:
-
-* `+0x29` is zero → up, with no reference to the clock at all. `seg10:0x0B3E`
-  resets it to zero, so a frame that asks for no delay is stepped past on the
-  tick it ran.
-* otherwise it compares the deadline at `+0x37`/`+0x39` against `ds:0x2E72`
-  (bumped by one per tick at `seg2:0x16D8`) and steps on `now >= deadline`,
-  setting the next deadline to `now + delay` as it goes.
-* on stepping: `[bx+0x0E]` back to zero, and either `[bx+8] = [bx+6]` if a goto
-  left something pending or `[bx+8]++`.
-
-The end of a scene runs through the same function: `seg10:0x1D65` asks it, and
-only when it says yes does the scene reach state 4. So a scene's last frame is
-held for exactly as long as any other, and one that asks for no delay is not
-held at all.
-
-The subtlety is `seg10:0x1CE6`, which re-bases the deadline to `now + delay`
-**only when the frame changed the delay** — `ds:0x46E8` is what the frame
-asked for, `-1` if it asked for nothing, and nothing happens when it already
-matches `+0x29`. A frame that inherits the delay it was given keeps the
-deadline `seg10:0x196E` set when it stepped, one tick earlier. So a frame that
-changes the delay is shown one tick longer than one that does not, and
-`tools/oracle.py tick` is what found that.
+`tools/x86.py` drives `seg12:0x040C` directly (`x86.Machine.wall` answers
+every call leaving segments 1 and 12). Loaded-TTM record at `ds:0x2638`:
+`+0x00` id, `+0x02` frame count, `+0x04`/`+0x06` bytes, `+0x08`/`+0x0A` last
+byte, `+0x0C..+0x2B` sixteen bitmap slots, `+0xCC`/`+0xCE` next,
+`+0xD0`/`+0xD2` frame table (`seg11:0x04D6`, one instance record per `1111`).
+At `seg12:0x0620` an opcode is complete: `ds:0x46DC` opcode (`1301` rewritten
+to `C051`, `1311` to `C061`), `[bp-0x26]` count, `[bp-4]` downward operands,
+`[bp-0x1A]` string. A frame index past a sheet's end is unchecked
+(`seg12:0x0281`; eleven shipped draws); the harness pads the table so
+`seg12:0x0291` takes the no-shape path.
 
 ## Every opcode, audited
 
-The shipped scripts use thirty TTM opcodes and eighteen ADS ones. Every one is
-either implemented or a no-op the disassembly proves is a no-op:
+Thirty TTM opcodes and eighteen ADS ones are used (ADS: `docs/FILE_FORMATS.md`).
 
-| TTM | Uses | What the port does |
+| TTM | Uses | What it does |
 | --- | --- | --- |
 | `0FF0` `1021` `2022` `1201` `0110` | 6631, 1148, 152, 75, 528 | frame boundary, delay, random delay, goto, scene end |
 | `F01F` `F02F` `F05F` `1051` `1061` `0080` | 40, 263, 41, 456, 41, 190 | load screen / bitmap / palette, slot select, free |
-| `A504` `A524` | 12546, 2822 | sprites, unmirrored and mirrored |
+| `A504` `A524` | 12546, 2822 | sprite, unmirrored and mirrored |
 | `A0A4` `A104` `A002` | 784, 111, 63 | line, filled rect, pixel |
-| `A404` | 437 | circle. `seg12:0x01C9` halves the **fourth** operand for a radius, centres it at `(x + r, y + r)` and reads the third operand not at all; `seg9:0x0688` then hands GDI `Ellipse(cx - r, cy - r, cx + r, cy + r)`, whose far edges are excluded. All 437 uses have the two equal, so only the far edge ever differed from a bounding-box reading — by one pixel, on all of them |
+| `A404` | 437 | circle: `seg12:0x01C9` halves the fourth operand for a radius, centres at `(x + r, y + r)`, ignores the third; `seg9:0x0688` calls `Ellipse`, far edges exclusive |
 | `2002` `4004` | 217, 52 | colours, clip |
-| `A054` `A064` `B606` | 1, 1, 6 | region save (nothing to do) and restore |
-| `C051` | 535 | sound, see below |
-| `1101` `1111` `5005` | 5, 611, 0 | scene markers. `seg12` sends all three to its "done" label. Only `1111` gets an instance record when the file loads (`seg11:0x0645`), and a scene without one cannot be played at all — `seg10:0x0DB6` looks one up and returns. `SASKDATE.TTM` holds the only five `1101`s; nothing plays them and only gotos inside that file reach them |
-| `4214` | 60 | `seg12:0x0860` reaches "done" whichever way its test goes |
-| `A601` | 6814 | so does `seg12:0x02D8`, and it is the most-used opcode in the data after the sprite draw |
-| `1121` | 61 | writes `[bx+0x16]` on the instance, which only opcode `00C0` reads, and nothing uses `00C0` |
-| `2012` | 52 | flags the **next** bitmap load to build pre-flipped copies. `ds:0x4108` reaches `seg9:0x018A`, and the data segment carries the error string "Bitmaps won't be flipped." for when there is no memory for them. This port mirrors at draw time, so it has nothing to build |
-| `4204` | 38 | page-to-page region save, and only when `ds:0x2641` says there are three pages. One surface, nothing to save |
-
-The ADS side is in `docs/FILE_FORMATS.md`, which now covers the parts that are
-easy to read wrongly: the rule-set model, `1350` meaning "has just ended",
-`1420` and `1430` being AND and OR, how blocks nest, and how random blocks are
-weighed.
+| `A054` `A064` `B606` | 1, 1, 6 | region save and restore |
+| `C051` | 535 | sound |
+| `1101` `1111` `5005` | 5, 611, 0 | scene markers; only `1111` gets an instance record (`seg11:0x0645`) |
+| `4214` | 60 | no-op (`seg12:0x0860`) |
+| `A601` | 6814 | no-op (`seg12:0x02D8`) |
+| `1121` | 61 | writes `[bx+0x16]`, read only by the unused `00C0` |
+| `2012` | 52 | next bitmap load builds pre-flipped copies (`seg9:0x018A`); the port mirrors at draw time |
+| `4204` | 38 | page-to-page region save when `ds:0x2641` says three pages; nothing on one surface |
 
 ## The decorations, and the title card
 
-`seg3:0x1E50` draws `HOLIDAY.BMP` over the island when `ds:0x30BC` is not zero,
-unless the queue asked for a clean island (`ds:0x30B6`) or the scene is a
-cutaway. `seg3:0x1E87` indexes a jump table at `cs:0x1F67` by `holiday - 1`,
-and each arm picks its own frame — they are not in holiday order:
-
-| Holiday | `HOLIDAY.BMP` frame | Where | Size |
-| --- | --- | --- | --- |
-| Halloween | 0 | (0x19B, 0x12A) | 40x34 |
-| Christmas | 2 | (0x195, 0x10B) | 56x65 |
-| New Year | 3 | (0x16A, 0x09B) | 152x47 |
-| St Patrick's | 1 | (0x14E, 0x11E) | 120x47 |
-
-Like everything else on the island they move with it, and the sizes in the code
-run a few pixels past the sprite because they are the rectangle the redraw test
-uses rather than the artwork.
-
-`seg2:0x14F0` puts `INTRO.SCR` — the "Screen Antics! Johnny Castaway" title
-card — on the screen and then gets on with loading: the backdrop at
-`seg3:0x0136`, the walk sprites at `seg4:0x0000`, the sounds at `seg5:0x0000`.
-The island replaces it whenever that finishes, so on a 386 decoding a
-hundred-odd LZW bitmaps the card was up for a few seconds. Here that work takes
-milliseconds, so the port gives the card a length of its own — two seconds,
-`JC_INTRO` in ticks, 0 to skip it.
+`seg2:0x14F0` shows `INTRO.SCR` while loading the backdrop (`seg3:0x0136`),
+walk sprites (`seg4:0x0000`) and sounds (`seg5:0x0000`). The port holds the
+card two seconds; `JC_INTRO` in ticks, 0 to skip.
 
 ## The sound
 
-`RESOURCE.001` has no audio in it. The twenty-three effects are Windows
-resources in `SCRANTIC.EXE` itself — type `WAVE`, named `WAVESFX1` upwards —
-and `seg5:0x001A` pulls them out at startup with `FindResource`,
-`LoadResource` and `LockResource`, leaving far pointers at `ds:0x355A`. They
-are 8-bit mono PCM at 11025Hz.
+Twenty-three `WAVE` resources in `SCRANTIC.EXE`, `WAVESFX1` upwards, 8-bit
+mono PCM at 11025 Hz. `seg5:0x001A` loads them at startup (`FindResource`,
+`LoadResource`, `LockResource`) into far pointers at `ds:0x355A`, looking for
+25 and finding 23. `seg5:0x00BA` bounds-checks the id and calls
+`sndPlaySound` with `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`: one sound at a
+time. Scripts ask for 1 to 24, the story cue for 25. `ds:0x00BC` is the
+`Sounds` switch from `SCRANTIC.INI`.
 
-Playing one is `seg5:0x00BA`: bounds-check the id, look the pointer up, and
-call `sndPlaySound` with flags 7 — `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`.
-Because `sndPlaySound` stops whatever is playing, the island only ever makes
-one noise at a time.
+**Clip and colours are per instance.** `4004` writes the live clip at
+`ds:0x1EA3..0x1EAA` (blitter reads it at `seg8:0x1ADE`) and a copy at instance
+`+0x20` (`seg12:0x0F40`); `2002` stores colours at `+0x1E`/`+0x1F`
+(`seg12:0x06A9`; default 15 from `seg10:0x0B6E`). `seg10:0x1C81` restores both
+before every frame; `seg10:0x1E2F` resets the globals after the walk.
 
-The loader looks for twenty-five and finds twenty-three. The scripts ask for
-ids 1 to 24 and `seg4:0x0891` asks for 25 when the story gets told, so two of
-the twenty-five are silent in the original too — the engine wanted a noise
-there and the file it shipped with has not got one. `ds:0x00BC` is the
-`Sounds` switch from `SCRANTIC.INI`, and when it is off the loader does not
-even run.
+## In the port
 
-### The clip belongs to the instance
+`tools/gen_tables.py` emits the tables as `johnny/src/tables.rs`.
+`johnny/src/director.rs` holds the queue, chooser, walk driver and clocks;
+`johnny/src/scenery.rs` the island; `jcisland` runs the lot. `Clock::Wall` is
+the shipped clock; the tools default to `Clock::PerQueue`, one phase per queue.
 
-`4004` sets a clip rectangle. The live one is the globals at
-`ds:0x1EA3`-`ds:0x1EAA`, which is what the blitter reads (`seg8:0x1ADE`), and
-`seg12:0x0F40` writes a copy into the instance record at +0x20 as well.
-
-That copy is not decoration, which is what this said before. `seg10:0x1C81`
-reads seven fields back out of the record into those globals *before every
-frame that instance runs*: the two drawing colours at +0x1E and +0x1F, then
-the clip flag and the four rectangle words at +0x20 through +0x27.
-`seg12:0x06A9` puts `2002`'s colours in the record the same way, and
-`seg10:0x0B6E` fills both colours in with 15 when the record is made, so an
-unset colour is white rather than 0.
-
-So the clip and the colours belong to the scene that set them, however the
-scenes on screen interleave, and `seg10:0x1E2F` puts the globals back to the
-whole screen once the runner has walked the list — nothing drawn outside the
-runner is ever clipped. A port with one clip on the screen instead of one per
-instance gets this wrong in two ways: a scene inherits the clip of whatever
-drew before it in the same tick, and — because this port repaints from nothing
-every tick rather than keeping a work page — everything outside that rectangle
-stops being drawn at all. In `MARY.ADS` sequence 5 that left Johnny's raft as
-three red pixels on the sand.
+* Johnny is redrawn after the backdrop every pass.
+* A held frame is repainted from resolved marks (`ttm::Paint`), not by
+  re-running its instructions: 66 shipped frames load or free artwork and draw
+  with it in the same frame. `JC_CHECK=1` verifies this every pass.
+* `F200 n` starts sequence `n` alongside (state 4, `seg10:0x16C2`); every
+  `STAND.ADS` sequence opens with `F200 14`, "STAND INIT". `F010 -1` puts the
+  current sequence into state 2.
 
 ## Still open
 
-* What the two position components mean geometrically. Major 0-6 and minor
-  0-7 look like an island region and a spot within it, but that is inference
-  from the tables rather than something the code states. The waypoint
-  coordinates should settle it once they are plotted over a background.
-* What the engine draws in the oceans' index-0 patches, above under "The
-  colour that is not there". Showing them as what is behind the transparency
-  key — black, which is index 5 in this palette — was tried and turns the near
-  water to mud, so the port still shows them as water.
-* The blitter's inner loop, because there is not one. It is the last thing
-  here that is not driven out of the binary, and it cannot be: the pixels are
-  GDI's, not Sierra's. `seg8:0x0AE4` builds
-  device contexts and hands the blit to GDI, so the pixel work belongs to
-  Windows and any port writes its own. What the function decides first is a
-  scale and a mirror, and both are now read out rather than assumed. The scale
-  is dead: `seg8:0x0B02` rescales a shape whose `[si+1]` differs from
-  `ds:0x2E77` and `seg8:0x0B26` halves or doubles its dimensions when
-  `ds:0x2E76` differs from `ds:0x2E77`, but `seg2:0x148F` assigns both bytes
-  the constant 3 in the same breath as fixing the screen at 640x480, and
-  nothing else writes either. The mirror is a second bitmap: a shape holds a
-  plain pair of GDI handles at `[si+2]`/`[si+4]` and a pre-flipped pair at
-  `[si+0x0A]`/`[si+0x0C]` that TTM `2012` asks the loader to build, mirror
-  bit 1 chooses between them, and `seg8:0x0B97` falls back to the plain pair
-  when the flipped one was never built — which is what the "Bitmaps won't be
-  flipped." string is for. This port flips at draw time, so it needs neither.
+* What the engine draws in the sea screens' index-0 patches.
+* The blitter's pixel loop: `seg8:0x0AE4` hands the blit to GDI. Its scale
+  path (`seg8:0x0B02`, `seg8:0x0B26`) is dead because `seg2:0x148F` fixes
+  `ds:0x2E76` and `ds:0x2E77` at 3. The mirror is a second bitmap pair at
+  `[si+0x0A]`/`[si+0x0C]` built by `2012`; `seg8:0x0B97` falls back to the
+  plain pair at `[si+2]`/`[si+4]`.

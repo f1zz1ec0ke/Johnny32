@@ -19,3 +19,6 @@ johnny/target/
 
 # jcrender debug output
 frames/
+
+# What tools/deep.sh leaves behind
+deep/

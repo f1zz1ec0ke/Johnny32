@@ -935,8 +935,8 @@ class Machine:
 
 # ---- self-test -----------------------------------------------------------
 #
-# The oracle is this interpreter's real test: nineteen of its twenty queries
-# run thousands of the original's own instructions and diff the answers, so
+# The oracle is this interpreter's real test: its twenty-two queries run
+# millions of the original's own instructions and diff the answers, so
 # anything they touch is checked by the binary itself. What that leaves is
 # the handful of instructions the shipped code paths never reach. `movs` and
 # `scas` are the two -- they went in alongside `lods` and `stos`, which the

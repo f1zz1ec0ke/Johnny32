@@ -1,8 +1,8 @@
 //! The sound effects, which live inside `SCRANTIC.EXE` rather than the
 //! archive.
 //!
-//! `RESOURCE.001` has no audio in it at all — 117 bitmaps, 41 TTM scripts, ten
-//! screens, ten ADS scripts, a font list and a palette. The twenty-three sound
+//! `RESOURCE.001` has no audio in it: 117 bitmaps, 41 TTM scripts, ten
+//! screens, ten ADS scripts, a preload list and a palette. The twenty-three sound
 //! effects are Windows resources in the 16-bit executable's own resource
 //! table, and the screensaver pulls them out at startup: `seg5:0x001A`
 //! formats `"WAVESFX%d"` for 1 to 25, hands each to `FindResource` with the

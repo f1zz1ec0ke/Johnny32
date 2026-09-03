@@ -19,9 +19,9 @@ use crate::ads::Rng;
 use crate::dgds::{Archive, Frame};
 use crate::render::{Mirror, Surface, SCREEN_H, SCREEN_W};
 
-/// Ticks between surf steps. `seg3:0x0E96` writes 4 into the delay slot at
-/// `ds:0x0288` and `seg3:0x0E8F` will not step again until it reaches zero,
-/// so one step is 64ms.
+/// The surf's delay slot, `ds:0x0288`: `seg3:0x0E96` writes 4 into it after a
+/// step and `seg3:0x0E8F` will not step again until the timer has counted it
+/// back to zero. See `director::PASS_MS` for what that means in passes.
 pub const SURF_TICKS: u32 = 4;
 
 /// The static island, as `(frame, x, y)`. Every one of these is a blit
@@ -69,8 +69,23 @@ pub const SURF: [(i32, i32, usize, usize, bool); 7] = [
     (0x082, 0x154, 39, 0, true), // seg3:0x1496 -- around the rock
 ];
 
-/// Ticks between wave steps. `seg3:0x0A19` writes 10 into the delay slot at
-/// `ds:0x028A`, so one step is 160ms.
+/// The rectangles a wave is tested against before it is drawn
+/// (`seg3:0x0893`): a wave entirely inside one is left out, because the
+/// surf would paint over it anyway. Three per layout, as `(x, y, w, h)`
+/// against the island's offset, and the sizes are the engine's own
+/// constants -- a few pixels narrower than the patch sprites for four of
+/// them -- rather than the sprites'. The rock's patch is never tested.
+pub const SURF_HIDE: [(i32, i32, i32, i32, bool); 6] = [
+    (0x10F, 0x132, 0x48, 0x1D, false), // seg3:0x0935
+    (0x16D, 0x13F, 0x9C, 0x19, false), // seg3:0x0964
+    (0x207, 0x12F, 0x41, 0x20, false), // seg3:0x0993
+    (0x0EA, 0x143, 0x78, 0x30, true),  // seg3:0x089D
+    (0x170, 0x164, 0xAB, 0x1C, true),  // seg3:0x08CC
+    (0x22F, 0x143, 0x51, 0x30, true),  // seg3:0x08FB
+];
+
+/// The waves' delay slot, `ds:0x028A`: the walk moves everything when it
+/// finds it at zero and `seg3:0x0A19` writes 10 back into it afterwards.
 pub const WAVE_TICKS: u32 = 10;
 
 /// The waves out on the open sea, in the order their spawn handlers sit in
@@ -138,10 +153,13 @@ const CLOUDS: [(usize, u8, u32); 3] = [
     (17, 2, 5),
 ];
 
-/// Fifteen cloud slots (`seg3:0x0A7A`), placed in the sky: x anywhere across
-/// the screen, y in the top 139 rows (`seg3:0x0B0C`).
+/// Fifteen cloud slots (`seg3:0x0A7A`). When the sky is set up they are
+/// placed on screen: x anywhere across it, y in the top 139 rows
+/// (`seg3:0x0B0C`). The cloud walk refills an empty slot off screen instead,
+/// a thousand pixels upwind (`seg3:0x0C28`), so a new cloud drifts in.
 const CLOUD_SLOTS: usize = 15;
 const CLOUD_BAND: (i32, i32, i32, i32) = (0, 1, 640, 139);
+const CLOUD_REFILL_SPAN: i32 = 1000;
 
 /// One cloud drifting. The engine keeps these in the same twelve-byte records
 /// as everything else, in the array at `ds:0x2E82`.
@@ -176,6 +194,17 @@ struct Glint {
     x: i32,
     y: i32,
     left: u16,
+}
+
+/// One of the thirty twelve-byte records at `ds:0x2F42`. A slot is empty
+/// when its x and y are both zero (`seg3:0x04BD`), and the walk fills an
+/// empty slot and moves a full one in the same visit, in slot order -- so
+/// a wave retired at one slot frees its size for a slot later in the same
+/// pass, and which slot an object landed in decides that.
+enum Slot {
+    Empty,
+    Wave(Wave),
+    Glint(Glint),
 }
 
 /// Where the raft sits, without and with the rock (`seg3:0x1DCB`).
@@ -350,19 +379,22 @@ pub const NIGHT_SEA: &str = "NIGHT.SCR";
 /// anchor, all three agreeing.
 pub const ORIGIN: (i32, i32) = (-1, 0);
 
-/// Whether the shells go on the beach.
+/// `JC_FAITHFUL=1`: do what the binary does even where the port deliberately
+/// departs from it. Three things here are switched by it:
 ///
-/// `seg3:0x02EA` draws `BACKGRND.BMP` frame 14 -- a starfish and two shells --
-/// at (397, 279), unconditionally, right on the island's white patch. But
-/// `ISLETEMP.SCR`, which is a 96% render of everything else in this
-/// composition, does not have them, and searching the whole image finds them
-/// nowhere in it. Compositing with them scores 76.6% against that reference
-/// and without them 81.1%.
-///
-/// So the code says draw them and the game's own picture of its island says
-/// otherwise. The port sides with the picture, and `JC_FAITHFUL=1` sides with
-/// the code, so the disagreement stays visible instead of being buried.
-fn draw_shells() -> bool {
+/// * the shells. `seg3:0x02EA` draws `BACKGRND.BMP` frame 14, a starfish and
+///   two shells, at (397, 279). `ISLETEMP.SCR`, the engine's own render of
+///   the island, does not have them anywhere, and the composition scores
+///   better against it without them (81.1% against 76.6%). The port leaves
+///   them out; faithful mode draws them.
+/// * the clouds. The engine has a cloud walk (`seg3:0x0B67`) that moves them
+///   and refills the sky, but the per-pass backdrop function is called with an
+///   argument of 0 (`seg4:0x070E`) and that skips the walk; only the setup
+///   pass (`seg3:0x03B5`) runs it, once. So the original's clouds never
+///   move. The port runs the walk every pass, which is what the code was
+///   written to do; faithful mode leaves the sky still.
+/// * the walk router, in `director`.
+fn faithful() -> bool {
     std::env::var_os("JC_FAITHFUL").is_some()
 }
 
@@ -393,6 +425,16 @@ const SEA_KEY_AS: u8 = 9;
 /// White. `seg3:0x07DE` is the only place the backdrop sets a draw colour.
 const GLINT_COLOUR: u8 = 15;
 
+/// What the surf keeps between one backdrop and the next: the engine's
+/// `ds:0x0282`-`ds:0x028A` are globals, and only some of them are reset
+/// when a backdrop is built.
+#[derive(Copy, Clone, Default)]
+pub struct SurfState {
+    pub surf_delay: u32,
+    pub wave_delay: u32,
+    pub counters: [u8; 3],
+}
+
 /// The backdrop, and enough state to keep the surf moving.
 pub struct Scenery {
     /// The palette every indexed pixel here resolves through, so the colour
@@ -406,17 +448,17 @@ pub struct Scenery {
     /// `ds:0x0282`, `ds:0x0284`, `ds:0x0286`. All three start at 2
     /// (`seg3:0x02C5`).
     counters: [u8; 3],
-    /// Tick at which the counters step again.
-    next: u32,
-    /// The waves out on the water, and the tick they next move on.
-    waves: Vec<Wave>,
-    wave_next: u32,
-    /// The clouds, and the tick they next move on.
+    /// The two delay slots the timer counts down, `ds:0x0288` for the surf
+    /// and `ds:0x028A` for the waves. `seg3:0x02BF` zeroes the surf's when
+    /// the backdrop is built; the waves' carries over.
+    surf_delay: u32,
+    wave_delay: u32,
+    /// The object array: the waves and the glints, in the engine's slots.
+    slots: Vec<Slot>,
+    /// The clouds. They are walked every pass unless `faithful()`; see there.
     clouds: Vec<Cloud>,
-    cloud_next: u32,
-    /// The glints on the water. They share the object array and the 160ms
-    /// step with the waves.
-    glints: Vec<Glint>,
+    drift_clouds: bool,
+
     /// The wind: `ds:0x0280`, +1 or -1, chosen once when the sky is set up
     /// (`seg3:0x0A59`) and shared by the clouds and the waves.
     drift: i32,
@@ -440,9 +482,6 @@ pub struct Scenery {
 }
 
 impl Scenery {
-    /// Compose the backdrop. `night` picks `NIGHT.SCR` over the oceans,
-    /// `roll` supplies the two random choices: which sea, and whether the
-    /// optional pieces are there.
     /// The palette the composed island resolves against. Set before
     /// anything is composed.
     pub fn set_palette(&mut self, palette: [[u8; 3]; 256]) {
@@ -460,7 +499,7 @@ impl Scenery {
         archive: &Archive,
         sea: &'static str,
         extras: bool,
-        now: u32,
+        surf: SurfState,
         day: u8,
     ) -> Option<Scenery> {
         let mut sea_only = archive.screen(sea)?;
@@ -476,10 +515,9 @@ impl Scenery {
         }
 
         let pieces = archive.bitmap("BACKGRND.BMP").unwrap_or_default();
-        // The raft is its own file, loaded next to the island at
-        // `seg3:0x0179` and kept in `ds:0x30AE`.
-        // `seg3:0x0179` loads this next to the island artwork and keeps it in
-        // `ds:0x30AA`.
+        // `HOLIDAY.BMP` is loaded at `seg3:0x014E` and kept in `ds:0x30AA`;
+        // the raft is its own file too, loaded at `seg3:0x0179` into
+        // `ds:0x30AE`.
         let decoration = archive.bitmap("HOLIDAY.BMP").unwrap_or_default();
         let raft = archive
             .bitmap("MRAFT.BMP")
@@ -495,13 +533,13 @@ impl Scenery {
             raft,
             day,
             backdrop: Backdrop::default(),
-            counters: [2, 2, 2],
-            next: now,
-            waves: Vec::new(),
-            wave_next: now,
+            counters: surf.counters,
+            surf_delay: surf.surf_delay,
+            wave_delay: surf.wave_delay,
+            slots: Vec::new(),
             clouds: Vec::new(),
-            cloud_next: now,
-            glints: Vec::new(),
+            drift_clouds: !faithful(),
+
             // `seg3:0x0A59` rolls the wind once, here, and everything that
             // drifts drifts with it.
             drift: 1,
@@ -513,38 +551,74 @@ impl Scenery {
         Some(scenery)
     }
 
-    /// Pick the wind and put some clouds up. `seg3:0x0A38` does both, once,
-    /// when the backdrop is set up -- which is why the waves and the clouds
-    /// always drift the same way as each other.
+    /// Pick the wind and put some clouds up: `seg3:0x0A38`, run once when
+    /// the backdrop is built.
+    ///
+    /// The wind is rolled first, and the clouds and the waves both read it.
+    /// Then each of the fifteen slots is rolled twice: a 30% gate, and a
+    /// 5/10/15 split over the three sizes, biggest first and falling through
+    /// to the next size down when that one is at its cap (`seg3:0x0AC9`).
+    /// That is about nine percent a slot, so the sky starts with one or two
+    /// clouds; the walk that follows fills the rest of the slots off screen.
+    /// The rolls are made whether or not clouds are switched on -- the loop
+    /// is fifteen regardless -- so the generator is consumed the same way.
     pub fn start_sky(&mut self, rng: &mut Rng) {
         self.drift = if weighted(rng, &[50]) == 1 { -1 } else { 1 };
         self.clouds.clear();
-        self.spawn_clouds(rng);
-    }
-
-    /// Walk the empty slots and roll for each. Sparse by design: fifteen slots
-    /// at thirty percent between them is four or five clouds, which is what
-    /// the painted sky in `ISLETEMP.SCR` has.
-    fn spawn_clouds(&mut self, rng: &mut Rng) {
-        if !self.backdrop.allow_clouds {
-            return;
-        }
-        for _ in self.clouds.len()..CLOUD_SLOTS {
+        for _ in 0..CLOUD_SLOTS {
+            if weighted(rng, &[30]) != 1 {
+                continue;
+            }
             let pick = weighted(rng, &[CLOUDS[2].2, CLOUDS[1].2, CLOUDS[0].2]);
             if pick == 0 {
                 continue;
             }
-            // The roll runs biggest first and falls through to the next size
-            // down when that one is at its cap (`seg3:0x0AC9`).
             for kind in (0..=3 - pick).rev() {
                 if self.count_clouds(kind) >= CLOUDS[kind].1 as usize {
                     continue;
                 }
-                if let Some(c) = self.spawn_cloud(kind, rng) {
+                if let Some(c) = self.spawn_cloud(kind, CLOUD_BAND, true, rng) {
                     self.clouds.push(c);
                 }
                 break;
             }
+        }
+        if !self.backdrop.allow_clouds {
+            self.clouds.clear();
+        }
+    }
+
+    /// The backdrop pass the setup runs once with its argument set
+    /// (`seg3:0x03B5` calls `seg3:0x040E(1)`): the wave walk, the cloud walk,
+    /// and a step of the surf. The per-pass version is `pass`.
+    pub fn setup(&mut self, rng: &mut Rng) {
+        if self.backdrop.cutaway {
+            return;
+        }
+        // `seg3:0x02BF`: the surf starts over -- its slot cleared, all three
+        // counters at 2, and one step taken at once. A cutaway skips this,
+        // so its counters are whatever the last island left.
+        self.surf_delay = 0;
+        self.counters = [2, 2, 2];
+        self.step_surf();
+        self.step_waves(rng);
+        self.walk_clouds(rng);
+        self.step_surf();
+    }
+
+    /// The timer callback, `seg2:0x16CE`: every delay slot that is not
+    /// already zero counts down once per tick.
+    pub fn timer(&mut self, fires: u32) {
+        self.surf_delay = self.surf_delay.saturating_sub(fires);
+        self.wave_delay = self.wave_delay.saturating_sub(fires);
+    }
+
+    /// The surf's globals, for the next backdrop to inherit.
+    pub fn surf_state(&self) -> SurfState {
+        SurfState {
+            surf_delay: self.surf_delay,
+            wave_delay: self.wave_delay,
+            counters: self.counters,
         }
     }
 
@@ -552,34 +626,65 @@ impl Scenery {
         self.clouds.iter().filter(|c| c.kind == kind).count()
     }
 
-    fn spawn_cloud(&self, kind: usize, rng: &mut Rng) -> Option<Cloud> {
+    /// One cloud, placed by `seg3:0x14BF` inside `band` with the sprite's
+    /// own size taken off the span so it lands whole. The rolls come in the
+    /// engine's order: x, y, then the speed, then -- only for a cloud placed
+    /// at setup -- how far through its first move it already is.
+    fn spawn_cloud(
+        &self,
+        kind: usize,
+        band: (i32, i32, i32, i32),
+        setup: bool,
+        rng: &mut Rng,
+    ) -> Option<Cloud> {
         let sprite = self.pieces.get(CLOUDS[kind].0)?;
-        let (bx, by, sx, sy) = CLOUD_BAND;
+        let (bx, by, sx, sy) = band;
         let sx = sx - sprite.width as i32;
         let sy = sy - sprite.height as i32;
         if sx < 0 || sy < 0 {
             return None;
         }
+        let x = bx + span_roll(rng, sx);
+        let y = by + span_roll(rng, sy);
         let speed = (rng.next_u16() % 5) + 6;
+        let left = if setup { rng.next_u16() % speed } else { 0 };
         Some(Cloud {
             kind,
-            x: bx + span_roll(rng, sx),
-            y: by + span_roll(rng, sy),
+            x,
+            y,
             speed,
-            left: rng.next_u16() % speed,
+            left,
         })
     }
 
-    /// Drift the sky along. A cloud moves one pixel every `speed` passes and
-    /// is gone once it has left the screen (`seg3:0x0CF7`); the slot it frees
-    /// is filled again by the next spawn pass.
-    fn step_clouds(&mut self, now: u32, rng: &mut Rng) -> bool {
-        if now < self.cloud_next {
-            return false;
-        }
-        self.cloud_next = now + 1;
-        let drift = self.drift;
+    /// The cloud walk, `seg3:0x0B67`, in its three loops.
+    ///
+    /// Every empty slot is rolled for a refill -- 20/30/50 over the three
+    /// sizes, and nothing if that size is at its cap -- and placed off
+    /// screen upwind. Then every cloud whose countdown has run out moves one
+    /// pixel with the wind and is retired once it has left the screen on the
+    /// far side (`seg3:0x0CFC`). The third loop only draws.
+    fn walk_clouds(&mut self, rng: &mut Rng) -> bool {
+        let slots = if self.backdrop.allow_clouds { CLOUD_SLOTS } else { 0 };
         let mut moved = false;
+        for _ in self.clouds.len()..slots {
+            // `seg3:0x0BA7`: 20% the biggest bank, 30% the middle one, 50%
+            // the smallest -- and nothing when that size is at its cap.
+            let pick = weighted(rng, &[20, 30, 50]);
+            if pick == 0 {
+                continue;
+            }
+            let kind = 3 - pick;
+            if self.count_clouds(kind) >= CLOUDS[kind].1 as usize {
+                continue;
+            }
+            let upwind = if self.drift > 0 { -CLOUD_REFILL_SPAN } else { SCREEN_W as i32 };
+            let band = (upwind, CLOUD_BAND.1, CLOUD_REFILL_SPAN, CLOUD_BAND.3);
+            if let Some(c) = self.spawn_cloud(kind, band, false, rng) {
+                self.clouds.push(c);
+            }
+        }
+        let drift = self.drift;
         for c in self.clouds.iter_mut() {
             let due = c.left == 0;
             c.left = if due { c.speed } else { c.left - 1 };
@@ -593,13 +698,14 @@ impl Scenery {
             .map(|(f, _, _)| self.pieces.get(*f).map_or(0, |p| p.width as i32))
             .collect();
         let before = self.clouds.len();
-        self.clouds
-            .retain(|c| c.x + widths[c.kind] >= 0 && c.x <= SCREEN_W as i32);
-        if self.clouds.len() != before {
-            self.spawn_clouds(rng);
-            moved = true;
-        }
-        moved
+        self.clouds.retain(|c| {
+            if drift < 0 {
+                c.x + widths[c.kind] >= 0
+            } else {
+                c.x <= SCREEN_W as i32
+            }
+        });
+        moved || self.clouds.len() != before
     }
 
     /// Whether the rock and the sandbar are part of the island this time.
@@ -648,6 +754,15 @@ impl Scenery {
         )
     }
 
+    /// Where the engine's own arithmetic puts a point of the island: the
+    /// offset alone, without the drawing correction `ORIGIN` is. The palm
+    /// and surf rectangles the overlap tests use are built this way
+    /// (`seg3:0x0566`, `seg3:0x08A5`), and a glint one pixel off the trunk
+    /// is kept or thrown away by this pixel.
+    fn engine_at(&self, x: i32, y: i32) -> (i32, i32) {
+        (x + self.offset.0, y + self.offset.1)
+    }
+
     /// Drop the island somewhere it is allowed to be (`seg3:0x1B00`).
     ///
     /// The island does not sit still between one queue of scenes and the next.
@@ -680,7 +795,7 @@ impl Scenery {
                 if !always && !rock {
                     continue;
                 }
-                if frame == 14 && !draw_shells() {
+                if frame == 14 && !faithful() {
                     continue;
                 }
                 if let Some(f) = self.pieces.get(frame) {
@@ -741,18 +856,38 @@ impl Scenery {
         true
     }
 
-    /// Step the surf if its 64ms is up. Returns whether anything moved.
+    /// The per-pass backdrop pass, `seg3:0x040E(0)`. Returns whether anything
+    /// moved.
+    ///
+    /// Nothing at all happens for a cutaway (`seg3:0x041C`). Otherwise the
+    /// water is walked, then -- unless the queue asked for a flat calm, which
+    /// stops the surf as well as the waves (`seg3:0x0441`) -- the surf is
+    /// stepped. The cloud walk is skipped by the engine here; see `faithful`.
+    pub fn pass(&mut self, rng: &mut Rng) -> bool {
+        if self.backdrop.cutaway {
+            return false;
+        }
+        let mut moved = self.step_waves(rng);
+        if self.drift_clouds {
+            moved |= self.walk_clouds(rng);
+        }
+        if self.backdrop.still_water {
+            return moved;
+        }
+        moved | self.step_surf()
+    }
+
+    /// Step the surf if its delay slot has run down. Returns whether it did.
     ///
     /// `seg3:0x0E9C`: only one counter moves per step, and which one depends
     /// on how they currently sit relative to each other, so the three patches
     /// they drive stay out of phase. From `[2, 2, 2]` it runs a nine-step
-    /// cycle -- 576ms for the shoreline to come back round.
-    pub fn tick(&mut self, now: u32, rng: &mut Rng) -> bool {
-        let moved = self.step_waves(now, rng) | self.step_clouds(now, rng);
-        if now < self.next {
-            return moved;
+    /// cycle.
+    fn step_surf(&mut self) -> bool {
+        if self.surf_delay != 0 {
+            return false;
         }
-        self.next = now + SURF_TICKS;
+        self.surf_delay = SURF_TICKS;
         let [c0, c1, c2] = self.counters;
         if c0 == c2 {
             self.counters[0] += 1;
@@ -769,9 +904,72 @@ impl Scenery {
         true
     }
 
+    /// The object array and the cloud array as the engine keeps them, for
+    /// `jcoracle water`: the wind, where the island is, the coin, the surf's
+    /// three counters and two delay slots, then every live object as the
+    /// words of its twelve-byte record at `ds:0x2F42` -- kind (0 a glint,
+    /// 1 to 3 the wave sizes), x, y, and for a wave its cursor, hold and
+    /// countdown, for a glint just the countdown -- and every cloud as its
+    /// record at `ds:0x2E82`. Both arrays are sorted, since the engine's
+    /// slot order is whatever fell empty first and says nothing.
+    pub fn dump(&self) -> String {
+        let mut objects: Vec<String> = self
+            .slots
+            .iter()
+            .filter_map(|s| match s {
+                Slot::Wave(w) => Some(format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    w.kind + 1,
+                    w.x,
+                    w.y,
+                    w.cursor,
+                    w.hold,
+                    w.left
+                )),
+                Slot::Glint(g) => Some(format!("0:{}:{}:{}", g.x, g.y, g.left)),
+                Slot::Empty => None,
+            })
+            .collect();
+        objects.sort();
+        let mut clouds: Vec<String> = self
+            .clouds
+            .iter()
+            .map(|c| format!("{}:{}:{}:{}:{}", c.kind, c.x, c.y, c.speed, c.left))
+            .collect();
+        clouds.sort();
+        format!(
+            "wind {} off {} {} coin {} surf {} {} {} delay {} {} objects {} clouds {}",
+            self.drift,
+            self.offset.0,
+            self.offset.1,
+            self.sandbar() as u8,
+            self.counters[0],
+            self.counters[1],
+            self.counters[2],
+            self.surf_delay,
+            self.wave_delay,
+            objects.join(","),
+            clouds.join(",")
+        )
+    }
+
     /// How many waves are on the water, for the tools that report it.
     pub fn wave_count(&self) -> usize {
-        self.waves.len()
+        self.waves().count()
+    }
+
+    fn waves(&self) -> impl Iterator<Item = &Wave> {
+        self.slots.iter().filter_map(|s| match s {
+            Slot::Wave(w) => Some(w),
+            _ => None,
+        })
+    }
+
+    fn glints(&self) -> impl Iterator<Item = &Glint> {
+        self.slots.iter().filter_map(|s| match s {
+            Slot::Glint(g) => Some(g),
+            _ => None,
+        })
     }
 
     /// How many clouds are in the sky.
@@ -781,110 +979,127 @@ impl Scenery {
 
     /// How many glints are on the water.
     pub fn glint_count(&self) -> usize {
-        self.glints.len()
+        self.glints().count()
     }
 
-    /// Try to put another wave on the water, then move the ones already there.
+    /// The wave walk, `seg3:0x04A2`: try to fill every empty slot, then move
+    /// what is live.
     ///
-    /// `seg3:0x04BD` walks the object array once per pass. An empty slot gets
-    /// a 35% roll to be filled at all (`seg3:0x04CE`), and if it wins, a
-    /// second weighted roll picks what goes in it: 35% a glint, 5% each for
-    /// the three wave sizes, 50% nothing after all. A live slot moves on when
-    /// its 160ms is up.
-    fn step_waves(&mut self, now: u32, rng: &mut Rng) -> bool {
+    /// The walk visits all thirty slots every pass. Each empty one gets a 35%
+    /// roll to be filled at all (`seg3:0x04CE`), and if that wins a second
+    /// weighted roll picks what goes in it: 35% a glint, 5% each for the
+    /// three wave sizes, 50% nothing after all (`seg3:0x04EE`). So the water
+    /// fills within a second of being cleared and stays full. A live slot
+    /// moves on when its 160ms is up.
+    fn step_waves(&mut self, rng: &mut Rng) -> bool {
         let mut moved = false;
 
         // `seg3:0x04E4` will not spawn anything unless `ds:0x30BE` is over
         // 100. That is a speed index -- segment 2 times a calibration loop
         // and divides -- so on a 386 the extra objects were simply skipped.
         // Any machine running this port is over the line.
-        if self.waves.len() + self.glints.len() < self.objects() && weighted(rng, &[35]) == 1 {
-            // Weights from `seg3:0x04EE`: a glint, then the three wave sizes.
-            match weighted(rng, &[35, 5, 5, 5]) {
-                1 => {
-                    if let Some(g) = self.spawn_glint(rng) {
-                        self.glints.push(g);
+        let n = self.objects();
+        self.slots.resize_with(n, || Slot::Empty);
+        // `seg3:0x06FA` and friends move a live object only when the slot
+        // is at zero, and `seg3:0x0A12` re-arms it once the walk is over.
+        let due = self.wave_delay == 0;
+        let drift = self.drift;
+        for k in 0..n {
+            if matches!(self.slots[k], Slot::Empty) && weighted(rng, &[35]) == 1 {
+                match weighted(rng, &[35, 5, 5, 5]) {
+                    1 => {
+                        if let Some(g) = self.spawn_glint(rng) {
+                            self.slots[k] = Slot::Glint(g);
+                            moved = true;
+                        }
+                    }
+                    pick @ 2..=4 => {
+                        // `seg3:0x05CA`: the size's budget is checked before
+                        // anything is rolled for it.
+                        let kind = pick - 2;
+                        let live = self.waves().filter(|w| w.kind == kind).count();
+                        if live < KINDS[kind].budget as usize {
+                            if let Some(w) = self.spawn(kind, rng) {
+                                self.slots[k] = Slot::Wave(w);
+                                moved = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match &mut self.slots[k] {
+                Slot::Empty => {}
+                Slot::Wave(w) => {
+                    if due {
+                        w.x += drift;
+                        let held = w.left == 0;
+                        w.left = w.left.wrapping_sub(1);
+                        if held {
+                            w.left = w.hold;
+                            w.cursor += 1;
+                        }
+                    }
+                    // `seg3:0x0719`: past the end of its sequence, the wave
+                    // is gone and its size may be spawned again.
+                    if w.cursor >= KINDS[w.kind].sequence.len() {
+                        self.slots[k] = Slot::Empty;
                         moved = true;
                     }
                 }
-                pick @ 2..=4 => {
-                    let kind = pick - 2;
-                    let live = self.waves.iter().filter(|w| w.kind == kind).count();
-                    if live < KINDS[kind].budget as usize {
-                        if let Some(w) = self.spawn(kind, rng) {
-                            self.waves.push(w);
+                Slot::Glint(g) => {
+                    // `seg3:0x081E`: a glint whose countdown was already at
+                    // zero is erased; otherwise it counts down one more.
+                    if due {
+                        let gone = g.left == 0;
+                        g.left = g.left.wrapping_sub(1);
+                        if gone {
+                            self.slots[k] = Slot::Empty;
                             moved = true;
                         }
                     }
                 }
-                _ => {}
             }
         }
-
-        if now < self.wave_next {
-            return moved;
+        if due {
+            self.wave_delay = WAVE_TICKS;
+            moved = true;
         }
-        self.wave_next = now + WAVE_TICKS;
-        let drift = self.drift;
-        for w in self.waves.iter_mut() {
-            w.x += drift;
-            let due = w.left == 0;
-            w.left = w.left.wrapping_sub(1);
-            if due {
-                w.left = w.hold;
-                w.cursor += 1;
-            }
-        }
-        let before = self.waves.len();
-        self.waves
-            .retain(|w| w.cursor < KINDS[w.kind].sequence.len());
-        let glints_before = self.glints.len();
-        for g in self.glints.iter_mut() {
-            g.left = g.left.saturating_sub(1);
-        }
-        self.glints.retain(|g| g.left > 0);
-        moved || self.waves.len() != before || self.glints.len() != glints_before
+        moved
     }
 
     /// Put a glint somewhere on the water, unless it lands on the palm.
     fn spawn_glint(&self, rng: &mut Rng) -> Option<Glint> {
+        // `seg3:0x0524`: ten to thirty-nine steps, rolled before the spot.
+        let left = rng.next_u16() % 30 + 10;
         let (bx, by, sx, sy) = GLINT_BAND;
         let x = bx + span_roll(rng, sx);
         let y = by + span_roll(rng, sy);
-        // Two pixels wide, so the test is the point against each rectangle.
+        // `seg3:0x1A88` with a one-by-one rectangle: it overlaps when
+        // `x + 1 >= rx`, `x < rx + rw`, `y + 1 >= ry` and `y < ry + rh`.
         if NOT_WATER.iter().any(|&(rx, ry, rw, rh)| {
-            let (rx, ry) = self.at(rx, ry);
-            x + 1 >= rx && x < rx + rw && y >= ry && y < ry + rh
+            let (rx, ry) = self.engine_at(rx, ry);
+            x + 1 >= rx && x < rx + rw && y + 1 >= ry && y < ry + rh
         }) {
             return None;
         }
-        Some(Glint {
-            x,
-            y,
-            // `seg3:0x0524`: ten to thirty-nine steps.
-            left: rng.next_u16() % 30 + 10,
-        })
+        Some(Glint { x, y, left })
     }
 
-    /// Place a new wave inside its band. `seg3:0x14BF` picks the spot, and
-    /// takes the sprite's own size off the span so it lands whole.
+    /// Place a new wave inside its band.
+    ///
+    /// The three wave spawners hand `seg3:0x14BF` a shape of -1, so unlike a
+    /// cloud the sprite's size is not taken off the span: the spot is a plain
+    /// `base + rand() % span` in each axis, and a wave may hang off the edge
+    /// of its band.
     fn spawn(&self, kind: usize, rng: &mut Rng) -> Option<Wave> {
         let k = &KINDS[kind];
-        let sprite = self.pieces.get(k.sequence[0])?;
-        let sx = k.span.0 - sprite.width as i32;
-        let sy = k.span.1 - sprite.height as i32;
-        if sx < 0 || sy < 0 {
-            return None;
-        }
         // `seg4:0x1F1B(30, 50, 0)`: 30% one step of hold, 50% two, 20% none.
-        let hold = match weighted(rng, &[30, 50]) {
-            0 => 0,
-            n => n as u16,
-        };
+        let hold = weighted(rng, &[30, 50]) as u16;
         Some(Wave {
             kind,
-            x: k.base.0 + span_roll(rng, sx),
-            y: k.base.1 + span_roll(rng, sy),
+            x: k.base.0 + span_roll(rng, k.span.0),
+            y: k.base.1 + span_roll(rng, k.span.1),
             cursor: 0,
             hold,
             left: hold,
@@ -895,8 +1110,18 @@ impl Scenery {
     pub fn compose(&self) -> Frame {
         let mut surface = self.surface(self.base.width, self.base.height);
         surface.draw_background(&self.base);
+        let sandbar = self.sandbar();
+        if self.backdrop.cutaway {
+            // `seg3:0x041C`: nothing is drawn on a cutaway's black screen.
+            return Frame {
+                width: self.base.width,
+                height: self.base.height,
+                pixels: surface.pixels,
+                colour: surface.tinted.then_some(surface.colour),
+            };
+        }
         // The order is `seg3:0x040e`'s, which runs the whole backdrop pass
-        // every tick over a backdrop built once by `seg3:0x0136`: the wave and
+        // every pass over a backdrop built once by `seg3:0x0136`: the wave and
         // glint drawer at `0x4a2`, the cloud walk at `0xb67`, then the surf at
         // `0xe74`. Nothing in it redraws the island, which is why a cloud
         // drifting past the palm passes in *front* of the fronds -- the cloud
@@ -905,13 +1130,25 @@ impl Scenery {
         // The waves come first, and that matters: wave band 2 spans y 289-382
         // and the surf sits at y 303-319, so the two overlap, and the engine
         // paints the surf over the wave rather than under it.
-        for w in self.waves.iter() {
+        for w in self.waves() {
             let frame = KINDS[w.kind].sequence[w.cursor.min(6)];
             if let Some(f) = self.pieces.get(frame) {
-                surface.draw_sprite(f, w.x, w.y, Mirror::default());
+                // `seg3:0x0893`: a wave that sits entirely inside one of
+                // this layout's surf patches is not drawn at all.
+                let (fw, fh) = (f.width as i32, f.height as i32);
+                let hidden = SURF_HIDE.iter().any(|&(sx, sy, rw, rh, on_sandbar)| {
+                    if on_sandbar != sandbar {
+                        return false;
+                    }
+                    let (rx, ry) = self.engine_at(sx, sy);
+                    w.x >= rx && w.x + fw < rx + rw && w.y >= ry && w.y + fh < ry + rh
+                });
+                if !hidden {
+                    surface.draw_sprite(f, w.x, w.y, Mirror::default());
+                }
             }
         }
-        for g in self.glints.iter() {
+        for g in self.glints() {
             surface.draw_line(g.x, g.y, g.x + 1, g.y, GLINT_COLOUR);
         }
         for c in self.clouds.iter() {
@@ -919,7 +1156,6 @@ impl Scenery {
                 surface.draw_sprite(f, c.x, c.y, Mirror::default());
             }
         }
-        let sandbar = self.sandbar();
         for &(x, y, first, counter, belongs_to_sandbar) in SURF.iter() {
             if belongs_to_sandbar != sandbar {
                 continue;

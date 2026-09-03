@@ -31,43 +31,62 @@ pub const NO_ADS_FILE: u8 = 0xFF;
 /// The story runs for eleven days and then wraps (`seg4:0x0BC8`).
 pub const STORY_DAYS: u8 = 11;
 
-/// One tick, in milliseconds. This is the unit every delay in the data is
-/// counted in, and getting it wrong is the difference between a screensaver
-/// and a slideshow on fast-forward.
+/// One tick of the software clock, in milliseconds. This is the unit every
+/// delay in the data is counted in.
 ///
 /// `seg2:0x1516` calls the timer setup with 13, and `seg9:0x0781` turns that
-/// into `1000 / (13 * 18)` = 4ms per unit of its software clock. The one
-/// timer the screensaver registers (`seg2:0x1522`) asks for an interval of 4
-/// of those units, so its callback at `seg2:0x16CE` runs every 16ms. That
-/// callback is the whole clock: it bumps the 32-bit tick counter at
-/// `ds:0x2E72` and counts down the five delay slots.
+/// into `1000 / (13 * 18)` = 4ms per unit. The one timer the screensaver
+/// registers (`seg2:0x1522`) asks for an interval of 4 units, so its callback
+/// at `seg2:0x16CE` fires every 16ms of real time: it bumps the 32-bit tick
+/// counter at `ds:0x2E72` and counts down the five delay slots.
 pub const MS_PER_TICK: u32 = 16;
 
-/// Milliseconds per tick, once the speed setting is applied.
+/// One dispatcher pass, in milliseconds.
 ///
-/// The port runs the data at the rate it was authored for, and that is
-/// measurably right: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay
-/// across its twenty frames and the port takes 134. But a 386 could not hold
-/// 62.5 passes a second -- the engine has a speed index at `ds:0x30BE` for
-/// exactly that reason, and skipped passes push each frame's deadline later --
-/// so the screensaver most people remember ran slower than its own data.
+/// The clock above is not what drives the engine. `seg2:0x1046` creates the
+/// window with `SetTimer(hwnd, 1, 50, NULL)`, and the `WM_TIMER` handler at
+/// `seg2:0x1266` polls the software clock, runs the dispatcher at
+/// `seg4:0x06BF` once, and then spins polling the clock until the next
+/// message arrives. So the ADS tick, the walk, the water and the queue all
+/// move once per Windows timer message, and Windows 3.x delivers those on its
+/// 55ms system clock. Three or four ticks of the software clock fire between
+/// one pass and the next.
 ///
-/// `Speed` in the settings file is a percentage of the authored rate, and the
-/// default is 100: the data runs exactly as written.
+/// That is why a frame that asks for a delay of one, two or three ticks is
+/// on screen for a whole pass, and why the original was slower than its own
+/// data: it could never run more than eighteen passes a second.
+pub const PASS_MS: u32 = 55;
+
+/// How many ticks have fired by the end of pass `n`, counting from 1, on a
+/// machine whose passes are exactly `PASS_MS` apart.
+pub fn ticks_by_pass(n: u64) -> u64 {
+    n * PASS_MS as u64 / MS_PER_TICK as u64
+}
+
+/// The ticks that fire between pass `n - 1` and pass `n`: three or four, in
+/// the pattern the two clocks make together.
+pub fn fires_for_pass(n: u64) -> u32 {
+    (ticks_by_pass(n) - ticks_by_pass(n.saturating_sub(1))) as u32
+}
+
+/// The default `Speed` setting: a percentage of the original's pace.
 ///
-/// It was 60 for a while, on the reasoning that a 386 could not hold 62.5
-/// passes a second -- the engine has a speed index at `ds:0x30BE` for exactly
-/// that reason, and skipped passes push each frame's deadline later -- so the
-/// screensaver most people remember ran slower than its own data. That was a
-/// guess at a machine, made when much less of the timing was pinned down, and
-/// the timing is now pinned down: `tools/oracle.py tick` compares this port's
-/// frame-by-frame scheduling against `seg10:0x1ACB` itself and they agree to
-/// the tick. Slowing the whole thing to 60% of that is not fidelity to
-/// anything, it is a preference -- so it is a setting rather than a default.
+/// 100 runs both clocks at their real rates -- a pass every `PASS_MS`, a
+/// tick every `MS_PER_TICK` -- and `tools/oracle.py tick` and `run` hold the
+/// port to them pass for pass. Many people remember the screensaver running
+/// slower still, because a 386 could not hold eighteen passes a second and
+/// the frame gate re-arms each deadline from the moment it missed rather
+/// than catching up. That is a property of the hardware, not the data, so
+/// slowing down is a setting rather than the default.
 pub const DEFAULT_SPEED: u32 = 100;
 
 pub fn ms_per_tick_at(speed: u32) -> u32 {
     (MS_PER_TICK * 100 / speed.clamp(10, 400)).max(1)
+}
+
+/// Seconds of screen time `ticks` of the software clock come to at `speed`.
+pub fn seconds_at(ticks: u32, speed: u32) -> f32 {
+    ticks as f32 * ms_per_tick_at(speed) as f32 / 1000.0
 }
 
 /// What the tools use, which is the settings file plus whatever the
@@ -82,20 +101,20 @@ pub fn ms_per_tick() -> u32 {
 /// scripts are 60, 120, 180, 240, 360 -- so a tick is near enough a 60th.
 pub const TICKS_PER_SECOND: u32 = 1000 / MS_PER_TICK;
 
-/// Ticks between walk waypoints. `seg4:0x039D` writes 4 into the delay slot at
-/// `ds:0x30D6` after drawing each step of a walk, and `seg4:0x00A3` will not
-/// draw the next one until it reaches zero. 64ms a frame.
-pub const WALK_TICKS_PER_WAYPOINT: u32 = 4;
+/// The walk's delay slot, `ds:0x30D6`. `seg4:0x039D` writes 4 into it every
+/// pass that draws Johnny, and `seg4:0x00A3` only moves him on a pass that
+/// finds it at zero -- which, with the slot re-armed every pass, is a pass
+/// that four ticks fired in front of. On the 55ms clock that is every second
+/// or third pass.
+pub const WALK_DELAY: u32 = 4;
 
 /// A backstop, not a schedule. Scenes end on their own: the sequence reaches
 /// its `End` and the last scene that can finish does. This catches a script
 /// the port has misread, so a bad scene costs three minutes rather than the
 /// rest of the session.
 ///
-/// The scene table's `cost` field is deliberately not used for this. The
-/// chooser compares `cost / 2` against a ceiling when picking (`seg4:0x0D76`),
-/// which makes it a price rather than a duration; what it is a price *in* is
-/// still an open question.
+/// The scene table's `cost` field is not a duration: the queue builder spends
+/// it out of a budget of 300 (`seg4:0x08B9`), and nothing times a scene by it.
 pub const MAX_SCENE_TICKS: u32 = 180 * TICKS_PER_SECOND;
 
 /// Category masks the chooser is called with, from the four call sites in
@@ -213,10 +232,11 @@ enum Activity {
     Idle,
     /// The title card, up while the island is got ready.
     Intro { until: u32 },
-    /// Standing about, for one of the table's script-less entries.
-    Idling { until: u32 },
+    /// Standing about, for one of the table's script-less entries, until
+    /// the idle slot runs down.
+    Idling(&'static Scene),
     /// Getting Johnny where the next scene wants him.
-    Moving(Box<Journey>),
+    Moving(&'static Scene),
     /// Running a scene's ADS sequence.
     Scene {
         /// The table row this came from, so the story can tell when its own
@@ -224,12 +244,14 @@ enum Activity {
         row: &'static Scene,
         seq: Box<Sequencer>,
         active: Vec<Active>,
-        ends_at: (u8, u8),
         ticks: u32,
         /// The sequence has reached its `End`. What is still on screen plays
         /// out; nothing new will start.
         done: bool,
     },
+    /// A scene stood in for by a fixed number of passes, for the `run`
+    /// oracle, which walls the ADS runner off on the engine's side too.
+    Stub { row: &'static Scene, left: u32 },
 }
 
 /// One TTM scene the sequencer has started, and the state the engine keeps
@@ -238,14 +260,15 @@ pub struct Active {
     pub ttm: u16,
     pub scene: u16,
     pub inst: Instance,
-    /// Tick at which this instance's next frame is due.
-    ///
-    /// `seg10:0x196E` keeps the same thing as an absolute deadline at
-    /// `+0x37`, set to `now + delay` each time it steps the instance on --
-    /// and it steps on `now >= deadline`, *after* the frame has been drawn.
-    /// So a frame asking for a delay of `d` is drawn `d + 1` times and this
-    /// is one past the last of them.
-    pub wake: u32,
+    /// The tick the frame on screen is held until: the engine's `+0x37`.
+    /// `seg10:0x196E` sets it to `now + delay` when it steps the instance
+    /// on, and `seg10:0x1CE6` re-bases it to `now + delay` when a frame
+    /// changes the delay.
+    pub deadline: u32,
+    /// The frame on screen has run once and is being held: the engine's
+    /// `+0x0E`, raised by `seg10:0x1CD6` and cleared when the instance is
+    /// stepped on. A held frame is painted again rather than run again.
+    pub held: bool,
     /// The run state, which is what the `If` predicates read.
     pub state: SceneState,
     /// Passes still owed, for a positive `flags` (the engine's +0x31).
@@ -256,46 +279,32 @@ pub struct Active {
     /// self-loop flag at +0xC, set at `seg10:0x1D9E` by comparing the goto
     /// target with the scene's own start.
     pub looping: bool,
-    /// The frame on screen carried an `EndScene`, and its delay has not run
-    /// out yet.
-    ///
-    /// `seg10:0x1D65` does not take a scene's word for it: the end flag only
-    /// becomes state 4 once `seg10:0x196E` says the frame's delay is up. So
-    /// the last frame of a scene is held for as long as it asked for, like
-    /// every other frame. Ending on the tick it *starts* throws that hold
-    /// away -- and a scene whose last frame asks for two to four seconds,
-    /// which is what every standing pose does, is over before it is seen and
-    /// starts again immediately.
-    pub ending: bool,
 }
 
-/// Getting Johnny where a scene wants him standing, and facing the way it
-/// wants him to face. `seg4:0x0094` is all of this in one function.
+/// The walk driver's state, `ds:0x30CA`-`ds:0x30E2`. `seg4:0x0094` reads
+/// and writes all of it every pass; nothing else touches it but
+/// `seg4:0x0B64`, which aims it at an entry, and `seg4:0x0074`, which
+/// clears it for an idle.
 ///
-/// The second half of a position is a **facing**, not a spot: `seg4:0x0B64`
-/// takes the scene's `(area, minor)` and writes the area into `ds:0x30E2` and
-/// the minor into `ds:0x30DE`, then says whether Johnny is already both. He
-/// pivots on the spot an eighth of a turn at a time until he is -- before the
-/// walk, to line up with the path, and again at the end, to line up with the
-/// scene.
-pub struct Journey {
-    /// The scene this is for. It begins when he arrives.
-    scene: &'static Scene,
+/// The second half of a position is a **facing**, not a spot. He pivots on
+/// the spot an eighth of a turn at a time until he faces `turn_goal` -- the
+/// path's own starting facing before a walk, the scene's once he is there.
+#[derive(Default)]
+pub struct Walk {
     /// `ds:0x30E2`: the area he is heading for.
     target: u8,
-    /// `ds:0x30DE`: the facing the scene asked for, until it is satisfied.
+    /// `ds:0x30DE`: the facing the entry asked for, until it is satisfied.
     want_face: Option<u8>,
-    /// `ds:0x30CA`: the facing he is turning toward right now -- the walk
-    /// path's own starting facing while walking, the scene's once he is
-    /// there.
+    /// `ds:0x30CA`: the facing he is turning toward right now.
     turn_goal: u8,
-    /// The area he set out from. The route block is looked up once, on the
-    /// pair (`ds:0x30D2`), and re-read for wherever he has got to since.
-    origin: u8,
+    /// `ds:0x30D2`: the area the route block was looked up for, while a
+    /// journey is on. The block is chosen once, on the pair he set out on,
+    /// and re-read for wherever he has got to since.
+    route: Option<u8>,
     /// `ds:0x30D0`: the path he is on, and how far along it he is.
     path: Option<(&'static WalkStep, usize)>,
-    /// `ds:0x30D6`: the tick the next waypoint or turn is due.
-    next: u32,
+    /// `ds:0x30DA`, `ds:0x30DC`: where the path lands him.
+    dest: (u8, u8),
 }
 
 /// One eighth of a turn from `at` toward `to`, the short way round
@@ -332,7 +341,8 @@ impl Active {
             ttm,
             scene,
             inst,
-            wake: now,
+            deadline: 0,
+            held: false,
             state: repeat.state(),
             count: repeat.count(),
             until: match repeat {
@@ -340,7 +350,6 @@ impl Active {
                 _ => 0,
             },
             looping: false,
-            ending: false,
         }
     }
 
@@ -357,14 +366,10 @@ impl Active {
     /// first frame over and over, never reaches its end, and never lets the
     /// scene that is waiting on it start.
     pub fn rearm(&mut self, repeat: Repeat, now: u32) {
-        // Not `ending`. `seg10:0x0DB6` writes the run state and the repeat
-        // count and nothing else, and the end flag is not a field it could
-        // clear: `ds:0x4644` is per frame, raised again by the `0110` in the
-        // frame that is being held. So a scene re-armed while its last frame
-        // is still on screen still ends when that frame's delay runs out --
-        // and then the repeat mode decides whether it starts again. Clearing
-        // it here instead steps the instance out of the held frame and into
-        // whatever is filed after the scene.
+        // `seg10:0x0DB6` writes the run state and the repeat count and
+        // nothing else. The end flag is per frame, raised again by the
+        // `0110` in the frame being held, so a scene re-armed while its last
+        // frame is on screen still ends when that frame's delay runs out.
         self.state = repeat.state();
         self.count = repeat.count();
         self.until = match repeat {
@@ -383,49 +388,26 @@ impl Active {
         matches!(self.state, SceneState::Queued(_) | SceneState::Finished)
     }
 
-    /// The scene's program reached its end. `seg10:0x1D2B` decides what that
-    /// means from the run state:
-    ///
-    /// * queued for a count, it starts over until the count runs out
-    /// * queued until a deadline, it starts over until the deadline passes
-    /// * otherwise it becomes **over** -- state 4, which is not a state it
-    ///   plays in. `seg10:0x1DDC` turns it idle on the very next pass, so it
-    ///   lasts exactly one, and that one pass is the whole window in which a
-    ///   `1350` predicate can see it.
-    ///
-    /// That handshake is what every script is built on: play a scene, and the
-    /// block guarded on it fires on the pass it ends.
-    pub fn program_ended(&mut self) -> bool {
-        match self.state {
-            SceneState::Queued(2) if self.count > 0 => {
-                self.count -= 1;
-                self.restart()
-            }
-            // The deadline is what ends this one; until it passes, keep going.
-            SceneState::Queued(3) => self.restart(),
-            _ => {
-                // `seg10:0x1D21` puts the scene's own start into the pending
-                // jump before it decides anything else, so an instance that
-                // has reached its end is wound back whether or not it is
-                // going to play again. Leaving it at the end means the next
-                // `PlayScene` re-arms something with nothing left to run --
-                // and since `seg10:0x0DB6` re-arms in place rather than
-                // starting over, that scene then ends on the tick it starts,
-                // for ever.
-                self.inst.seek_scene(self.scene);
-                self.state = SceneState::Over;
-                true
-            }
-        }
-    }
-
-    fn restart(&mut self) -> bool {
-        if self.inst.seek_scene(self.scene) {
+    /// `seg10:0x196E`: is the frame on screen done with, and if so step the
+    /// instance on. A delay of zero is always up, with no look at the clock;
+    /// otherwise the deadline has to have passed, and the next deadline is
+    /// set from now. Stepping on clears the held flag, so the next pass runs
+    /// the next frame -- which is where the instance's cursor already is,
+    /// because `Instance::run_frame` takes a pending goto at the frame
+    /// boundary rather than here.
+    fn step(&mut self, now: u32) -> bool {
+        let up = if self.inst.delay == 0 {
+            true
+        } else if now >= self.deadline {
+            self.deadline = now + self.inst.delay as u32;
             true
         } else {
-            self.state = SceneState::Idle;
             false
+        };
+        if up {
+            self.held = false;
         }
+        up
     }
 
     /// `seg10:0x1DBA`: the runner could not run this scene at all. It is
@@ -439,7 +421,7 @@ impl Active {
 
     /// `seg10:0x1DEB`: a scene queued until a deadline is over once that
     /// deadline passes, and then ends on its next time round.
-    pub fn check_deadline(&mut self, now: u32) {
+    fn check_deadline(&mut self, now: u32) {
         if self.state == SceneState::Queued(3) && now >= self.until {
             self.state = SceneState::Over;
         }
@@ -458,11 +440,12 @@ pub fn depth(order: &[(u16, u16)], ttm: u16, scene: u16) -> usize {
         .unwrap_or(order.len())
 }
 
-/// Advance every live scene by one tick and settle the run states.
+/// Advance every live scene by one pass and settle the run states.
 ///
-/// This is `seg10:0x1C3C`'s loop: walk the instance list, run a frame for each
-/// one that is due, act on the end-of-scene flag, then hand the states back so
-/// the sequencer's `If` predicates see them. Returns the scenes that ended.
+/// This is the instance walk at `seg10:0x1C3C`, block for block: run or
+/// re-paint each instance's frame, act on the end-of-scene flag, ask the
+/// frame gate whether to step on, and hand the states back so the
+/// sequencer's `If` predicates see them. Returns the scenes that ended.
 pub fn advance_scenes(
     active: &mut Vec<Active>,
     seq: &mut Sequencer,
@@ -482,12 +465,10 @@ pub fn advance_scenes(
             finished.push((a.ttm, a.scene));
             continue;
         }
-        // Not its turn to move -- or its last frame is on screen and being
-        // held for the delay it asked for, which is the same thing as far as
-        // the picture is concerned. Stepping it again would run the instance
-        // straight out of its own scene and into whatever follows it in the
-        // file.
-        if a.wake > now || a.ending {
+        if a.held {
+            // `seg10:0x1CD6` raised the held flag after the frame first ran,
+            // and the engine runs the frame again with its side effects
+            // gated off. This port puts back what it drew instead.
             let (t, sc, f) = (a.ttm, a.scene, a.inst.held_frame());
             stage.say(|| format!("run {t} {sc} {f} 1"));
             a.inst.repaint(stage);
@@ -498,39 +479,64 @@ pub fn advance_scenes(
                 // `seg10:0x1DBA`: nothing ran. That is not a scene that has
                 // played out, it is a scene that cannot play, so it goes
                 // straight to state 4 with none of the count or deadline
-                // restarts `seg10:0x1D21` allows -- restarting a program
-                // with nothing left in it would only do this again.
-                ttm::Step::Finished => a.cannot_run(),
-                ttm::Step::Frame(delay) => {
-                    // Not floored, and one past the last tick the frame is
-                    // drawn on: `seg10:0x196E` is asked *after* the frame has
-                    // been drawn and steps on `now >= deadline`, so the tick
-                    // the deadline falls on still shows this frame. A delay
-                    // of zero is a special case there -- it is always up --
-                    // and lands on the same answer.
-                    a.wake = now + delay as u32 + a.inst.rebased() as u32;
-                    // The frame carried an `EndScene`, which is how a scene
-                    // says it has reached its end -- it does not stop
-                    // mid-frame, it sets a flag the runner reads afterwards
-                    // (`seg10:0x1D1A`). Every scene in the data ends this way;
-                    // almost none simply run out of instructions.
-                    if a.inst.last_goto == Some(a.scene) {
-                        a.looping = true;
+                // restarts `seg10:0x1D21` allows.
+                ttm::Step::Finished => {
+                    a.cannot_run();
+                    a.check_deadline(now);
+                    seq.set_state(a.ttm, a.scene, a.state);
+                    continue;
+                }
+                ttm::Step::Frame { asked, had } => {
+                    a.held = true;
+                    // `seg10:0x1CE6`: a frame that asked for a delay other
+                    // than the one the instance had gets a fresh deadline
+                    // from now. One that asked for the same, or for nothing,
+                    // keeps the deadline set when it was stepped to.
+                    if let Some(d) = asked {
+                        if d != had {
+                            a.deadline = now + d as u32;
+                        }
                     }
-                    // `seg10:0x1D65`: the end flag waits for the frame's own
-                    // delay before it counts.
-                    a.ending = a.inst.ended;
                 }
             }
         }
-        // The held last frame's delay has run out, so now the scene is over.
-        // The end and the step share one test in the engine -- `seg10:0x1D65`
-        // and `seg10:0x1DAD` both call `seg10:0x196E` -- so they share one
-        // here.
-        if a.ending && now + 1 >= a.wake {
-            a.ending = false;
-            if !a.program_ended() {
-                finished.push((a.ttm, a.scene));
+        if a.inst.ended {
+            // `seg10:0x1D1A`: the frame carried an `EndScene`. The pending
+            // jump becomes the scene's own start, and the repeat mode says
+            // whether stepping past this frame restarts the scene or ends
+            // it. Every branch asks the frame gate first, so the last frame
+            // is held for as long as it asked for like any other.
+            match a.state {
+                SceneState::Queued(2) if a.count > 0 => {
+                    if a.step(now) {
+                        a.count -= 1;
+                        a.inst.seek_scene(a.scene);
+                    }
+                }
+                SceneState::Queued(3) if a.until != 0 => {
+                    if a.step(now) {
+                        a.inst.seek_scene(a.scene);
+                    }
+                }
+                _ => {
+                    if a.step(now) {
+                        // `seg10:0x1D76`: over, wound back to the scene's
+                        // start, and the delay zeroed.
+                        a.inst.seek_scene(a.scene);
+                        a.state = SceneState::Over;
+                        a.inst.delay = 0;
+                    }
+                }
+            }
+        } else {
+            // `seg10:0x1D84`: a goto back to the scene's own start marks it
+            // as a self-loop, which is what keeps a backdrop scene from
+            // holding the sequence open.
+            if a.inst.last_goto == Some(a.scene) {
+                a.looping = true;
+            }
+            if a.state != SceneState::Finished {
+                a.step(now);
             }
         }
         a.check_deadline(now);
@@ -549,7 +555,7 @@ pub fn advance_scenes(
 
 /// Hold the repaint model to its promise, and report anything that broke it.
 ///
-/// The port paints the whole picture afresh every tick, so a held frame has
+/// The port paints the whole picture afresh every pass, so a held frame has
 /// to go back on top of the new backdrop each time. That is only the same
 /// picture the engine would have left standing if putting a frame back (a)
 /// draws exactly what stepping it drew and (b) changes nothing else at all --
@@ -662,18 +668,9 @@ pub fn civil_from_days(days: u32) -> (u16, u8, u8) {
     (year as u16, month, day)
 }
 
-/// Days since the epoch back to a calendar month and day, which is what the
-/// holiday check wants.
+/// Just the month and day, which is what the holiday check wants.
 pub fn month_and_day(days: u32) -> (u8, u8) {
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
-    let _ = era;
+    let (_, month, day) = civil_from_days(days);
     (month, day)
 }
 
@@ -717,9 +714,8 @@ pub struct Director {
     /// JOHNWALK.BMP, decoded once. `FILES.VIN` preloads it, and decoding it
     /// per walk frame is 36 LZW passes a tick.
     walk_frames: Option<Rc<Vec<Frame>>>,
-    /// The walk frame Johnny is standing in, so he can be put back after the
-    /// surf repaints the backdrop underneath him. The engine leaves him where
-    /// he was drawn; this port repaints, so it has to draw him again.
+    /// The pose the walk driver draws, `ds:0x30C8`: a frame of
+    /// `JOHNWALK.BMP`, where, and whether mirrored. Only the driver writes it.
     standing: Option<(u16, u16, u16, Mirror)>,
     /// The sea, the island and the surf. `None` until the first tick loads it.
     scenery: Option<Scenery>,
@@ -732,7 +728,18 @@ pub struct Director {
     /// may keep repainting it; once a scene loads its own backdrop the number
     /// moves on and the surf leaves it alone.
     scenery_gen: u64,
+    /// `ds:0x2E72`: ticks of the software clock so far.
     tick: u32,
+    /// Dispatcher passes so far, which is what the clock pattern hangs off.
+    passes: u64,
+    /// `ds:0x30D6`: the walk's delay slot.
+    walk_delay: u32,
+    /// `ds:0x334E`: the idle's delay slot.
+    idle_delay: u32,
+    walk: Walk,
+    /// Stand a fixed number of passes in for every scene, for the `run`
+    /// oracle. `None` runs the scenes.
+    pub stub: Option<u32>,
     /// ADS opcodes the sequencer met and does not implement, kept across
     /// scenes so a long run can say whether any are ever reached.
     pub ads_todo: std::collections::BTreeMap<u16, usize>,
@@ -777,7 +784,7 @@ pub struct Director {
     /// The wall clock as HHMM, when the host knows it better than this
     /// process does -- `johnny.scr` reads the local time, the tools do not.
     pub hhmm: Option<u16>,
-    /// `JC_CHECK=1`: hold every tick's repaint to its invariant. A diagnostic
+    /// `JC_CHECK=1`: hold every pass's repaint to its invariant. A diagnostic
     /// for the tools; see `check_repaint`.
     checking: bool,
     /// What that check has complained about, so a run can end with a verdict.
@@ -808,6 +815,15 @@ impl Director {
             scenery_night: false,
             scenery_gen: 0,
             tick: 0,
+            passes: 0,
+            walk_delay: 0,
+            idle_delay: 0,
+            // `seg4:0x002F`: heading for area 1 as well as standing in it.
+            walk: Walk {
+                target: 1,
+                ..Walk::default()
+            },
+            stub: None,
             ads_todo: Default::default(),
             log: Vec::new(),
             queue: Vec::new(),
@@ -871,23 +887,16 @@ impl Director {
 
     /// Does this scene's declared position match where Johnny is?
     ///
-    /// `seg4:0x0B64` treats a major of 0 as "don't care", which is what the
-    /// `(0, 0)` entries in the table mean.
-    /// `seg4:0x0B64`: a required major of 0 means anywhere, and a required
-    /// minor of -1 means any spot within that area. The two are tested
-    /// independently -- no scene in the table uses the minor wildcard, but the
-    /// engine allows it.
+    /// `seg4:0x0B64`: a required area of 0 means anywhere, and a required
+    /// facing of -1 means any facing. No scene in the table uses the facing
+    /// wildcard, but the engine allows it.
     fn position_ok(&self, scene: &Scene) -> bool {
         let (major, minor) = scene.from;
-        // A required area of 0 is anywhere, and there is nowhere to walk to,
-        // so the spot inside it does not apply either. Read strictly,
-        // `seg4:0x0B8F` would still want the minor to match -- only -1 is its
-        // wildcard -- but all eight rows with no area also ask for spot 0, and
-        // "anywhere, but standing at spot 0" is not a place.
-        if major == 0 {
-            return true;
-        }
-        major == self.position.0 && (minor == 0xFF || minor == self.position.1)
+        // Read strictly, as `seg4:0x0B8F` does: an area of 0 skips the area
+        // test but the facing is still wanted unless it is -1. Eight rows ask
+        // for area 0 and facing 0, so Johnny turns to face 0 wherever he is
+        // before any of them starts.
+        (major == 0 || major == self.position.0) && (minor == 0xFF || minor == self.position.1)
     }
 
     /// The chooser at `seg4:0x0D76`: filter, sum the weights, draw against the
@@ -1190,11 +1199,10 @@ impl Director {
         self.advance_story();
         self.build_queue();
         // `seg4:0x064D`: Johnny is simply put where the first scene needs
-        // him. He walks between the scenes of a queue, never into one.
+        // him, area 0 and all. He walks between the scenes of a queue, never
+        // into one.
         if let Some(first) = self.queue.first() {
-            if first.from.0 != 0 {
-                self.position = first.from;
-            }
+            self.position = first.from;
         }
         self.cursor = 0;
         self.load_scenery(archive);
@@ -1297,70 +1305,96 @@ impl Director {
         Some(p)
     }
 
-    /// Start a scene: walk there first if Johnny is somewhere else.
-    fn begin_scene(&mut self, archive: &Archive, scene: &'static Scene) {
-        let file = tables::ADS_FILES
-            .iter()
-            .find(|(id, _)| *id == scene.ads)
-            .map(|(_, n)| *n);
-        if file.is_none() && scene.ads != NO_ADS_FILE {
-            self.note(format!("scene id {} has no ADS file", scene.id));
-            return;
-        }
-        // `seg4:0x0716` asks where Johnny is *before* it asks what the entry
-        // is (`seg4:0x0740`), so an entry with no script is walked to like
-        // any other and only then pauses. The fourteen of them each name a
-        // spot -- (1,3), (2,7), (6,0) and so on -- and none says "anywhere",
-        // so this is the difference between Johnny strolling somewhere to
-        // stand and think for a few seconds and Johnny stopping dead
-        // wherever he was.
-        if !self.position_ok(scene) {
-            // `seg4:0x0B64` writes the scene's area into `ds:0x30E2` and its
-            // facing into `ds:0x30DE` and reports whether Johnny is already
-            // both. He is not, so he sets off -- and the scene waits, rather
-            // than being dropped for the next one in the queue.
-            let target = if scene.from.0 == 0 {
-                self.position.0
-            } else {
-                scene.from.0
-            };
+    /// Take the queue entry under the cursor, `seg4:0x0716` onward: first
+    /// where Johnny has to be, so a script-less entry is walked to like any
+    /// other; then whether the entry is an idle or a scene.
+    fn enter(&mut self, archive: &Archive, row: &'static Scene) -> bool {
+        if !self.position_ok(row) {
             self.note(format!(
                 "walk {:?} -> {:?} for {} seq {}",
                 self.position,
-                scene.from,
-                file.unwrap_or("(no script)"),
-                scene.sequence
+                row.from,
+                self.ads_name(row).unwrap_or("(no script)"),
+                row.sequence
             ));
-            self.activity = Activity::Moving(Box::new(Journey {
-                scene,
-                target,
-                want_face: Some(scene.from.1),
-                turn_goal: self.position.1,
-                origin: self.position.0,
-                path: None,
-                next: self.tick,
-            }));
-            return;
+            let drew = self.approach(archive, row);
+            self.activity = Activity::Moving(row);
+            return drew;
         }
-        // ADS file 0xFF is the table's "no script". Fourteen entries carry
-        // it, one per position, all weight 1 and cost 5, all with `from` and
-        // `to` the same place: Johnny stands there and does nothing for a
-        // moment. That is the scene, not a gap in it.
-        let Some(file) = file else {
-            let ticks = IDLE_LEAST + self.stage.rng.below(IDLE_SPAN);
-            self.note(format!("idle at {:?} for {ticks} ticks", self.position));
-            self.activity = Activity::Idling {
-                until: self.tick + ticks,
-            };
-            return;
+        self.aim(row);
+        if row.ads == NO_ADS_FILE {
+            // `seg4:0x0752`: three to seven seconds of standing about. Then
+            // `seg4:0x0074` forgets the route and the path and points the
+            // turn at the way he is already facing, and the walk driver
+            // draws the pose.
+            self.idle_delay = IDLE_LEAST + self.stage.rng.below(IDLE_SPAN);
+            self.note(format!("idle at {:?} for {} ticks", self.position, self.idle_delay));
+            self.walk.route = None;
+            self.walk.path = None;
+            self.walk.turn_goal = self.position.1;
+            let drew = self.walk_driver(archive);
+            self.activity = Activity::Idling(row);
+            return drew;
+        }
+        self.start_scene(archive, row)
+    }
+
+    fn ads_name(&self, row: &Scene) -> Option<&'static str> {
+        tables::ADS_FILES
+            .iter()
+            .find(|(id, _)| *id == row.ads)
+            .map(|(_, n)| *n)
+    }
+
+    /// `seg4:0x0B64`: the entry's area and facing become where the walk is
+    /// heading. An area of 0 and a facing of -1 leave the old ones alone.
+    fn aim(&mut self, row: &Scene) {
+        if row.from.0 != 0 {
+            self.walk.target = row.from.0;
+        }
+        if row.from.1 != 0xFF {
+            self.walk.want_face = Some(row.from.1);
+        }
+    }
+
+    /// One pass of getting Johnny to an entry: aim, then the walk driver.
+    fn approach(&mut self, archive: &Archive, row: &Scene) -> bool {
+        self.aim(row);
+        self.walk_driver(archive)
+    }
+
+    /// Start a scene's ADS sequence: `seg4:0x07A4` onward.
+    fn start_scene(&mut self, archive: &Archive, row: &'static Scene) -> bool {
+        let Some(file) = self.ads_name(row) else {
+            self.note(format!("scene id {} has no ADS file", row.id));
+            self.cursor += 1;
+            return false;
         };
+        // `seg4:0x07DF`: a scene can ask to be drawn 272 pixels to the right
+        // of the island, and eight of them do. Everything else follows the
+        // island wherever the queue put it.
+        self.set_draw_offset(row.mask & 0x400 != 0);
+        // A scene draws its own Johnny; the pose is left pointing where it
+        // was, as `ds:0x30C8` is, and the walk driver draws it again if it
+        // runs before anything else sets it.
+        // The clip belongs to the instance (`seg10:0x1C90` restores it
+        // before every frame) and `seg10:0x1E2F` puts the screen's own back
+        // to full after each pass.
+        self.stage.surface.clip = None;
+        if let Some(left) = self.stub {
+            self.note(format!("play {file} seq {} (stub, {left} passes)", row.sequence));
+            self.activity = Activity::Stub { row, left };
+            return true;
+        }
         let Some(mut seq) = Sequencer::from_record(archive, file) else {
             self.note(format!("no ADS record {file}"));
-            return;
+            self.cursor += 1;
+            return false;
         };
-        if !seq.start(scene.sequence as u16) {
-            self.note(format!("{file} has no sequence {}", scene.sequence));
-            return;
+        if !seq.start(row.sequence as u16) {
+            self.note(format!("{file} has no sequence {}", row.sequence));
+            self.cursor += 1;
+            return false;
         }
         // Build the instance list, which is what draw order is. The engine
         // loads the files an ADS names as the ADS loads and makes one record
@@ -1378,50 +1412,37 @@ impl Director {
                 self.order.push((id, *scene));
             }
         }
-        // `seg4:0x07DF`: a scene can ask to be drawn 272 pixels to the right
-        // of the island, and eight of them do. Everything else follows the
-        // island wherever the queue put it.
-        self.set_draw_offset(scene.mask & 0x400 != 0);
         let label = seq
             .labels
-            .get(&(scene.sequence as u16))
+            .get(&(row.sequence as u16))
             .cloned()
             .unwrap_or_else(|| "(unnamed)".into());
         self.note(format!(
             "play {file} seq {} \"{label}\" at {:?} phase {}",
-            scene.sequence, self.position, self.phase
+            row.sequence, self.position, self.phase
         ));
-        // A scene draws its own Johnny.
-        self.standing = None;
-        // Start it unclipped, which by now it already is: the clip belongs
-        // to the instance (`seg10:0x1C90` restores it before every frame) and
-        // `seg10:0x1E2F` puts the screen's own back to full after each pass.
-        // This is here because the two together are what the engine does and
-        // one of them living in the runner is not a reason to leave the other
-        // out.
-        self.stage.surface.clip = None;
         self.activity = Activity::Scene {
-            row: scene,
+            row,
             seq: Box::new(seq),
             active: Vec::new(),
-            ends_at: scene.to,
             ticks: 0,
             done: false,
         };
+        true
     }
 
-    /// Move the surf on, and repaint the island if it moved.
+    /// The backdrop pass, `seg4:0x070E` calling `seg3:0x040E(0)`, and the
+    /// island repainted if anything on it moved.
     ///
     /// Only while the island is still the backdrop on show. A scene that puts
     /// up its own `.SCR` owns the background until it is over, and the surf
     /// waits it out rather than flickering underneath.
     fn step_surf(&mut self) -> bool {
-        let now = self.tick;
         let rng = &mut self.stage.rng;
         let Some(scenery) = self.scenery.as_mut() else {
             return false;
         };
-        if !scenery.tick(now, rng) || self.stage.background_gen != self.scenery_gen {
+        if !scenery.pass(rng) || self.stage.background_gen != self.scenery_gen {
             return false;
         }
         let frame = scenery.compose();
@@ -1453,18 +1474,15 @@ impl Director {
         }
     }
 
-    /// Lay down the island and the palette.
+    /// Lay down the island and the palette: `seg3:0x0136`, which is run once
+    /// per queue.
     ///
-    /// `seg3:0x01E7` picks the sea: `NIGHT.SCR` once the phase reaches 12,
-    /// otherwise one of `OCEAN00/01/02.SCR` at random, and `seg3:0x0262`
-    /// blits `BACKGRND.BMP` over it at the island position.
-    ///
-    /// Those four screens are 640x480 and use palette index 0 — the
-    /// transparency key — across thousands of pixels, so they are the VGA
-    /// mode's animated sea drawn over something else rather than a backdrop in
-    /// their own right. Working that out properly is still to do. Until then
-    /// this uses `ISLETEMP.SCR`, the 640x350 island backdrop that the scenes
-    /// themselves load, so the geometry matches what the sprites expect.
+    /// The random draws come in the engine's order, because the generator is
+    /// one stream and where each value lands in it matters: `seg3:0x01F5`
+    /// picks the ocean, in daylight and not for a cutaway; `seg3:0x0226`
+    /// flips for the sandbar, unless a scene in the queue said no rock;
+    /// `seg3:0x1B00` places the island; `seg3:0x0A38` sets the sky up; and
+    /// `seg3:0x040E(1)` runs the backdrop pass once.
     pub fn load_scenery(&mut self, archive: &Archive) {
         if let Some(body) = archive.get("JOHNCAST.PAL") {
             if let Ok(p) = dgds::read_palette(body) {
@@ -1472,29 +1490,29 @@ impl Director {
             }
         }
         // `seg3:0x01E7`: night by the clock, or because a scene in the queue
-        // asked for it.
+        // asked for it. A cutaway clears the screen instead (`seg3:0x01C4`)
+        // and makes no draw at all.
         self.scenery_night = self.is_night() || self.backdrop.night;
-        // Two separate draws, in the order segment 3 makes them, because the
-        // generator is a stream and where each value lands in it matters.
-        // `seg3:0x01F5` picks the ocean and only runs in daylight;
-        // `seg3:0x0226` flips for the sandbar, and only if no scene in the
-        // queue already said no rock.
-        let sea = if self.scenery_night {
+        let sea = if self.scenery_night || self.backdrop.cutaway {
             scenery::NIGHT_SEA
         } else {
             scenery::SEAS[self.stage.rng.below(3) as usize]
         };
         let extras = !self.backdrop.no_rock && self.stage.rng.next_u16() & 1 == 1;
-        match Scenery::build(archive, sea, extras, self.tick, self.day) {
+        // The surf's slots and counters are globals; `Scenery::setup` resets
+        // the ones the build resets.
+        let surf = self.scenery.as_ref().map(|s| s.surf_state()).unwrap_or_default();
+        match Scenery::build(archive, sea, extras, surf, self.day) {
             Some(s) => {
                 let mut s = s;
                 s.set_palette(*self.stage.palette());
                 s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
-                s.start_sky(&mut self.stage.rng);
                 // `seg3:0x0233`: the island is dropped where this queue's
                 // scenes are willing to have it, and everything drawn against
                 // it moves with it.
                 s.place(self.island_state, &mut self.stage.rng);
+                s.start_sky(&mut self.stage.rng);
+                s.setup(&mut self.stage.rng);
                 self.note(format!(
                     "scenery: {}{} at {:?}",
                     s.sea,
@@ -1518,179 +1536,228 @@ impl Director {
         self.stage.restore_background();
     }
 
-    /// Advance one tick. Returns true if the surface changed.
+    /// One dispatcher pass on the 55ms clock: the ticks that fired since the
+    /// last pass, then `pass`. Returns true if the surface changed.
     pub fn tick(&mut self, archive: &Archive) -> bool {
-        self.tick += 1;
-        // The backdrop is laid down when a queue is built and not before:
-        // where the island goes depends on what that queue's scenes want.
-        let surf = self.step_surf();
-        let acted = match std::mem::replace(&mut self.activity, Activity::Idle) {
-            Activity::Idle => {
-                // `seg4:0x06D4`: take the next entry, and when there is none
-                // left build another queue. The clock only moves here, so a
-                // queue plays out in the light it started in.
-                if self.cursor >= self.queue.len() {
-                    self.queue_spent = true;
-                    self.next_queue(archive);
-                }
-                match self.queue.get(self.cursor).copied() {
-                    Some(s) => {
-                        self.cursor += 1;
-                        self.begin_scene(archive, s);
-                    }
-                    None => {
-                        // Nothing playable at all. Wait rather than spin, and
-                        // let the next queue try again.
-                        self.note("nothing playable this phase".into());
-                        self.activity = Activity::Idling {
-                            until: self.tick + TICKS_PER_SECOND,
-                        };
-                    }
-                }
-                false
-            }
-            Activity::Intro { until } => {
-                if self.tick > until {
-                    return surf;
-                }
-                self.activity = Activity::Intro { until };
-                // Put it up once; the surf is not running yet, so it stays.
-                if self.tick > 1 {
+        self.passes += 1;
+        let fires = fires_for_pass(self.passes);
+        self.pass(archive, fires)
+    }
+
+    /// One dispatcher pass, `seg4:0x06BF`, after `fires` ticks of the
+    /// software clock. Returns true if the surface changed.
+    pub fn pass(&mut self, archive: &Archive, fires: u32) -> bool {
+        // `seg2:0x16CE`, once per tick: the counter, and every delay slot
+        // that is not already at zero.
+        self.tick += fires;
+        self.walk_delay = self.walk_delay.saturating_sub(fires);
+        self.idle_delay = self.idle_delay.saturating_sub(fires);
+        if let Some(s) = self.scenery.as_mut() {
+            s.timer(fires);
+        }
+        if let Activity::Intro { until } = self.activity {
+            if self.tick > until {
+                self.activity = Activity::Idle;
+            } else {
+                // Put it up once; nothing else is running yet, so it stays.
+                if self.passes > 1 {
                     return false;
                 }
-                match archive.screen("INTRO.SCR") {
-                    Some(f) => {
-                        if let Some(p) = archive
-                            .get("JOHNCAST.PAL")
-                            .and_then(|b| dgds::read_palette(b).ok())
-                        {
-                            self.stage.set_palette(p);
-                        }
-                        self.stage.set_background(f);
-                        self.stage.restore_background();
-                        self.note("title card".into());
-                        true
+                let Some(f) = archive.screen("INTRO.SCR") else {
+                    self.activity = Activity::Idle;
+                    return false;
+                };
+                if let Some(p) = archive
+                    .get("JOHNCAST.PAL")
+                    .and_then(|b| dgds::read_palette(b).ok())
+                {
+                    self.stage.set_palette(p);
+                }
+                self.stage.set_background(f);
+                self.stage.restore_background();
+                self.note("title card".into());
+                return true;
+            }
+        }
+        // `seg4:0x06D4`: when the queue has run out, build another one before
+        // anything else. The clock only moves here, so a queue plays out in
+        // the light it started in. The backdrop is laid down as part of it,
+        // because where the island goes depends on what the queue wants.
+        if matches!(self.activity, Activity::Idle) && self.cursor >= self.queue.len() {
+            self.queue_spent = true;
+            self.next_queue(archive);
+        }
+        // `seg4:0x070E`: the backdrop pass, every pass.
+        let surf = self.step_surf();
+        // The entry this pass is about, which `seg4:0x0884` looks at again
+        // at the end of the pass whatever happened to the cursor in between.
+        let entry = self.queue.get(self.cursor).copied();
+        let mut acted = false;
+        // A scene started this pass runs its first ADS tick in the same
+        // pass (`seg4:0x0806` follows `seg4:0x07CE`), so the loop goes round
+        // once more when an arm has just started one.
+        let mut started = false;
+        loop {
+            let again = match std::mem::replace(&mut self.activity, Activity::Idle) {
+                Activity::Idle => match self.queue.get(self.cursor).copied() {
+                    Some(row) => {
+                        acted |= self.enter(archive, row);
+                        matches!(self.activity, Activity::Scene { .. } | Activity::Stub { .. })
                     }
                     None => {
-                        self.activity = Activity::Idle;
+                        self.note("nothing playable this phase".into());
+                        false
+                    }
+                },
+                Activity::Intro { .. } => unreachable!(),
+                Activity::Moving(row) => {
+                    if self.position_ok(row) {
+                        acted |= self.enter(archive, row);
+                        matches!(self.activity, Activity::Scene { .. } | Activity::Stub { .. })
+                    } else {
+                        acted |= self.approach(archive, row);
+                        self.activity = Activity::Moving(row);
                         false
                     }
                 }
-            }
-            Activity::Idling { until } => {
-                if self.tick < until {
-                    self.activity = Activity::Idling { until };
-                }
-                false
-            }
-            Activity::Moving(j) => self.step_journey(archive, *j),
-            Activity::Scene {
-                row,
-                mut seq,
-                mut active,
-                ends_at,
-                ticks,
-                mut done,
-            } => {
-                let drew = self.run_scene(archive, &mut seq, &mut active, &mut done);
-                // Scenes loop, so the budget is what ends them: the original
-                // deducts each scene's cost from a running time allowance.
-                let over_time = ticks > MAX_SCENE_TICKS;
-                // The sequence has to have run out, and everything it left
-                // running has to have finished. `seg10:0x07D7` walks the
-                // instances and asks three questions of each: state 4 does
-                // not hold the scene open, nor state 0, nor one carrying the
-                // self-loop flag at +0xC -- a scene that only loops on itself
-                // is scenery and will never finish on its own. Anything else
-                // does.
-                //
-                // Where this is still wider than `seg10:0x0766`: that asks
-                // about *one* sequence -- the one the scheduler started --
-                // and its instances alone, while `running` here asks about
-                // every sequence in the file. So a sequence woken by `F200`
-                // and left running keeps the scene alive here and would not
-                // there. It waits longer rather than cutting something off,
-                // and nothing shipped leaves one running: every sequence in
-                // all ten scripts ends by stopping itself.
-                let settled = active
-                    .iter()
-                    .all(|a| a.looping || matches!(a.state, SceneState::Idle | SceneState::Over));
-                if over_time {
-                    self.note(format!(
-                        "scene ran past {MAX_SCENE_TICKS} ticks, cutting it short"
-                    ));
-                }
-                if (done && settled) || over_time {
-                    self.position = self.landing(ends_at);
-                    for (op, n) in seq.todo_seen.iter() {
-                        *self.ads_todo.entry(*op).or_insert(0) += n;
+                Activity::Idling(row) => {
+                    // `seg4:0x0774`: the walk driver keeps drawing him, and
+                    // when the slot has run down the entry is done.
+                    acted |= self.walk_driver(archive);
+                    if self.idle_delay != 0 {
+                        self.activity = Activity::Idling(row);
+                    } else {
+                        self.position = row.to;
+                        self.cursor += 1;
+                        self.note(format!("idle over, Johnny at {:?}", self.position));
                     }
-                    self.restore_island();
-                    if let Some(c) = self.stage.surface.clip {
-                        self.note(format!("scene left a clip set: {c:?}"));
-                    }
-                    self.note(format!("scene over, Johnny at {:?}", self.position));
-                    // The scene was drawing its own Johnny; from here he is
-                    // the engine's again, in the pose for wherever the scene
-                    // left him standing.
-                    self.stand(archive, true);
-                    if same(self.story_scene, row) {
-                        // `seg4:0x0884`: the story got told. It asks for
-                        // sound 25 first (`seg5:0x00BA` with 0x19), which is
-                        // one past the last wave in `SCRANTIC.EXE` and so
-                        // plays nothing -- the engine wanted a noise here and
-                        // the file it shipped with has not got one. Asked for
-                        // anyway, so a sound census says what the scripts and
-                        // the engine actually ask for rather than what could
-                        // be heard.
-                        self.stage.sounds.push(25);
-                        self.story_scene = None;
-                        self.story_state = 2;
-                    }
-                } else {
-                    self.activity = Activity::Scene {
-                        row,
-                        seq,
-                        active,
-                        ends_at,
-                        ticks: ticks + 1,
-                        done,
-                    };
+                    false
                 }
-                drew
+                Activity::Stub { row, left } => {
+                    // `seg10:0x0766` answers "running" `left` more times.
+                    if left == 0 {
+                        self.end_scene(archive, row);
+                    } else {
+                        self.activity = Activity::Stub { row, left: left - 1 };
+                    }
+                    acted |= true;
+                    false
+                }
+                Activity::Scene {
+                    row,
+                    mut seq,
+                    mut active,
+                    ticks,
+                    mut done,
+                } => {
+                    acted |= self.run_scene(archive, &mut seq, &mut active, &mut done);
+                    // A backstop, not the engine's rule: a scene the port has
+                    // misread ends after `MAX_SCENE_TICKS` rather than never.
+                    let over_time = ticks > MAX_SCENE_TICKS;
+                    // `seg10:0x07D7` walks the instances: state 4 does not
+                    // hold the scene open, nor state 0, nor one carrying the
+                    // self-loop flag. Anything else does.
+                    let settled = active.iter().all(|a| {
+                        a.looping || matches!(a.state, SceneState::Idle | SceneState::Over)
+                    });
+                    if over_time {
+                        self.note(format!(
+                            "scene ran past {MAX_SCENE_TICKS} ticks, cutting it short"
+                        ));
+                    }
+                    if (done && settled) || over_time {
+                        for (op, n) in seq.todo_seen.iter() {
+                            *self.ads_todo.entry(*op).or_insert(0) += n;
+                        }
+                        if let Some(c) = self.stage.surface.clip {
+                            self.note(format!("scene left a clip set: {c:?}"));
+                        }
+                        self.end_scene(archive, row);
+                    } else {
+                        self.activity = Activity::Scene {
+                            row,
+                            seq,
+                            active,
+                            ticks: ticks + fires,
+                            done,
+                        };
+                    }
+                    false
+                }
+            };
+            if !again || started {
+                break;
             }
-        };
-        // Between scenes Johnny is a single walk frame standing still, and
-        // the backdrop under him has just been repainted.
-        if !matches!(
-            self.activity,
-            Activity::Scene { .. } | Activity::Intro { .. }
-        ) {
-            self.redraw_standing(archive);
+            started = true;
+        }
+        // `seg4:0x0884`: the pass that first takes up the story's entry --
+        // usually the one that starts the walk to it -- asks for sound 25 and
+        // marks the story shown, so it is the story scene's own landing that
+        // moves the offer on (`seg4:0x0861`). Sound 25 is one past the last
+        // wave in `SCRANTIC.EXE` and plays nothing; it is asked for anyway,
+        // so a sound census says what the engine asks for.
+        if let Some(row) = entry {
+            if same(self.story_scene, row) {
+                self.stage.sounds.push(25);
+                self.story_scene = None;
+                self.story_state = 2;
+            }
         }
         surf | acted
     }
 
-    /// One pass of `seg4:0x0094`: look up a route, pick a step, pivot, walk.
-    ///
-    /// The order is the engine's. A tick that finishes a pivot goes straight
-    /// on to draw the first waypoint, which is why the last frame of a turn
-    /// is never seen.
-    fn step_journey(&mut self, archive: &Archive, mut j: Journey) -> bool {
-        // `seg4:0x00A3`: nothing moves until the delay slot runs out. He is
-        // still standing there in the meantime, and the surf has just
-        // repainted the beach under him.
-        if self.tick < j.next {
-            self.redraw_standing(archive);
-            self.activity = Activity::Moving(Box::new(j));
-            return true;
+    /// A scene is over: `seg4:0x081C`. Johnny lands where the row says, or
+    /// somewhere random where it says nothing; the cursor moves on; and the
+    /// story is told if this was its scene.
+    fn end_scene(&mut self, archive: &Archive, row: &'static Scene) {
+        self.position = self.landing(row.to);
+        self.cursor += 1;
+        // `seg4:0x0861`: the scene after the story scene moves the offer on.
+        if self.story_state == 2 {
+            self.story_offered += 1;
+            self.story_state = 3;
         }
-        self.stage.restore_background();
+        self.restore_island();
+        self.note(format!("scene over, Johnny at {:?}", self.position));
+        // The scene was drawing its own Johnny; the engine leaves its last
+        // frame on screen until the next pass draws over it, but this port
+        // has just repainted the island, so he is put back in the pose for
+        // wherever the scene left him.
+        // Drawn without being kept: the engine's pose pointer is not touched
+        // by a landing, and the driver sets it afresh before it next draws.
+        if let Some(pose) = self.pose_for(true) {
+            self.draw_frame(archive, pose);
+        }
+    }
 
-        // `seg4:0x00E1`: no path and not there yet, so pick a step out of the
-        // route block for wherever he is standing.
-        if j.path.is_none() && self.position.0 != j.target {
-            match self.next_step(j.origin, (j.target, 0)) {
+    /// The walk driver, `seg4:0x0094`, one pass of it.
+    ///
+    /// While the delay slot is counting down it only draws the pose on
+    /// screen again and re-arms the slot. Otherwise: look the route up if
+    /// there is none and Johnny is not in the target area; pick a step out of
+    /// it if there is no path; turn the facing the scene asked for into the
+    /// next turn once he is there and done turning; pivot an eighth of a
+    /// turn if he is not facing the way the turn wants; take the next
+    /// waypoint if he is; and draw whatever pose that left, re-arming the
+    /// slot. A pivot that finishes goes straight on to the first waypoint in
+    /// the same pass, so the last frame of a turn is never seen.
+    fn walk_driver(&mut self, archive: &Archive) -> bool {
+        // `seg4:0x00A3`
+        if self.walk_delay != 0 {
+            return self.draw_pose(archive, true);
+        }
+        // `seg4:0x00AD`: `seg4:0x03AC` answers 0 for an area of 0.
+        if self.walk.route.is_none()
+            && self.position.0 != self.walk.target
+            && self.position.0 != 0
+            && self.walk.target != 0
+        {
+            self.walk.route = Some(self.position.0);
+        }
+        // `seg4:0x00D7`
+        if let (Some(from), None) = (self.walk.route, self.walk.path) {
+            let target = self.walk.target;
+            match self.next_step(from, (target, 0)) {
                 Some(step) => {
                     self.note(format!(
                         "  step {} ({} waypoints), facing {} first",
@@ -1698,104 +1765,101 @@ impl Director {
                         step.path.len(),
                         step.face
                     ));
-                    j.turn_goal = step.face;
-                    j.path = Some((step, 0));
+                    self.walk.turn_goal = step.face;
+                    self.walk.dest = step.lands;
+                    self.walk.path = Some((step, 0));
                 }
                 None => {
-                    // No block covers this pair. The original would stand
-                    // there for good; move him and say so.
+                    // `seg4:0x0100`: no block covers where he is standing,
+                    // and the engine returns without drawing or moving.
+                    // Nothing in the table gets here; the port moves him
+                    // rather than leave him stuck.
                     self.note(format!(
                         "no route {:?} -> {}, moving directly",
-                        self.position, j.target
+                        self.position, target
                     ));
-                    self.position = (j.target, j.want_face.unwrap_or(self.position.1));
+                    self.position = (target, self.walk.want_face.unwrap_or(self.position.1));
+                    self.walk.route = None;
                 }
             }
         }
-
-        // `seg4:0x0179`: in the right area and done turning, so the facing
-        // the scene asked for becomes the next thing to turn to -- and when
-        // he is already at it, the request is satisfied.
-        if j.path.is_none() && self.position.0 == j.target && self.position.1 == j.turn_goal {
-            match j.want_face {
-                Some(want) if want != j.turn_goal => j.turn_goal = want,
-                _ => j.want_face = None,
+        // `seg4:0x0179`
+        if let Some(want) = self.walk.want_face {
+            if self.position.0 == self.walk.target && self.position.1 == self.walk.turn_goal {
+                if self.walk.turn_goal != want {
+                    self.walk.turn_goal = want;
+                } else {
+                    self.set_pose(true);
+                    self.walk.want_face = None;
+                }
             }
         }
-
-        // `seg4:0x01CA`: an eighth of a turn, and the pose that goes with it.
-        if self.position.1 != j.turn_goal {
-            self.position.1 = turn_toward(self.position.1, j.turn_goal, &mut self.stage.rng);
-            self.stand(archive, self.position.0 == j.target);
-            j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
-            self.activity = Activity::Moving(Box::new(j));
-            return true;
+        // `seg4:0x01CA`
+        if self.position.1 != self.walk.turn_goal {
+            self.position.1 = turn_toward(self.position.1, self.walk.turn_goal, &mut self.stage.rng);
+            self.set_pose(self.position.0 == self.walk.target);
         }
-
-        // `seg4:0x0274`: facing the right way, so take the next waypoint.
-        if let Some((step, i)) = j.path {
-            match step.path.get(i) {
-                Some(&(frame, x, y)) => {
-                    // `seg4:0x02C0`: the waypoint's top bit is draw mode 2.
-                    let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
-                    self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
-                    j.path = Some((step, i + 1));
-                    j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
-                    self.activity = Activity::Moving(Box::new(j));
-                    return true;
-                }
-                None => {
+        // `seg4:0x0264`
+        if let Some((step, i)) = self.walk.path {
+            if self.position.1 == self.walk.turn_goal {
+                let (frame, x, y) = step.path[i];
+                let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
+                self.standing = Some((frame & 0x7FFF, x, y, mirror));
+                if i + 1 < step.path.len() {
+                    self.walk.path = Some((step, i + 1));
+                } else {
                     // `seg4:0x0294`: the path has run out, so he is standing
                     // where it said it would leave him, facing the way it
-                    // said. The route block is re-entered from there.
-                    self.position = step.lands;
-                    j.turn_goal = self.position.1;
-                    j.path = None;
+                    // said. The route is re-entered from there.
+                    self.position = self.walk.dest;
+                    self.walk.path = None;
+                    if self.position.0 == self.walk.target {
+                        self.walk.route = None;
+                    }
                     self.note(format!("arrived at {:?}", self.position));
-                    j.next = self.tick + WALK_TICKS_PER_WAYPOINT;
-                    self.activity = Activity::Moving(Box::new(j));
-                    return true;
                 }
             }
         }
+        // `seg4:0x02B2`
+        self.draw_pose(archive, true)
+    }
 
-        // In the right area, facing the right way: the scene can start.
-        let scene = j.scene;
-        self.stand(archive, true);
-        self.begin_scene(archive, scene);
+    /// Point the pose at Johnny standing where he is, facing the way he
+    /// faces: `seg4:0x0223` picks one of two tables per area, the first for
+    /// when he has reached the area he was heading for and the second while
+    /// he is still travelling, and `seg4:0x0258` indexes it by the facing.
+    fn set_pose(&mut self, arrived: bool) {
+        if let Some(pose) = self.pose_for(arrived) {
+            self.standing = Some(pose);
+        }
+    }
+
+    fn pose_for(&self, arrived: bool) -> Option<(u16, u16, u16, Mirror)> {
+        let &(here, onward) = tables::POSES.get(self.position.0 as usize)?;
+        let id = if arrived { here } else { onward };
+        let pose = tables::WALK_STEPS.iter().find(|w| w.id == id)?;
+        let &(frame, x, y) = pose.path.get(self.position.1 as usize)?;
+        let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
+        Some((frame & 0x7FFF, x, y, mirror))
+    }
+
+    /// Draw the pose, if there is one, and re-arm the walk's delay slot as
+    /// `seg4:0x039D` does.
+    fn draw_pose(&mut self, archive: &Archive, rearm: bool) -> bool {
+        let Some(pose) = self.standing else {
+            return false;
+        };
+        self.draw_frame(archive, pose);
+        if rearm {
+            self.walk_delay = WALK_DELAY;
+        }
         true
     }
 
-    /// Draw Johnny standing at this spot, facing whichever way he faces.
-    ///
-    /// `seg4:0x0223` picks one of two pose tables per area -- the first for
-    /// when he has reached the area he was heading for, the second while he
-    /// is still travelling -- and `seg4:0x0258` indexes it by the facing.
-    /// Eight poses, one per point of the compass.
-    fn stand(&mut self, archive: &Archive, arrived: bool) {
-        let area = self.position.0 as usize;
-        let Some(&(here, onward)) = tables::POSES.get(area) else {
-            return;
-        };
-        let id = if arrived { here } else { onward };
-        let Some(pose) = tables::WALK_STEPS.iter().find(|w| w.id == id) else {
-            return;
-        };
-        let Some(&(frame, x, y)) = pose.path.get(self.position.1 as usize) else {
-            return;
-        };
-        let mirror = Mirror::from_mode(if frame & 0x8000 != 0 { 2 } else { 0 });
-        self.draw_walk_frame(archive, frame & 0x7FFF, x, y, mirror);
-    }
-
-    /// Put the standing Johnny back on top of the backdrop.
-    fn redraw_standing(&mut self, archive: &Archive) {
-        if let Some((frame, x, y, mirror)) = self.standing {
-            self.draw_walk_frame(archive, frame, x, y, mirror);
-        }
-    }
-
-    fn draw_walk_frame(&mut self, archive: &Archive, frame: u16, x: u16, y: u16, mirror: Mirror) {
+    /// Draw one walk frame where the island has got to (`seg4:0x02EA` adds
+    /// its offset to every waypoint).
+    fn draw_frame(&mut self, archive: &Archive, pose: (u16, u16, u16, Mirror)) {
+        let (frame, x, y, mirror) = pose;
         // The walk sprites live in JOHNWALK.BMP, which FILES.VIN preloads.
         if self.walk_frames.is_none() {
             let frames = archive.bitmap("JOHNWALK.BMP").unwrap_or_default();
@@ -1804,9 +1868,6 @@ impl Director {
         let Some(frames) = self.walk_frames.clone() else {
             return;
         };
-        let (sx, sy) = (x, y);
-        // `seg4:0x02EA` adds the island's offset to every waypoint, so
-        // Johnny walks the beach wherever the beach has got to.
         let (x, y) = self
             .scenery
             .as_ref()
@@ -1814,7 +1875,6 @@ impl Director {
         if let Some(f) = frames.get(frame as usize) {
             self.stage.surface.draw_sprite(f, x, y, mirror);
         }
-        self.standing = Some((frame, sx, sy, mirror));
     }
 
     fn run_scene(
@@ -1826,18 +1886,14 @@ impl Director {
     ) -> bool {
         // The script is interpreted first and the instances move after it.
         // `seg10:0x1ACB` does it in that order -- the pass at `seg10:0x1B6B`,
-        // then the walk at `seg10:0x1C32` -- and it is not incidental: a
-        // scene the pass starts draws its first frame on the same tick rather
-        // than sixteen milliseconds later, and a scene that reached its end
-        // last tick is still in state 4 when this pass reads it, because it
-        // is the walk that clears it (`seg10:0x1DDC`).
+        // then the walk at `seg10:0x1C32` -- so a scene the pass starts
+        // draws its first frame on the same pass, and a scene that reached
+        // its end last pass is still in state 4 when this pass reads it,
+        // because it is the walk that clears it (`seg10:0x1DDC`).
         //
         // One pass of the sequencer, not one instruction: `seg10:0x1925`
-        // interprets until a `Step` and only then returns, so everything a
-        // guarded block starts happens on the same tick. The bound is a
-        // backstop against a script that never reaches one.
-        // Every pass re-reads the whole script from the top; `PASS_BUDGET`
-        // bounds it in case this port has misread one.
+        // interprets until a `Step` and only then returns. `PASS_BUDGET`
+        // bounds it in case this port has misread a script.
         seq.begin_pass();
         for _ in 0..crate::ads::PASS_BUDGET {
             match seq.next_action(&mut self.stage.rng) {
@@ -1847,8 +1903,6 @@ impl Director {
                     scene,
                     to_front,
                 } => {
-                    // Draw order is list order, and the runner walks it head
-                    // to tail, so the tail is on top.
                     // The engine moves the record inside the instance list
                     // (`seg10:0x0F8C` to the tail, `seg10:0x0EF2` to the
                     // head), so the move outlives the scene it was asked
@@ -1897,7 +1951,7 @@ impl Director {
                     // in the archive at all -- still gets an instance.
                     // `seg10:0x0DB6` never checks, and `seg10:0x1DBA` is
                     // what deals with it: the runner cannot run the scene,
-                    // so it goes into state 4 on its first tick and the
+                    // so it goes into state 4 on its first pass and the
                     // block waiting on it fires. Dropping the play instead
                     // leaves that block waiting for ever.
                     let program = self
@@ -1924,7 +1978,7 @@ impl Director {
         self.stage.restore_background();
         advance_scenes(active, seq, &mut self.stage, archive, self.tick);
 
-        // The picture for this tick is complete: everything live has been
+        // The picture for this pass is complete: everything live has been
         // painted onto a fresh backdrop. If the repaint model is sound, the
         // same picture comes back out of the retained frames alone.
         if self.checking {
@@ -1944,8 +1998,9 @@ impl Director {
     /// Where a scene leaves Johnny standing (`seg4:0x081C`).
     ///
     /// A scene that says "anywhere" does not mean "where he was": the engine
-    /// rolls an area and a spot inside it, so a gag that could have happened
-    /// anywhere leaves him somewhere new.
+    /// rolls an area and a facing, so a gag that could have happened
+    /// anywhere leaves him somewhere new. A facing of 0 is rolled too, even
+    /// under a real area.
     fn landing(&mut self, ends_at: (u8, u8)) -> (u8, u8) {
         let major = if ends_at.0 == 0 {
             (self.stage.rng.below(6) + 1) as u8
@@ -2070,6 +2125,92 @@ impl Director {
     /// Ticks since the director started; one tick is `MS_PER_TICK`.
     pub fn ticks(&self) -> u32 {
         self.tick
+    }
+
+    /// A table row's number, the way `tools/oracle.py` names rows.
+    fn row_index(row: &'static Scene) -> usize {
+        let base = tables::SCENES.as_ptr() as usize;
+        (row as *const _ as usize - base) / std::mem::size_of::<Scene>()
+    }
+
+    /// Everything the outer loop and the walk driver keep, on one line, for
+    /// `jcoracle run` to put beside the same words read out of the engine.
+    /// Pointers become what they point at: a route block is named by the
+    /// area it was entered from, a path by its step id and how far along it
+    /// is, the pose by the triple it draws.
+    pub fn dump(&mut self) -> String {
+        let (pose_frame, pose_x, pose_y) = match self.standing {
+            Some((frame, x, y, mirror)) => (
+                frame | if mirror.x { 0x8000 } else { 0 },
+                x,
+                y,
+            ),
+            None => (0, 0, 0),
+        };
+        let (step, along) = match self.walk.path {
+            Some((step, i)) => (step.id as usize, i),
+            None => (0, 0),
+        };
+        let queue: Vec<String> = self
+            .queue
+            .iter()
+            .map(|r| Self::row_index(r).to_string())
+            .collect();
+        let (i, j, table) = self.stage.rng.state();
+        let bytes: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let (off, coin) = match self.scenery.as_ref() {
+            Some(s) => (s.offset, s.sandbar() as u8),
+            None => ((0, 0), 0),
+        };
+        let sounds: Vec<String> = self.take_sounds().iter().map(|s| s.to_string()).collect();
+        format!(
+            "pos {} {} tgt {} want {} goal {} route {} path {} {} pose {} {} {} \
+             wd {} idle {} cur {} queue {} story {} {} {} {} island {} off {} {} \
+             coin {} phase {} rng {} {} {:08X} snd {}",
+            self.position.0,
+            self.position.1,
+            self.walk.target,
+            self.walk.want_face.map_or(-1, |f| f as i32),
+            self.walk.turn_goal,
+            self.walk.route.unwrap_or(0),
+            step,
+            along,
+            pose_frame,
+            pose_x,
+            pose_y,
+            self.walk_delay,
+            self.idle_delay,
+            self.cursor,
+            queue.join(","),
+            self.story_offered,
+            self.day,
+            self.story_state,
+            self.story_scene.map_or(-1, |r| Self::row_index(r) as i32),
+            self.island_state,
+            off.0,
+            off.1,
+            coin,
+            self.phase,
+            i,
+            j,
+            dgds::crc32(&bytes),
+            sounds.join(",")
+        )
+    }
+
+    /// The water and the sky, for `jcoracle water`. See `Scenery::dump`.
+    pub fn water_dump(&self) -> String {
+        self.scenery.as_ref().map(|s| s.dump()).unwrap_or_default()
+    }
+
+    /// One backdrop pass on its own -- the timer and then `seg3:0x040E(0)`
+    /// -- for `jcoracle water`, which drives nothing else.
+    pub fn water_pass(&mut self, fires: u32) {
+        let rng = &mut self.stage.rng;
+        if let Some(s) = self.scenery.as_mut() {
+            s.timer(fires);
+            s.pass(rng);
+        }
     }
 
     pub fn is_night(&self) -> bool {

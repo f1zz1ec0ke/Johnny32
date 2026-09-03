@@ -330,26 +330,36 @@ ADS_LENGTHS = {
     0x3020: 4, 0x4000: 8, 0x4010: 8,
 }
 
+# Names for the script dumps. The `10x0` family waits at its guard and the
+# `13x0` family is an ordinary rule; see docs/FILE_FORMATS.md.
 ADS_NAMES = {
     0x2000: 'PLAY_SCENE',      # (ttm, scene, flags, weight)
     0x2005: 'PLAY_SCENE',      # same shape; weight is operand 4
+    0x2010: 'STOP_SCENE',
+    0x2015: 'FINISH_SCENE',
+    0x4000: 'TO_FRONT',
+    0x4010: 'TO_BACK',
     0x3010: 'RANDOM_BEGIN',    # weighted pick of one entry, up to RANDOM_END
     0x30FF: 'RANDOM_END',
     0x3020: 'RANDOM_SKIP',     # a weighted "play nothing" choice
+    0x1500: 'SKIP_STEP',
     0x1510: 'STEP',
     0x1520: 'STEP_END',
-    0x1420: 'STOP',
-    0x1430: 'STOP',
+    0x1420: 'AND',
+    0x1430: 'OR',
+    0xF000: 'RUN_SEQUENCE',
+    0xF200: 'RUN_SEQUENCE',
+    0xF210: 'RUN_SEQUENCE',
+    0xF010: 'STOP_SEQUENCE',
     0xFFFF: 'END_SEQUENCE',
-    # conditionals; see docs/FILE_FORMATS.md for the exact predicates
-    0x1010: 'IF_FINISHED',     0x1310: 'IF_FINISHED',
-    0x1020: 'IF_NOT_FINISHED', 0x1320: 'IF_NOT_FINISHED',
-    0x1030: 'IF_NOT_STARTED',  0x1330: 'IF_NOT_STARTED',
-    0x1040: 'IF_STARTED',      0x1340: 'IF_STARTED',
-    0x1050: 'IF_RUNNING',      0x1350: 'IF_RUNNING',
-    0x1060: 'IF_IDLE',         0x1360: 'IF_IDLE',
-    0x1070: 'IF_PAUSED',       0x1370: 'IF_PAUSED',
-    0x1080: 'IF_COUNT_LE',     0x1380: 'IF_COUNT_LE',
+    0x1010: 'WAIT_FINISHED',     0x1310: 'IF_FINISHED',
+    0x1020: 'WAIT_NOT_FINISHED', 0x1320: 'IF_NOT_FINISHED',
+    0x1030: 'WAIT_NOT_STARTED',  0x1330: 'IF_NOT_STARTED',
+    0x1040: 'WAIT_STARTED',      0x1340: 'IF_STARTED',
+    0x1050: 'WAIT_JUST_ENDED',   0x1350: 'IF_JUST_ENDED',
+    0x1060: 'WAIT_NOT_QUEUED',   0x1360: 'IF_NOT_QUEUED',
+    0x1070: 'WAIT_QUEUED',       0x1370: 'IF_QUEUED',
+    0x1080: 'WAIT_COUNT_LE',     0x1380: 'IF_COUNT_LE',
     0x1390: 'IF_COUNT_GE',
     0x13A0: 'IF_VAR_LE', 0x13A1: 'IF_VAR_LE',
     0x13B0: 'IF_VAR_GE', 0x13B1: 'IF_VAR_GE',
@@ -377,24 +387,35 @@ def disasm_ads(code):
         p += n
     return ops
 
-# What the confirmed TTM opcodes do, where it is known.
+# Names for the script dumps; johnny/src/ttm.rs is the reference.
 TTM_NAMES = {
     0x0FF0: 'END_FRAME',
     0x0080: 'FREE_SHAPES',
-    0x0110: 'PURGE',
+    0x0110: 'END_SCENE',
     0x1021: 'SET_DELAY',
+    0x2022: 'SET_RANDOM_DELAY',
     0x1051: 'SELECT_BMP_SLOT',
     0x1061: 'SELECT_PAL_SLOT',
-    0x1111: 'SET_SCENE',
+    0x1101: 'SCENE_MARKER',   # names a frame, but gets no instance record
+    0x1111: 'SCENE',
     0x1121: 'SET_BACKGROUND',
-    0x1201: 'GOTO_FRAME',
-    0x4204: 'SAVE_REGION',
+    0x1201: 'GOTO_SCENE',
+    0x2002: 'SET_COLOURS',
+    0x2012: 'FLIP_NEXT_LOAD', # no-op here: the port mirrors at draw time
+    0x4004: 'SET_CLIP',
+    0x4204: 'SAVE_REGION',    # no-op here: the backdrop is repainted every tick
     0x4214: 'NOP',            # seg12:0x0860 does nothing either way
     0xC051: 'PLAY_SOUND',
     0xA601: 'NOP',            # seg12:0x02D8 likewise
+    0xA002: 'DRAW_PIXEL',
+    0xA0A4: 'DRAW_LINE',
+    0xA104: 'FILL_RECT',
+    0xA404: 'FILL_CIRCLE',
     0xA504: 'DRAW_SPRITE',
     0xA524: 'DRAW_SPRITE_FLIPPED',
-    0xA0A4: 'DRAW_RECT',
+    0xA054: 'SAVE_RECT',
+    0xA064: 'RESTORE_RECT',
+    0xB606: 'COPY_RECT',      # (x, y, w, h, from page, to page)
     0xF01F: 'LOAD_SCREEN',
     0xF02F: 'LOAD_BITMAP',
     0xF05F: 'LOAD_PALETTE',
@@ -402,7 +423,7 @@ TTM_NAMES = {
 
 
 def disasm(code, opcodes=None):
-    """TTM TT3: / ADS SCR: bytecode -> [(offset, opcode, args, string)].
+    """TTM TT3: bytecode -> [(offset, opcode, args, string)].
 
     Opcodes are 16-bit; the low nibble is the operand count, 0x0F meaning one
     NUL-terminated string padded to a word boundary. The interpreter confirms
@@ -413,11 +434,7 @@ def disasm(code, opcodes=None):
     at the first word that is not a valid opcode rather than emitting garbage.
     All 41 TTM scripts decode end to end with TTM_OPCODES.
 
-    ADS is only partly understood: its opcodes are known (ADS_OPCODES) but
-    several carry an operand count that is not the low nibble -- 0x0001 and
-    0x0005 take none, 0x2000/0x2005 take four, 0x4000/0x4010 take three -- and
-    the 0x10x0 and 0x13x0 families are variable length. Do not trust an ADS
-    disassembly past the first few instructions.
+    ADS does not use this rule; use disasm_ads.
     """
     ops = []
     p = 0

@@ -119,7 +119,6 @@ pub enum Op {
         flags: u16,
         weight: u16,
     },
-    /// Wait here until the scene that was started finishes.
     /// `1510`: the end of a guarded block. Inside one it closes the block
     /// and the pass carries on with the next rule; at the top level it ends
     /// the sequence's pass.
@@ -294,7 +293,6 @@ pub fn decode(code: &[u8]) -> (Vec<(usize, Op)>, usize) {
     (out, p)
 }
 
-/// A tiny deterministic PRNG, so a run can be reproduced from a seed.
 /// The engine's own generator, from `seg4:0x1E86`.
 ///
 /// A fifty-six entry additive lagged Fibonacci: two cursors twenty-four apart
@@ -317,6 +315,15 @@ pub struct Rng {
     table: [u16; 56],
     i: usize,
     j: usize,
+}
+
+impl Rng {
+    /// The generator's whole state, for the oracle to compare with the
+    /// engine's: the two cursors (`ds:0x1CE2` and `ds:0x1CE4`, word
+    /// indices into the table) and the table itself.
+    pub fn state(&self) -> (usize, usize, [u16; 56]) {
+        (self.i, self.j, self.table)
+    }
 }
 
 /// `ds:0x1CE6`, verbatim.
@@ -603,7 +610,7 @@ impl Sequencer {
     ///
     /// That difference is the repaint model, not an oversight. The engine
     /// leaves what a scene drew on the screen, so a backdrop scene guarded by
-    /// `1330` needs to run once and no more. This port paints every tick from
+    /// `1330` needs to run once and no more. This port paints every pass from
     /// nothing, so the same scene has to run again to be on screen at all --
     /// `STAND.ADS` sequence 14 and `MJ_AMB.BMP` are exactly that, and
     /// remembering the play count across scenes would leave Johnny standing
@@ -797,34 +804,22 @@ impl Sequencer {
         sticky || result
     }
 
-    /// Skip a block that is not going to run (`seg10:0x106B`).
-    ///
-    /// The scan stops at this block's own `Step`. A condition met on the way
-    /// is consumed **whole** -- its chain, its block, and the `Step` that ends
-    /// that block -- because a rule nested inside a skipped rule must not
-    /// steal its terminator. `BUILDING.ADS` builds its fire out of exactly
-    /// that shape, and a skipper that stops at the first `Step` it sees leaves
-    /// the sequence stuck for good.
-    /// Returns true if it stopped on the end of the sequence rather than on a
-    /// `Step`. The caller has to know: the end is left under the cursor for
-    /// the main loop to act on, and a nested skip that hits it must hand that
-    /// straight back up rather than let the level above re-read the condition
-    /// it came from and start again.
-    /// Swallow a block, the way `seg10:0x106B` does.
+    /// Swallow a block that is not going to run, the way `seg10:0x106B` does.
     ///
     /// Its eighteen-entry table at `cs:0x1142` is the whole specification.
     /// `1510` and `1500` end the block; `FFFF` ends the script; the fifteen
     /// `13x0` guards recurse, because a nested rule's own block belongs to
-    /// it. **Everything else is skipped one instruction at a time** --
-    /// including `1520`, and including the `10x0` guards, neither of which is
-    /// in the table at all.
+    /// it and must not steal the outer block's terminator. Everything else
+    /// is skipped one instruction at a time, including `1520` and the `10x0`
+    /// guards, neither of which is in the table.
     ///
     /// Stopping early is the expensive mistake: whatever is left of the block
     /// then runs as though it were the next rule, so a guard that just said
-    /// no still starts the scenes underneath it. That is several animations
-    /// beginning at once, at the moment one ends.
+    /// no still starts the scenes underneath it.
     ///
-    /// Returns true if it ran off the end without finding a terminator.
+    /// Returns true if it reached the end of the script instead of a
+    /// terminator. The `End` is left under the cursor for the main loop, and
+    /// a nested skip that hits it hands that straight back up.
     fn skip_block(&mut self) -> bool {
         while let Some((_, op)) = self.ops.get(self.pc).cloned() {
             self.pc += 1;
@@ -990,8 +985,6 @@ impl Sequencer {
                 // inside a guarded block, so a `Step` ends the block it is in
                 // and the pass carries on to the next rule. Reaching one at
                 // the top level ends the pass.
-                // A `Step` inside a guarded block closes the block, and the
-                // pass carries on with the next rule.
                 Op::Step | Op::SkipStep => {
                     if self.depth > 0 {
                         self.depth -= 1;
