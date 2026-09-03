@@ -1243,7 +1243,10 @@ class Interpreter:
 
     def _blank(self, m):
         """`seg12:0x0291`: the slot has a table, and the frame the opcode
-        asked for is not in it."""
+        asked for is not in it. A held frame runs again every pass and gets
+        here again; like the draws, only the first time is compared."""
+        if m.read16(m.ds, 0x46DA):
+            return
         bp = m.regs['bp']
         self.draws.append('blank %d %d' % (m.read16(m.ds, (bp + 0x0C) & 0xFFFF),
                                            m.read16(m.ds, (bp + 0x0A) & 0xFFFF)))
