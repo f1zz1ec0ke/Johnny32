@@ -7,8 +7,9 @@
 #     JC_DEEP_OUT=elsewhere bash tools/deep.sh
 #
 # Each piece is one oracle query, or one source of `reach.py`, at the deep
-# case lists -- with the `tick` query and source split per `.ADS` file,
-# because at the deep tier those are the long ones. A piece that finishes
+# case lists -- with the `tick` and `seqrun` queries and sources split per
+# `.ADS` file, because at the deep tier those are the long ones. A piece that
+# finishes
 # leaves a `.log` and, if it passed, an `.ok` marker; a piece with a marker
 # is skipped next time, so a run that is cut off picks up where it stopped.
 # Delete the marker to run a piece again.
@@ -48,27 +49,31 @@ print(' '.join(sorted(set(n for n, _ in scenes.scenes()))))"
 if [ "$what" = all ] || [ "$what" = oracle ]; then
     for q in rand weighted phase choose choose2 choose4 queue queue6 place \
              adslen holiday backdrop repeat island route turn blocks \
-             seqpass seqrun codec ttm water run; do
+             seqpass codec ttm water run; do
         piece "oracle-$q" env JC_DEEP=1 python3 tools/oracle.py "$q"
     done
     for f in $(ads_files); do
+        piece "oracle-seqrun-${f%.ADS}" env JC_DEEP=1 JC_ADS_ONLY="$f" \
+            python3 tools/oracle.py seqrun
         piece "oracle-tick-${f%.ADS}" env JC_DEEP=1 JC_TICK_ONLY="$f" \
             python3 tools/oracle.py tick
     done
 fi
 
 if [ "$what" = all ] || [ "$what" = reach ]; then
-    for s in seqrun seqpass ttm; do
+    for s in seqpass ttm; do
         piece "reach-$s" env JC_DEEP=1 python3 tools/reach.py "$s" \
             --save="$out/reach-$s.json"
     done
     for f in $(ads_files); do
+        piece "reach-seqrun-${f%.ADS}" env JC_DEEP=1 JC_ADS_ONLY="$f" \
+            python3 tools/reach.py seqrun --save="$out/reach-seqrun-${f%.ADS}.json"
         piece "reach-tick-${f%.ADS}" env JC_DEEP=1 JC_TICK_ONLY="$f" \
             python3 tools/reach.py tick --save="$out/reach-tick-${f%.ADS}.json"
     done
     echo "== reach, all pieces together"
     if ls "$out"/reach-*.ok >/dev/null 2>&1 && \
-       [ "$(ls "$out"/reach-*.ok | wc -l)" = "$(( 3 + $(ads_files | wc -w) ))" ]; then
+       [ "$(ls "$out"/reach-*.ok | wc -l)" = "$(( 2 + 2 * $(ads_files | wc -w) ))" ]; then
         JC_DEEP=1 python3 tools/reach.py --load="$out/reach-*.json" || fail=1
     else
         echo "   not every reach piece has run yet"

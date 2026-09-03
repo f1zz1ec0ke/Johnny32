@@ -440,8 +440,11 @@ def ads_scripts():
     import dgds
     recs = dgds.read_archive(open('original/RESOURCE.001', 'rb').read())
     out = []
+    # `JC_ADS_ONLY=MISCGAG.ADS` keeps to one script, so `tools/deep.sh` can
+    # run the per-script queries a piece at a time.
+    only = os.environ.get('JC_ADS_ONLY')
     for name, body, _ in recs:
-        if not name.endswith('.ADS'):
+        if not name.endswith('.ADS') or (only and name != only):
             continue
         code = None
         for path, payload in dgds.flatten(dgds.parse_chunks(body)):
