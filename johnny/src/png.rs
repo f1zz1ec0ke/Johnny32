@@ -164,7 +164,7 @@ pub fn read(data: &[u8]) -> Result<Image, String> {
                 kind = body[9];
                 interlace = body[12];
             }
-            b"PLTE" => palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            b"PLTE" => palette = body.as_chunks::<3>().0.to_vec(),
             b"tRNS" => alpha = body.to_vec(),
             b"IDAT" => idat.extend_from_slice(body),
             b"IEND" => break,
