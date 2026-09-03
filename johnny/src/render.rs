@@ -255,8 +255,8 @@ impl Surface {
         }
     }
 
-    /// Draw an ellipse in a bounding box. TTM `A404` fills, `A424` outlines.
-    /// A circle, centre and radius, the way the engine asks for one.
+    /// A circle, centre and radius, the way the engine asks for one. TTM
+    /// `A404` fills, `A424` outlines.
     ///
     /// `seg12:0x01C9` turns the opcode's four operands into three: a radius
     /// of `h >> 1`, and a centre at `(x + r, y + r)`. The width operand is

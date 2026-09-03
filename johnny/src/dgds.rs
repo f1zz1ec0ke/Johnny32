@@ -147,10 +147,6 @@ pub fn leaf<'a>(body: &'a [u8], tag: &[u8; 4]) -> Option<Leaf<'a>> {
     leaves(body).into_iter().find(|l| &l.tag == tag)
 }
 
-/// Does this leaf carry a `[type][uncompressed size]` header?
-///
-/// `VGA:` is the awkward one: inside a `.BMP` it is compressed, inside a
-/// `.PAL` the payload is the raw palette.
 /// CRC-32 (IEEE), matching Python's `zlib.crc32`. The differential test and
 /// the codec oracle both name chunks by it, so both sides have to agree on
 /// the polynomial as well as on the bytes.
@@ -170,6 +166,10 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
+/// Does this leaf carry a `[type][uncompressed size]` header?
+///
+/// `VGA:` is the awkward one: inside a `.BMP` it is compressed, inside a
+/// `.PAL` the payload is the raw palette.
 pub fn is_compressed(record_name: &str, tag: &[u8; 4]) -> bool {
     match tag {
         b"BIN:" | b"SCR:" | b"TT3:" => true,
@@ -424,8 +424,8 @@ pub fn read_bitmap(body: &[u8]) -> Result<Vec<Frame>> {
             width: w,
             height: h,
             pixels: unpack4(slice, w, h),
-                     colour: None,
-                 });
+            colour: None,
+        });
         off += len;
     }
     Ok(out)
@@ -442,8 +442,8 @@ pub fn read_screen(body: &[u8]) -> Result<Frame> {
         width: w,
         height: h,
         pixels: unpack4(&raw, w, h),
-           colour: None,
-       })
+        colour: None,
+    })
 }
 
 /// `JOHNCAST.PAL`: 256 RGB triples of 6-bit VGA values.

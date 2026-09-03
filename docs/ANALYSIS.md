@@ -98,8 +98,9 @@ container format is fully understood.
 | `.PAL` | 1 | the 256-entry palette |
 | `.VIN` | 1 | `FILES.VIN`, a preload list |
 
-There is **no audio anywhere in this build** — no `.WAV`, no `SNG:` chunk.
-The MMSYSTEM import is there, but this release ships silent.
+There is no audio in the archive. The twenty-three sound effects are `WAVE`
+resources inside `scrantic.exe` itself, which is why the port asks for that
+file alongside the data; see `docs/SCHEDULER.md` under "The sound".
 
 The scripts are self-documenting. Every `.TTM` carries a `TAG:` chunk naming
 its scenes: `LOAD FIRE`, `RUB STICKS`, `john gets boards`, `johnny building`,
@@ -174,6 +175,5 @@ convention) had been cancelling out just well enough to look like progress.
   the major is an **area** 1-6, indexing the route matrix at `ds:0x0A94`.
   Neither is a screen coordinate, because every waypoint and pose in the data
   is already a `(frame, x, y)` triple. See `docs/SCHEDULER.md`.
-* **Sound.** This build ships silent, so there is nothing here to recover. The
-  engine imports MMSYSTEM and the data segment holds `WAVESFX%d`, so a release
-  with audio would have more to say.
+* **The blitter.** `seg8:0x0AE4` hands each sprite to GDI, so there is no
+  pixel loop of Sierra's to check the port's against.

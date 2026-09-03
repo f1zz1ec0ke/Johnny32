@@ -343,9 +343,12 @@ has passed, which is what makes eleven days of story take eleven days. Taking
 the offer for both — on a reload, say — moves the story on every time the
 screen goes blank.
 
-`seg4:0x0861` is the other half: when the scene that ends *is* the story
+`seg4:0x0884` is the other half: when the scene that ends *is* the story
 scene, the flag goes to 2 and sound 25 is asked for. There is no resource 25,
-so that is silent in the original too.
+so that is silent in the original too. `seg4:0x0861` then moves the offer on
+at the end of the scene after it, if there is one in the same queue; the
+queue-end path above covers the case where there is not, and the two never
+both fire because the offer is already ahead.
 
 ## Time of day
 
@@ -536,15 +539,15 @@ IF_RUNNING(1,4)  PLAY 1,13
 ```
 
 Three scenes start together and the chain branches on whichever ends. A
-sequencer that could only ever catch the single pass a scene ends on would
-have to service them in the order the blocks are written — and scene 4's
-branch, four blocks down, would be long gone by the time it got there. Two
-scenes meant to overlap end up taking turns instead.
+sequencer that read the script as a program, waiting at each block in turn,
+would service them in the order the blocks are written, and scene 4's branch,
+four blocks down, would be long gone by the time it got there.
 
-The port keeps a set of scenes that have reached the running state, so
-`IF_RUNNING` is true for a scene that has run as well as one running right
-now, and a block can fire late. Playing a scene again clears it, so the next
-guard waits for the new run.
+That is why the script is a rule set rather than a program: every pass
+re-reads the sequence from the top and tests every guard against the world
+as it now is (see `docs/FILE_FORMATS.md`). State 4 lasts exactly one pass,
+and the pass runs before the instances are stepped, so a guard on a scene
+fires on the pass that scene ends, wherever the guard sits in the sequence.
 
 ### The instance state machine
 
@@ -793,15 +796,18 @@ and `ds:0x0278`, terminated by `0xFF`:
 | 3 | `ds:0x0268` | 26-29 | 104x16 | 1 | x -70 +710, y 382 +142 | `seg3:0x0682` |
 
 The three sizes are three distances: the small one high and far out, the big
-one low and close. `seg3:0x14BF` picks the spot inside the band, taking the
-sprite's own size off the span so it lands whole, and the caps come from
-`seg3:0x046E`.
+one low and close. `seg3:0x14BF` picks the spot as `base + rand() % span` in
+each axis. It can take a sprite's size off the span first, and does for the
+clouds, but the wave spawners hand it a shape of -1, so a wave may hang off
+the edge of its band. The caps come from `seg3:0x046E`.
 
-A slot is filled by two rolls through the weighted chooser at `seg4:0x1F1B`,
-whose arguments are percentages (it scales each by 655, a hundredth of 65536,
-and walks them against a 16-bit draw). First a flat 35% for the slot to be
-filled at all (`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it
-(`seg3:0x04EE`): 35% a glint, 5% each wave size, 50% nothing after all.
+The walk runs every tick, and every empty slot it visits is rolled twice
+through the weighted chooser at `seg4:0x1F1B`, whose arguments are
+percentages (it scales each by 655, a hundredth of 65536, and walks them
+against a 16-bit draw). First a flat 35% for the slot to be filled at all
+(`seg3:0x04CE`), then `[35, 5, 5, 5]` for what goes in it (`seg3:0x04EE`):
+35% a glint, 5% each wave size, 50% nothing after all. At that rate the
+thirty slots fill within a second and stay full.
 
 A wave holds each frame for 0, 1 or 2 steps — `seg4:0x1F1B(30, 50)`, so 30%
 one, 50% two, 20% none — and a step is 160ms, from the delay slot at
@@ -824,25 +830,39 @@ Any machine running this port is over the line, so the port spawns them.
 ### The sky
 
 Fifteen cloud slots (`ds:0x2E82`), filled from `BACKGRND.BMP` frames 15, 16
-and 17 — three sizes of cloud bank — with a cap on each and a weight in the
-spawn roll (`seg3:0x0AB1`):
+and 17 — three sizes of cloud bank — with a cap on each:
 
-| Frame | Size | At most | Weight | Cap at |
-| --- | --- | --- | --- | --- |
-| 15 | 128x36 | 8 | 15% | `ds:0x2E7C` |
-| 16 | 192x57 | 4 | 10% | `ds:0x2E7E` |
-| 17 | 264x76 | 2 | 5% | `ds:0x2E80` |
+| Frame | Size | At most | Cap at |
+| --- | --- | --- | --- |
+| 15 | 128x36 | 8 | `ds:0x2E7C` |
+| 16 | 192x57 | 4 | `ds:0x2E7E` |
+| 17 | 264x76 | 2 | `ds:0x2E80` |
 
-The roll runs biggest first and falls through to the next size down when that
-one is at its cap (`seg3:0x0AC9`). Clouds go anywhere across the width, in the
-top 139 rows (`seg3:0x0B0C`). Each gets its own speed — `rand() % 5 + 6`
-passes per pixel (`seg3:0x0B2B`) — and when one leaves the screen it is
-retired and its cap given back (`seg3:0x0D19`), so the sky refills behind it.
+`seg3:0x0A38` sets the sky up when the backdrop is built. It rolls the wind,
+then rolls each of the fifteen slots twice: a 30% gate (`seg3:0x0A8E`), and
+then 5/10/15 over the three sizes biggest first, falling through to the next
+size down when that one is at its cap (`seg3:0x0AC9`). That is about nine
+percent a slot, so the sky starts with one or two clouds, placed anywhere
+across the width in the top 139 rows (`seg3:0x0B0C`). Each gets its own
+speed, `rand() % 5 + 6` passes per pixel (`seg3:0x0B2B`).
+
+`seg3:0x0B67` is the cloud walk. It refills every empty slot, 20/30/50 over
+the three sizes and nothing when that size is at its cap, a thousand pixels
+off screen upwind (`seg3:0x0C28`); moves every cloud whose countdown has run
+out one pixel with the wind; and retires one that has left the screen on the
+far side, giving its cap back (`seg3:0x0D19`).
+
+**In the original the walk runs once.** The backdrop pass at `seg3:0x040E`
+only runs the cloud walk when its argument is non-zero, and the per-tick
+caller at `seg4:0x070E` passes zero; only the setup at `seg3:0x03B5` passes
+one. So the shipped screensaver places one or two clouds and thirteen or so
+off screen, and none of them ever moves. The port runs the walk every tick,
+which is what the code was written to do, and `JC_FAITHFUL=1` leaves the sky
+still.
 
 **The wind is one thing.** `ds:0x0280` is +1 or -1, and `seg3:0x0A59` rolls it
-once when the sky is set up. The clouds drift with it, and so do the waves out
-on the water — they read the same variable. That is why everything on screen
-moves the same way.
+once when the sky is set up. The waves out on the water read the same
+variable, so whatever drifts drifts the same way.
 
 ### Glints
 
@@ -1149,7 +1169,7 @@ even run.
 `ds:0x1EA3`-`ds:0x1EAA`, which is what the blitter reads (`seg8:0x1ADE`), and
 `seg12:0x0F40` writes a copy into the instance record at +0x20 as well.
 
-That copy is not decoration, which is what this said before. `seg10:0x1C81`
+That copy is not decoration. `seg10:0x1C81`
 reads seven fields back out of the record into those globals *before every
 frame that instance runs*: the two drawing colours at +0x1E and +0x1F, then
 the clip flag and the four rectangle words at +0x20 through +0x27.
@@ -1169,10 +1189,6 @@ three red pixels on the sand.
 
 ## Still open
 
-* What the two position components mean geometrically. Major 0-6 and minor
-  0-7 look like an island region and a spot within it, but that is inference
-  from the tables rather than something the code states. The waypoint
-  coordinates should settle it once they are plotted over a background.
 * What the engine draws in the oceans' index-0 patches, above under "The
   colour that is not there". Showing them as what is behind the transparency
   key — black, which is index 5 in this palette — was tried and turns the near

@@ -723,12 +723,12 @@ def seqrun_shape():
 
     Both numbers are coverage, not taste, and `tools/reach.py` is where they
     come from. Of the ADS instructions the dispatcher can see, eight passes
-    from one draw reaches 64.7%. Passes matter because a scene has to end and
+    from one draw reaches 66.6%. Passes matter because a scene has to end and
     start again before the guards waiting on it mean anything, so sixty of
-    them from one draw reaches 80.9%; draws matter because a random block
+    them from one draw reaches 83.3%; draws matter because a random block
     takes one branch and the rest are only reachable by drawing differently,
-    so eight passes from eight draws reaches 75.6%. Neither knob substitutes
-    for the other, and together they reach 88.7%.
+    so eight passes from eight draws reaches 77.8%. Neither knob substitutes
+    for the other, and together they reach 91.3%.
 
     `Rng::new(n)` on the port and `n` calls of `seg4:0x1E86` here are the same
     thing -- the engine's only kind of seeding is to discard values -- so the
@@ -780,8 +780,8 @@ def seqpass_shape():
 
     `tools/reach.py` is where the numbers come from and `JC_CAP`,
     `JC_PASSSEEDS` and `JC_WIDESEEDS` re-derive them. Of the ADS instructions
-    the dispatcher can see, varying the first six scenes reaches 55.0% and
-    varying every scene reaches 84.3%, because a guard on a scene the case
+    the dispatcher can see, varying the first six scenes reaches 56.6% and
+    varying every scene reaches 86.8%, because a guard on a scene the case
     list never touched cannot fire. Setting them all at once as well, and
     varying the draw, reaches 99.4%: a block whose guard is a conjunction
     needs more than one scene in the right state at the same time -- `1420`

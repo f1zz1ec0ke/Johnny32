@@ -216,10 +216,10 @@ at `ds:0x2638`; `A064` walks it and draws it back. Six of that table's eight
 opcodes are never used at all, and these two are used once each, in
 `GJGULIVR.TTM`, with the same rectangle.
 
-Three opcodes that look like they should do something do not, in this build:
-`0xC051` is `PLAY_SOUND` (535 call sites, and the screensaver ships no audio),
-and `0xA601` and `0x4214` have empty handlers despite 6,874 call sites between
-them.
+`0xC051` is `PLAY_SOUND`, with 535 call sites; the sounds it names are
+resources inside `SCRANTIC.EXE`, not the archive. Two opcodes that look like
+they should do something do not: `0xA601` and `0x4214` have empty handlers
+despite 6,874 call sites between them.
 
 ### ADS
 

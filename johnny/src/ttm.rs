@@ -117,7 +117,8 @@ pub enum Op {
     DrawLine { x1: i16, y1: i16, x2: i16, y2: i16 },
     /// Draw a rectangle at (x, y) of the given size, filled or outlined.
     DrawRect { x: i16, y: i16, w: i16, h: i16, filled: bool },
-    /// Draw an ellipse in the given bounding box, filled or outlined.
+    /// `A404`/`A424`: a circle, filled or outlined. The operands are a box,
+    /// but the handler only reads its height; see `Surface::draw_circle`.
     DrawEllipse { x: i16, y: i16, w: i16, h: i16, filled: bool },
     /// Set the drawing colours: foreground then background. `seg12:0x06A9`
     /// stores them on the scene instance and mirrors them into the globals
@@ -125,14 +126,10 @@ pub enum Op {
     SetColors { fg: u8, bg: u8 },
     /// Trigger sound effect `n`. `seg12:0x0063` hands it to `seg5:0x00BA`,
     /// which indexes a 25-entry table of loaded sounds and is gated on the
-    /// `Sounds` setting in `SCRANTIC.INI`. This release ships no audio at all,
-    /// so it does nothing here -- but the cues are in the scripts, 535 of them,
-    /// ready for a release that has the WAVs.
+    /// `Sounds` setting in `SCRANTIC.INI`. The sounds are resources inside
+    /// `SCRANTIC.EXE` (see `crate::sound`); the stage queues the id and the
+    /// host plays it.
     PlaySound(u16),
-    /// The `A014`..`A094` and `A0B5` region family, dispatched at
-    /// `seg12:0x02F6` into `seg7:0x1510` with the opcode, a rectangle and a
-    /// mode. Two of them appear once each in the shipped scripts, so what
-    /// each variant draws is not pinned down yet.
     /// The region family, from the second draw table at `seg12:0x1900`.
     ///
     /// Only two of the eight are ever used, and only once each, in
@@ -147,10 +144,8 @@ pub enum Op {
         w: i16,
         h: i16,
     },
-    /// `B606`: six operands into `seg8:0x06CE` at `seg12:0x0EBE`, with two of
-    /// them converted first. A region copy of some kind; four call sites in
-    /// the whole corpus.
-    /// Copy a rectangle from one page to another: `(x, y, w, h, from, to)`.
+    /// `B606`: copy a rectangle from one page to another, as
+    /// `(x, y, w, h, from, to)`.
     ///
     /// `seg12:0x0EB4` resolves the page ids through `seg12:0x14E0` -- 0 is the
     /// working page, 1 the composite, 2 the island backdrop -- and hands the
@@ -464,7 +459,6 @@ pub struct Stage {
     /// Current drawing colours, for the vector opcodes.
     pub fg: u8,
     pub bg: u8,
-    /// Drives `SetRandomDelay`.
     /// The generator, and there is only one of it.
     ///
     /// `seg4:0x1E86` is a single static state that everything in the engine
@@ -1122,7 +1116,10 @@ impl Instance {
                     stage.loads += 1;
                     if let Some(body) = archive.get(&name) {
                         if let Ok(p) = dgds::read_palette(body) {
-                            stage.palette = p;
+                            // Through `set_palette`, so the colour buffer's
+                            // lookup table follows the palette the script
+                            // loaded and not only the one the director set.
+                            stage.set_palette(p);
                         }
                     }
                 }
@@ -1254,8 +1251,6 @@ impl Instance {
                     }
                 }
                 Op::SceneMarker { .. } | Op::SetBackground(_) | Op::NoOp(_) => {}
-                // Known, named, and not yet drawn. Counted rather than
-                // silently skipped so they stay visible.
                 // The record half. Nothing to do: this port repaints the
                 // whole background every tick, so what it saves is never lost.
                 // It is still subject to the same guard as the restore half --
@@ -1301,6 +1296,8 @@ impl Instance {
                     from,
                     to,
                 } => {
+                    // The one form the data uses: put a piece of the island
+                    // backdrop (page 2) back onto the composite (page 1).
                     if from == 2 && to == 1 {
                         let mark = Mark::Restore {
                             x: x as i32,

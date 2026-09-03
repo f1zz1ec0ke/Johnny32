@@ -43,27 +43,15 @@ pub const STORY_DAYS: u8 = 11;
 /// `ds:0x2E72` and counts down the five delay slots.
 pub const MS_PER_TICK: u32 = 16;
 
-/// Milliseconds per tick, once the speed setting is applied.
+/// The default `Speed` setting: a percentage of the authored frame rate.
 ///
-/// The port runs the data at the rate it was authored for, and that is
-/// measurably right: `SJGLIMPS.TTM` scene 17 asks for 133 ticks of delay
-/// across its twenty frames and the port takes 134. But a 386 could not hold
-/// 62.5 passes a second -- the engine has a speed index at `ds:0x30BE` for
-/// exactly that reason, and skipped passes push each frame's deadline later --
-/// so the screensaver most people remember ran slower than its own data.
-///
-/// `Speed` in the settings file is a percentage of the authored rate, and the
-/// default is 100: the data runs exactly as written.
-///
-/// It was 60 for a while, on the reasoning that a 386 could not hold 62.5
-/// passes a second -- the engine has a speed index at `ds:0x30BE` for exactly
-/// that reason, and skipped passes push each frame's deadline later -- so the
-/// screensaver most people remember ran slower than its own data. That was a
-/// guess at a machine, made when much less of the timing was pinned down, and
-/// the timing is now pinned down: `tools/oracle.py tick` compares this port's
-/// frame-by-frame scheduling against `seg10:0x1ACB` itself and they agree to
-/// the tick. Slowing the whole thing to 60% of that is not fidelity to
-/// anything, it is a preference -- so it is a setting rather than a default.
+/// 100 runs the data exactly as written, and `tools/oracle.py tick` confirms
+/// the port's frame timing matches `seg10:0x1ACB` tick for tick. Many people
+/// remember the screensaver running slower, because a 386 could not hold
+/// 62.5 passes a second and the engine's frame gate re-arms each deadline
+/// from the moment it missed rather than catching up. That is a property of
+/// the hardware, not the data, so slowing down is a setting rather than the
+/// default.
 pub const DEFAULT_SPEED: u32 = 100;
 
 pub fn ms_per_tick_at(speed: u32) -> u32 {
@@ -92,10 +80,8 @@ pub const WALK_TICKS_PER_WAYPOINT: u32 = 4;
 /// the port has misread, so a bad scene costs three minutes rather than the
 /// rest of the session.
 ///
-/// The scene table's `cost` field is deliberately not used for this. The
-/// chooser compares `cost / 2` against a ceiling when picking (`seg4:0x0D76`),
-/// which makes it a price rather than a duration; what it is a price *in* is
-/// still an open question.
+/// The scene table's `cost` field is not a duration: the queue builder spends
+/// it out of a budget of 300 (`seg4:0x08B9`), and nothing times a scene by it.
 pub const MAX_SCENE_TICKS: u32 = 180 * TICKS_PER_SECOND;
 
 /// Category masks the chooser is called with, from the four call sites in
@@ -662,18 +648,9 @@ pub fn civil_from_days(days: u32) -> (u16, u8, u8) {
     (year as u16, month, day)
 }
 
-/// Days since the epoch back to a calendar month and day, which is what the
-/// holiday check wants.
+/// Just the month and day, which is what the holiday check wants.
 pub fn month_and_day(days: u32) -> (u8, u8) {
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
-    let _ = era;
+    let (_, month, day) = civil_from_days(days);
     (month, day)
 }
 
@@ -871,12 +848,9 @@ impl Director {
 
     /// Does this scene's declared position match where Johnny is?
     ///
-    /// `seg4:0x0B64` treats a major of 0 as "don't care", which is what the
-    /// `(0, 0)` entries in the table mean.
-    /// `seg4:0x0B64`: a required major of 0 means anywhere, and a required
-    /// minor of -1 means any spot within that area. The two are tested
-    /// independently -- no scene in the table uses the minor wildcard, but the
-    /// engine allows it.
+    /// `seg4:0x0B64`: a required area of 0 means anywhere, and a required
+    /// facing of -1 means any facing. No scene in the table uses the facing
+    /// wildcard, but the engine allows it.
     fn position_ok(&self, scene: &Scene) -> bool {
         let (major, minor) = scene.from;
         // A required area of 0 is anywhere, and there is nowhere to walk to,
@@ -1453,18 +1427,15 @@ impl Director {
         }
     }
 
-    /// Lay down the island and the palette.
+    /// Lay down the island and the palette: `seg3:0x0136`, which is run once
+    /// per queue.
     ///
-    /// `seg3:0x01E7` picks the sea: `NIGHT.SCR` once the phase reaches 12,
-    /// otherwise one of `OCEAN00/01/02.SCR` at random, and `seg3:0x0262`
-    /// blits `BACKGRND.BMP` over it at the island position.
-    ///
-    /// Those four screens are 640x480 and use palette index 0 — the
-    /// transparency key — across thousands of pixels, so they are the VGA
-    /// mode's animated sea drawn over something else rather than a backdrop in
-    /// their own right. Working that out properly is still to do. Until then
-    /// this uses `ISLETEMP.SCR`, the 640x350 island backdrop that the scenes
-    /// themselves load, so the geometry matches what the sprites expect.
+    /// The random draws come in the engine's order, because the generator is
+    /// one stream and where each value lands in it matters: `seg3:0x01F5`
+    /// picks the ocean, in daylight and not for a cutaway; `seg3:0x0226`
+    /// flips for the sandbar, unless a scene in the queue said no rock;
+    /// `seg3:0x1B00` places the island; `seg3:0x0A38` sets the sky up; and
+    /// `seg3:0x040E(1)` runs the backdrop pass once.
     pub fn load_scenery(&mut self, archive: &Archive) {
         if let Some(body) = archive.get("JOHNCAST.PAL") {
             if let Ok(p) = dgds::read_palette(body) {
@@ -1472,14 +1443,10 @@ impl Director {
             }
         }
         // `seg3:0x01E7`: night by the clock, or because a scene in the queue
-        // asked for it.
+        // asked for it. A cutaway clears the screen instead (`seg3:0x01C4`)
+        // and makes no draw at all.
         self.scenery_night = self.is_night() || self.backdrop.night;
-        // Two separate draws, in the order segment 3 makes them, because the
-        // generator is a stream and where each value lands in it matters.
-        // `seg3:0x01F5` picks the ocean and only runs in daylight;
-        // `seg3:0x0226` flips for the sandbar, and only if no scene in the
-        // queue already said no rock.
-        let sea = if self.scenery_night {
+        let sea = if self.scenery_night || self.backdrop.cutaway {
             scenery::NIGHT_SEA
         } else {
             scenery::SEAS[self.stage.rng.below(3) as usize]
@@ -1490,11 +1457,12 @@ impl Director {
                 let mut s = s;
                 s.set_palette(*self.stage.palette());
                 s.set_story(archive, self.day, self.backdrop, self.holiday.map(|h| h.index()));
-                s.start_sky(&mut self.stage.rng);
                 // `seg3:0x0233`: the island is dropped where this queue's
                 // scenes are willing to have it, and everything drawn against
                 // it moves with it.
                 s.place(self.island_state, &mut self.stage.rng);
+                s.start_sky(&mut self.stage.rng);
+                s.setup(self.tick, &mut self.stage.rng);
                 self.note(format!(
                     "scenery: {}{} at {:?}",
                     s.sea,
@@ -1518,21 +1486,21 @@ impl Director {
         self.stage.restore_background();
     }
 
-    /// Advance one tick. Returns true if the surface changed.
+    /// Advance one tick: `seg4:0x06BF`. Returns true if the surface changed.
     pub fn tick(&mut self, archive: &Archive) -> bool {
         self.tick += 1;
-        // The backdrop is laid down when a queue is built and not before:
-        // where the island goes depends on what that queue's scenes want.
+        // `seg4:0x06D4`: when the queue has run out, build another one before
+        // anything else. The clock only moves here, so a queue plays out in
+        // the light it started in. The backdrop is laid down as part of it,
+        // because where the island goes depends on what the queue wants.
+        if matches!(self.activity, Activity::Idle) && self.cursor >= self.queue.len() {
+            self.queue_spent = true;
+            self.next_queue(archive);
+        }
+        // `seg4:0x070E`: the backdrop pass, every tick.
         let surf = self.step_surf();
         let acted = match std::mem::replace(&mut self.activity, Activity::Idle) {
             Activity::Idle => {
-                // `seg4:0x06D4`: take the next entry, and when there is none
-                // left build another queue. The clock only moves here, so a
-                // queue plays out in the light it started in.
-                if self.cursor >= self.queue.len() {
-                    self.queue_spent = true;
-                    self.next_queue(archive);
-                }
                 match self.queue.get(self.cursor).copied() {
                     Some(s) => {
                         self.cursor += 1;

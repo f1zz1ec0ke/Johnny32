@@ -31,9 +31,8 @@ path = "src/bin/jcplay.rs"
 name = "jcrender"
 path = "src/bin/jcrender.rs"
 
-# Checking it. `jcisle` is run by `tools/check.sh`; it was building only
-# because Cargo discovers `src/bin` on its own, which would have stopped
-# quietly the day anyone set `autobins = false`.
+# Checking it: the oracle's port side, and the island against the engine's
+# own render of it.
 [[bin]]
 name = "jcoracle"
 path = "src/bin/jcoracle.rs"
