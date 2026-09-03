@@ -8,9 +8,8 @@
 #
 # Each piece is one oracle query, or one source of `reach.py`, at the deep
 # case lists -- with the `tick` and `seqrun` queries and sources split per
-# `.ADS` file, because at the deep tier those are the long ones. A piece that
-# finishes
-# leaves a `.log` and, if it passed, an `.ok` marker; a piece with a marker
+# `.ADS` file, because at the deep tier those are the long ones. A piece
+# that finishes leaves a `.log` and, if it passed, an `.ok` marker; a piece with a marker
 # is skipped next time, so a run that is cut off picks up where it stopped.
 # Delete the marker to run a piece again.
 #
